@@ -4,6 +4,8 @@ mod api;
 mod catalog;
 mod compat;
 mod config;
+mod context_engine;
+mod context_runtime;
 mod conversation;
 mod conversation_api;
 mod gateway;
@@ -22,8 +24,12 @@ use axum::{
 };
 use catalog::ModelCatalog;
 use config::AppConfig;
+use context_engine::ContextEngine;
 use conversation::ConversationStore;
-use conversation_api::{create_thread, delete_thread, get_thread, list_threads, send_thread_message};
+use conversation_api::{
+    compact_thread_context, create_thread, delete_thread, get_thread, get_thread_context,
+    list_threads, send_thread_message,
+};
 use gateway::Gateway;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -50,6 +56,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     catalog.seed_from_config().await?;
     let conversations = Arc::new(ConversationStore::connect(config.clone()).await?);
     let gateway = Arc::new(Gateway::new(config.clone(), catalog.clone())?);
+    let context_engine = Arc::new(
+        ContextEngine::connect(
+            config.clone(),
+            conversations.clone(),
+            catalog.clone(),
+            gateway.clone(),
+        )
+        .await?,
+    );
+    context_runtime::install(context_engine)
+        .map_err(|_| "context engine was already initialized")?;
+
     let state = AppState {
         gateway,
         catalog,
@@ -71,6 +89,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/v1/threads/{thread_id}/messages",
             post(send_thread_message),
+        )
+        .route(
+            "/v1/threads/{thread_id}/context",
+            get(get_thread_context),
+        )
+        .route(
+            "/v1/threads/{thread_id}/compact",
+            post(compact_thread_context),
         )
         .route("/_llmgateway/health", get(health))
         .route("/_llmgateway/models", get(admin_models))
