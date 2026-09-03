@@ -1,6 +1,9 @@
 mod admin;
 mod admin_api;
 mod api;
+mod browser_session;
+mod browser_session_api;
+mod browser_session_runtime;
 mod catalog;
 mod compat;
 mod config;
@@ -33,6 +36,11 @@ use api::{
 use axum::{
     routing::{get, post},
     Router,
+};
+use browser_session::{BrowserConfig, BrowserSessionStore};
+use browser_session_api::{
+    begin_browser_login, complete_browser_login, get_browser_session, list_browser_sessions,
+    require_browser_attention, reset_browser_session, verify_browser_session,
 };
 use catalog::ModelCatalog;
 use config::AppConfig;
@@ -71,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path =
         env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
     let usage_config = UsageConfig::load_from_gateway_config(&config_path)?;
+    let browser_config = BrowserConfig::load_from_gateway_config(&config_path)?;
     let config = Arc::new(AppConfig::load(&config_path)?);
     let gateway_api_key = Arc::new(config.gateway_api_key()?);
 
@@ -81,6 +90,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let quota_usage = Arc::new(QuotaUsageStore::connect(config.clone(), usage_config).await?);
     quota_usage_runtime::install(quota_usage)
         .map_err(|_| "quota usage store was already initialized")?;
+
+    let browser_sessions = Arc::new(BrowserSessionStore::connect(config.clone(), browser_config).await?);
+    let browser_session_count = browser_sessions.summary().await?.sessions.len();
+    browser_session_runtime::install(browser_sessions)
+        .map_err(|_| "browser session store was already initialized")?;
+    if browser_session_count > 0 {
+        info!(browser_session_count, "browser session registry enabled");
+    }
 
     let gateway = Arc::new(Gateway::new(config.clone(), catalog.clone())?);
     let context_engine = Arc::new(
@@ -156,6 +173,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/_llmgateway/accounts/{account_id}/quota/reset",
             post(reset_account_quota),
+        )
+        .route("/_llmgateway/browser-sessions", get(list_browser_sessions))
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}",
+            get(get_browser_session),
+        )
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}/login/start",
+            post(begin_browser_login),
+        )
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}/login/complete",
+            post(complete_browser_login),
+        )
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}/verify",
+            post(verify_browser_session),
+        )
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}/attention",
+            post(require_browser_attention),
+        )
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}/reset",
+            post(reset_browser_session),
         )
         .with_state(state)
         .layer(TraceLayer::new_for_http())
