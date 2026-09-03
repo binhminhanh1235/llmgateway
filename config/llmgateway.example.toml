@@ -21,6 +21,13 @@ summary_input_tokens = 12000
 summary_max_tokens = 1200
 # summary_model = "llmgateway-auto" # optional; defaults to the thread/requested model
 
+# v0.7 retrieval rehydrates relevant excerpts from the older transcript represented by a checkpoint.
+# The first scorer is local lexical-v1, so no embedding service is required.
+retrieval_enabled = true
+retrieval_top_k = 4
+retrieval_max_tokens = 2000
+retrieval_min_score = 0.08
+
 # Providers describe protocols/endpoints. models_path is used by model discovery.
 [[providers]]
 id = "openrouter"
