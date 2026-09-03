@@ -1,8 +1,8 @@
 # llmgateway
 
-A local-first universal LLM gateway written in Rust. Point coding agents and OpenAI/Anthropic-compatible clients at one endpoint, or use the built-in local chat UI, while llmgateway selects account/model routes, keeps conversation state, compiles long-running context, and fails over when an upstream becomes unavailable or rate-limited.
+A local-first universal LLM gateway written in Rust. Point coding agents and OpenAI/Anthropic-compatible clients at one endpoint, or use the built-in local chat UI, while llmgateway selects account/model routes, keeps durable conversation state, compiles long-running context, and fails over when an upstream becomes unavailable or rate-limited.
 
-## What exists in v0.5
+## What exists in v0.6
 
 - OpenAI-compatible `POST /v1/chat/completions`
 - OpenAI-compatible `POST /v1/responses` for clients such as Codex
@@ -12,11 +12,16 @@ A local-first universal LLM gateway written in Rust. Point coding agents and Ope
 - Stateful `previous_response_id` for Responses API chains
 - Sticky route affinity per persistent thread and Responses chain
 - Context Engine with token estimation and per-model budgets
-- Rolling conversation-memory checkpoints
+- Structured Memory IR with schema-versioned SQLite snapshots
+- Memory sections for facts, decisions, constraints, user preferences, entities, code context, open questions, and a rolling summary
+- Rolling checkpoints rendered from structured memory
 - Automatic compaction before persistent-thread requests exceed their configured context budget
-- Recent messages kept verbatim while older turns are summarized
+- Recent messages kept verbatim while older turns are represented by memory
+- Tool-call/tool-result exchanges kept atomic during compaction and trimming
+- Current user turns included in context-budget fitting
 - Manual context inspection and compaction APIs
-- Full original transcript retained even after compaction
+- Dedicated structured-memory inspection API
+- Full original transcript retained even after repeated compaction
 - Multi-provider and multi-account configuration
 - SQLite-backed model catalog and per-account model discovery
 - Enable/disable a model for an individual account
@@ -26,7 +31,6 @@ A local-first universal LLM gateway written in Rust. Point coding agents and Ope
 - Ordered failover and route cooldown for 401/403/429/5xx responses
 - OpenAI SSE passthrough and Anthropic SSE translation
 - Embedded local chat/admin UI with no frontend build step
-- Local UI backed by server-side SQLite threads
 - Example configurations for Claude Code, Codex, and OpenCode
 
 The gateway currently uses OpenAI Chat Completions as the common upstream protocol. OpenAI Responses and Anthropic Messages are translated into that shape before routing.
@@ -51,7 +55,13 @@ Local UI ───── Thread API ─────────┤
           immutable transcript          account availability
                    │                             │
              Context Engine                     │
-       checkpoint + recent turns                │
+                   │                             │
+          Structured Memory IR                  │
+   facts / decisions / constraints              │
+ preferences / entities / code / TODOs          │
+                   │                             │
+          rendered checkpoint                   │
+              + recent turns                    │
                    └──────────────┬──────────────┘
                                   │
                            route planning
@@ -61,6 +71,8 @@ Local UI ───── Thread API ─────────┤
         Gemini acct A        Qwen acct A        OpenRouter
         Gemini acct B        Qwen acct B        other APIs
 ```
+
+The important ownership rule is simple: the conversation belongs to llmgateway, not to a provider-native chat ID. Models are execution engines for turns; the durable thread and memory remain stable when routes change.
 
 ## Quick start
 
@@ -86,19 +98,17 @@ data/llmgateway.db
 
 ## Context Engine
 
-Persistent threads no longer send the complete transcript blindly on every turn. llmgateway estimates the input size and builds an execution context from:
+Persistent threads do not send the complete transcript blindly on every turn. llmgateway estimates the input size and builds execution context from:
 
 ```text
-Conversation memory checkpoint
+Structured memory checkpoint
         +
 Recent verbatim messages
         +
 Current user message
 ```
 
-The original messages remain untouched in `thread_messages`. A checkpoint only changes what is sent to the next model.
-
-This means a long conversation can move from Gemini to Qwen or another route without depending on a provider-native conversation ID.
+The original messages remain untouched in `thread_messages`. Compaction changes only what is sent to the next model.
 
 ### Default context configuration
 
@@ -116,39 +126,90 @@ summary_max_tokens = 1200
 
 `target_tokens` is llmgateway's conservative input budget. When a selected physical model has a smaller discovered context window, llmgateway lowers the usable budget and reserves `reserve_output_tokens` for generation.
 
-If `summary_model` is omitted, the requested/thread model is used to create checkpoints. The summarizer is routed through the same gateway and can therefore use the normal account pool and failover logic.
+If `summary_model` is omitted, the requested/thread model creates memory checkpoints. The memory compiler is routed through the same gateway and therefore benefits from the normal account pool, sticky-route affinity, and failover behavior.
 
-### Context status
+## Structured Memory IR
+
+v0.6 stores a schema-versioned memory snapshot separately from the immutable transcript and checkpoint history. The current schema is:
+
+```json
+{
+  "facts": [],
+  "decisions": [],
+  "constraints": [],
+  "user_preferences": [],
+  "entities": [],
+  "code_context": [],
+  "open_questions": [],
+  "rolling_summary": ""
+}
+```
+
+The model is asked to update the full structured snapshot when a checkpoint advances. llmgateway normalizes and deduplicates list items before persisting the snapshot to `thread_memories`.
+
+If a provider returns malformed/non-JSON memory output, compaction does not discard the previous structured fields. llmgateway keeps the existing snapshot and falls back to using the returned text as the rolling summary.
+
+Each structured snapshot records:
+
+```text
+thread_id
+through_ordinal
+schema_version
+memory JSON
+model
+route_id
+updated_at
+```
+
+The rendered checkpoint remains plain provider-independent text so older code paths and arbitrary upstream models do not need to understand the internal JSON schema.
+
+### Inspect structured memory
+
+```bash
+curl http://127.0.0.1:7331/v1/threads/<thread_id>/memory \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
+```
+
+Example:
+
+```json
+{
+  "thread_id": "thread_...",
+  "memory": {
+    "through_ordinal": 46,
+    "schema_version": 1,
+    "model": "llmgateway-auto",
+    "route_id": "qwen-coder",
+    "memory": {
+      "facts": ["The gateway is implemented in Rust"],
+      "decisions": ["Keep SQLite as the local source of truth"],
+      "constraints": ["Never delete the full transcript during compaction"],
+      "user_preferences": ["Prefer local-first operation"],
+      "entities": ["llmgateway", "ContextEngine"],
+      "code_context": ["thread_memories stores schema-versioned JSON"],
+      "open_questions": ["Which retrieval strategy should v0.7 use?"],
+      "rolling_summary": "The project is building provider-independent durable context."
+    }
+  }
+}
+```
+
+Before the first checkpoint, `memory` is `null`.
+
+## Context status
 
 ```bash
 curl http://127.0.0.1:7331/v1/threads/<thread_id>/context \
   -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
 ```
 
-Example shape:
-
-```json
-{
-  "thread_id": "thread_...",
-  "state": "compressed",
-  "source_tokens": 41280,
-  "prepared_tokens": 11840,
-  "budget_tokens": 16000,
-  "trigger_tokens": 13600,
-  "checkpoint": {
-    "through_ordinal": 46,
-    "summary": "...",
-    "summary_model": "llmgateway-auto",
-    "route_id": "qwen-coder"
-  }
-}
-```
+The response includes source/prepared token estimates, the active checkpoint, and the current structured-memory snapshot.
 
 States are:
 
 - `full`: transcript currently fits without a checkpoint
 - `needs_compaction`: the estimated transcript has crossed the trigger and no usable checkpoint exists yet
-- `compressed`: an earlier segment is represented by a durable checkpoint
+- `compressed`: an earlier segment is represented by durable memory/checkpoint state
 
 ### Force a checkpoint
 
@@ -159,7 +220,7 @@ curl -X POST http://127.0.0.1:7331/v1/threads/<thread_id>/compact \
   -d '{}'
 ```
 
-You may optionally choose the model used for that compaction:
+You may optionally choose the model used for compaction:
 
 ```json
 {"model":"llmgateway-best"}
@@ -177,20 +238,6 @@ x-llmgateway-route: <actual route>
 ```
 
 These headers are optional diagnostics. Clients do not need to understand them.
-
-## Local UI
-
-Open:
-
-```text
-http://127.0.0.1:7331/
-```
-
-The UI uses the persistent thread API. A brand-new chat stays as an in-browser draft until the first message is sent. At that point the gateway creates a server thread and SQLite becomes the source of truth for its history.
-
-The UI supports persistent chat threads, streaming, virtual/physical model selection, automatic account selection, sticky routing, failover, route display, model discovery, and account/model enable-disable controls.
-
-When upgrading from v0.3, the UI can import old browser-local chat history into SQLite when the server has no persistent threads yet.
 
 ## Persistent Thread API
 
@@ -220,7 +267,7 @@ curl http://127.0.0.1:7331/v1/threads/<thread_id> \
   -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
 ```
 
-Send a message while letting llmgateway own the context:
+Send a message while letting llmgateway own context:
 
 ```bash
 curl -N -X POST http://127.0.0.1:7331/v1/threads/<thread_id>/messages \
@@ -242,7 +289,19 @@ curl -X DELETE http://127.0.0.1:7331/v1/threads/<thread_id> \
   -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
 ```
 
-`POST /v1/threads` also accepts an optional `messages` array, used by the UI to import v0.3 local history.
+`POST /v1/threads` also accepts an optional `messages` array, used by the UI to import older browser-local history.
+
+## Local UI
+
+Open:
+
+```text
+http://127.0.0.1:7331/
+```
+
+The UI uses the persistent thread API. A brand-new chat stays as an in-browser draft until the first message is sent. At that point the gateway creates a server thread and SQLite becomes the source of truth for its history.
+
+The UI supports persistent chat threads, streaming, virtual/physical model selection, automatic account selection, sticky routing, failover, route display, model discovery, and account/model enable-disable controls.
 
 ## Responses API state
 
@@ -373,20 +432,23 @@ Retryable statuses currently include 401, 403, 408, 409, 429, and common 5xx fai
 
 ## Context design guarantees
 
-1. Compaction never deletes the original thread transcript.
-2. Recent messages are kept verbatim after a checkpoint.
-3. A checkpoint is model/provider independent text memory and can be handed to a different route.
-4. If the prepared history must be trimmed further, the latest turn is preserved even when that slightly exceeds the configured budget.
-5. A checkpoint records which model/route produced it for diagnostics, but does not depend on that route later.
+1. Compaction never deletes or rewrites the original thread transcript.
+2. Recent messages remain verbatim after a checkpoint.
+3. Durable memory is provider independent and can be handed to a different route on the next turn.
+4. Tool calls and their tool results are treated as atomic context groups so compaction/trimming does not create orphan tool results.
+5. The current user turn participates in context-budget fitting and is preserved as the latest atomic group.
+6. Memory snapshots and checkpoints record the model/route that produced them for diagnostics, but do not depend on that route later.
+7. Repeated compaction advances `through_ordinal` while the immutable transcript remains complete.
 
 ## Roadmap
 
-1. Structured checkpoint memory (`facts`, `decisions`, `open_questions`, `code_context`) and semantic retrieval.
-2. Persistent quota-domain and usage tracking.
-3. Browser-session accounts using isolated persistent profiles.
-4. Cost, latency, capability, and context-aware route scoring.
-5. Per-client API keys, budgets, and routing policies.
-6. Context/route explanations and usage dashboards in the local UI.
+1. Semantic retrieval over structured memory and older transcript segments.
+2. Memory provenance, confidence, pinning, and deterministic conflict handling.
+3. Persistent quota-domain and usage tracking.
+4. Browser-session accounts using isolated persistent profiles.
+5. Cost, latency, capability, quota, and context-aware route scoring.
+6. Per-client API keys, budgets, and routing policies.
+7. Context/memory/route explanations and usage dashboards in the local UI.
 
 ## License
 
