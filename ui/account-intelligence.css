@@ -1,0 +1,60 @@
+.account-intelligence-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.account-intel-chip,
+.account-intel-detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.account-intel-chip {
+  font-weight: 720;
+}
+
+.account-intel-detail {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.account-intel-chip.transport-browser {
+  background: color-mix(in srgb, #8b5cf6 12%, var(--surface));
+  border-color: color-mix(in srgb, #8b5cf6 30%, var(--border));
+}
+
+.account-intel-chip.transport-api {
+  background: color-mix(in srgb, #0ea5e9 10%, var(--surface));
+  border-color: color-mix(in srgb, #0ea5e9 28%, var(--border));
+}
+
+.account-intel-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.account-intel-chip.state-healthy { color: #15803d; }
+.account-intel-chip.state-working { color: #0369a1; }
+.account-intel-chip.state-warning { color: #a16207; }
+.account-intel-chip.state-danger { color: #b91c1c; }
+.account-intel-chip.state-muted { color: var(--muted); }
+
+@media (prefers-color-scheme: dark) {
+  .account-intel-chip.state-healthy { color: #86efac; }
+  .account-intel-chip.state-working { color: #7dd3fc; }
+  .account-intel-chip.state-warning { color: #fde68a; }
+  .account-intel-chip.state-danger { color: #fca5a5; }
+}
