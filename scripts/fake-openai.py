@@ -51,6 +51,24 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
+        auth = self.headers.get("authorization", "")
+        if "quota429" in auth:
+            payload = json.dumps({
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": "fake quota exhausted for primary account",
+                }
+            }).encode()
+            self.send_response(429)
+            self.send_header("content-type", "application/json")
+            self.send_header("retry-after", "120")
+            self.send_header("x-ratelimit-remaining-requests", "0")
+            self.send_header("x-ratelimit-remaining-tokens", "0")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         messages = body.get("messages", [])
         system_text = "\n".join(
             str(message.get("content", ""))
@@ -78,6 +96,8 @@ class Handler(BaseHTTPRequestHandler):
         if body.get("stream"):
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
+            self.send_header("x-ratelimit-remaining-requests", "99")
+            self.send_header("x-ratelimit-remaining-tokens", "9999")
             self.end_headers()
             chunk = {
                 "id": "chatcmpl_fake",
@@ -114,6 +134,8 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
+        self.send_header("x-ratelimit-remaining-requests", "99")
+        self.send_header("x-ratelimit-remaining-tokens", "9999")
         self.send_header("content-length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
