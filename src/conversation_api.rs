@@ -5,6 +5,8 @@ use crate::{
     conversation::{openai_stream_with_capture, ConversationError},
     embedding_runtime,
     gateway::GatewayError,
+    memory_provenance::{inject_pinned_memory, MemoryProvenanceError},
+    memory_provenance_runtime,
     semantic_retrieval::{
         augment_messages_with_retrieval, estimate_json_messages_tokens, retrieve_relevant_history,
         RetrievalResult,
@@ -166,7 +168,16 @@ pub async fn compact_thread_context(
         }
     };
     match engine.compact(&thread_id, body.model.as_deref()).await {
-        Ok(status) => json_response(StatusCode::OK, json!(status), None),
+        Ok(status) => {
+            if let (Some(store), Some(snapshot)) =
+                (memory_provenance_runtime::get(), status.memory.as_ref())
+            {
+                if let Err(error) = store.sync_snapshot(snapshot).await {
+                    return memory_provenance_error(error);
+                }
+            }
+            json_response(StatusCode::OK, json!(status), None)
+        }
         Err(error) => context_error(error),
     }
 }
@@ -210,6 +221,33 @@ pub async fn send_thread_message(
         Err(error) => return context_error(error),
     };
 
+    let mut pinned_memory = false;
+    if let Some(store) = memory_provenance_runtime::get() {
+        if prepared.checkpoint.is_some() {
+            match engine.memory_snapshot(&thread_id).await {
+                Ok(Some(snapshot)) => {
+                    if let Err(error) = store.sync_snapshot(&snapshot).await {
+                        return memory_provenance_error(error);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => return context_error(error),
+            }
+        }
+        match store.pinned_prompt(&thread_id).await {
+            Ok(Some(prompt)) => {
+                prepared.estimated_prepared_tokens = inject_pinned_memory(
+                    &mut prepared.messages,
+                    &prompt,
+                    prepared.budget_tokens,
+                );
+                pinned_memory = true;
+            }
+            Ok(None) => {}
+            Err(error) => return memory_provenance_error(error),
+        }
+    }
+
     let mut retrieved_chunks = 0usize;
     let mut retrieval_backend = "local";
     if state.gateway.config.context.retrieval_enabled {
@@ -238,38 +276,39 @@ pub async fn send_thread_message(
                         state.gateway.config.context.retrieval_min_score,
                     )
                 };
-                let retrieval: RetrievalResult = if state.gateway.config.context.retrieval_backend == "hybrid" {
-                    match embedding_runtime::get() {
-                        Some(retriever) => match retriever
-                            .retrieve(
-                                &thread_id,
-                                &detail.messages,
-                                checkpoint.through_ordinal,
-                                &user_message,
-                                state.gateway.config.context.retrieval_max_chunks,
-                                retrieval_budget,
-                                state.gateway.config.context.retrieval_min_score,
-                            )
-                            .await
-                        {
-                            Ok(result) => {
-                                retrieval_backend = "hybrid";
-                                result
-                            }
-                            Err(error) => {
-                                warn!(%thread_id, %error, "hybrid retrieval failed; falling back to lexical retrieval");
+                let retrieval: RetrievalResult =
+                    if state.gateway.config.context.retrieval_backend == "hybrid" {
+                        match embedding_runtime::get() {
+                            Some(retriever) => match retriever
+                                .retrieve(
+                                    &thread_id,
+                                    &detail.messages,
+                                    checkpoint.through_ordinal,
+                                    &user_message,
+                                    state.gateway.config.context.retrieval_max_chunks,
+                                    retrieval_budget,
+                                    state.gateway.config.context.retrieval_min_score,
+                                )
+                                .await
+                            {
+                                Ok(result) => {
+                                    retrieval_backend = "hybrid";
+                                    result
+                                }
+                                Err(error) => {
+                                    warn!(%thread_id, %error, "hybrid retrieval failed; falling back to lexical retrieval");
+                                    retrieval_backend = "local-fallback";
+                                    local()
+                                }
+                            },
+                            None => {
                                 retrieval_backend = "local-fallback";
                                 local()
                             }
-                        },
-                        None => {
-                            retrieval_backend = "local-fallback";
-                            local()
                         }
-                    }
-                } else {
-                    local()
-                };
+                    } else {
+                        local()
+                    };
 
                 if !retrieval.chunks.is_empty() {
                     let mut augmented = prepared.messages.clone();
@@ -350,6 +389,7 @@ pub async fn send_thread_message(
             &prepared,
             retrieved_chunks,
             retrieval_backend,
+            pinned_memory,
         );
     }
 
@@ -376,7 +416,13 @@ pub async fn send_thread_message(
                 }
             }
             let response = json_response(StatusCode::OK, openai, Some(&route_id));
-            with_context_headers(response, &prepared, retrieved_chunks, retrieval_backend)
+            with_context_headers(
+                response,
+                &prepared,
+                retrieved_chunks,
+                retrieval_backend,
+                pinned_memory,
+            )
         }
         Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
     }
@@ -387,6 +433,7 @@ fn with_context_headers(
     prepared: &PreparedContext,
     retrieved_chunks: usize,
     retrieval_backend: &str,
+    pinned_memory: bool,
 ) -> Response<Body> {
     let state = if prepared.compressed { "compressed" } else { "full" };
     if let Ok(value) = HeaderValue::from_str(state) {
@@ -417,6 +464,10 @@ fn with_context_headers(
             .headers_mut()
             .insert("x-llmgateway-retrieval-backend", value);
     }
+    response.headers_mut().insert(
+        "x-llmgateway-pinned-memory",
+        HeaderValue::from_static(if pinned_memory { "yes" } else { "no" }),
+    );
     if let Some(checkpoint) = &prepared.checkpoint {
         if let Ok(value) = HeaderValue::from_str(&checkpoint.id) {
             response
@@ -425,6 +476,22 @@ fn with_context_headers(
         }
     }
     response
+}
+
+fn memory_provenance_error(error: MemoryProvenanceError) -> Response<Body> {
+    match error {
+        MemoryProvenanceError::InvalidCategory(_) | MemoryProvenanceError::InvalidConfidence(_) => {
+            json_error(StatusCode::BAD_REQUEST, "invalid_memory_item", &error.to_string())
+        }
+        MemoryProvenanceError::ItemNotFound(_) => {
+            json_error(StatusCode::NOT_FOUND, "memory_item_not_found", &error.to_string())
+        }
+        MemoryProvenanceError::Database(_) | MemoryProvenanceError::Io(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "memory_provenance_error",
+            &error.to_string(),
+        ),
+    }
 }
 
 fn context_error(error: ContextError) -> Response<Body> {
