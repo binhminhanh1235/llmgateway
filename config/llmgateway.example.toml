@@ -9,6 +9,19 @@ default_model = "llmgateway-auto"
 [storage]
 database_url = "sqlite://data/llmgateway.db"
 
+# Context is compiled before persistent-thread requests are sent upstream.
+# Full transcripts remain in SQLite; checkpoints only replace older turns in the model input.
+[context]
+enabled = true
+target_tokens = 16000
+reserve_output_tokens = 4000
+recent_messages = 12
+compaction_trigger_ratio = 0.85
+min_checkpoint_tokens = 4000
+summary_input_tokens = 12000
+summary_max_tokens = 1200
+# summary_model = "llmgateway-auto" # optional; defaults to the thread/requested model
+
 # Providers describe protocols/endpoints. models_path is used by model discovery.
 [[providers]]
 id = "openrouter"
