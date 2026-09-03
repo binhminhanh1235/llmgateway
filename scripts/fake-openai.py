@@ -11,7 +11,25 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")
         messages = body.get("messages", [])
-        text = f"fake reply messages={len(messages)}"
+        system_text = "\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if message.get("role") == "system"
+        )
+        if "structured memory compiler" in system_text.lower():
+            text = json.dumps({
+                "facts": ["The smoke thread has durable context"],
+                "decisions": ["Use structured memory snapshots"],
+                "constraints": ["Keep the full transcript in SQLite"],
+                "user_preferences": ["Prefer local-first behavior"],
+                "entities": ["llmgateway", "ContextEngine"],
+                "code_context": ["thread_memories stores schema-versioned JSON"],
+                "open_questions": ["What should v0.7 optimize next?"],
+                "rolling_summary": "The thread is validating structured memory compaction end to end."
+            })
+        else:
+            text = f"fake reply messages={len(messages)}"
+
         if body.get("stream"):
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
