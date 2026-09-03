@@ -157,7 +157,7 @@ import json,sys
 x=json.load(sys.stdin)
 assert x["state"] == "compressed", x
 assert x["checkpoint"]["through_ordinal"] == 2, x
-assert x["prepared_tokens"] <= x["source_tokens"], x
+assert x["prepared_tokens"] <= x["budget_tokens"], x
 '
 
 FIRST_RESPONSE=$(curl -fsS -X POST http://127.0.0.1:7331/v1/responses \
