@@ -1,10 +1,14 @@
 use crate::{
     catalog::ModelCatalog,
     config::{AppConfig, RouteConfig},
+    quota_usage_runtime,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -45,18 +49,42 @@ impl Router {
         };
 
         candidates.retain(|route| route.enabled);
-        candidates.sort_by_key(|route| route.priority);
 
         let now = Utc::now();
-        let health = self.health.read().await;
-        candidates.retain(|route| {
-            health
-                .get(&route.id)
-                .and_then(|state| state.cooldown_until.as_ref())
-                .map(|until| until <= &now)
-                .unwrap_or(true)
-        });
+        {
+            let health = self.health.read().await;
+            candidates.retain(|route| {
+                health
+                    .get(&route.id)
+                    .and_then(|state| state.cooldown_until.as_ref())
+                    .map(|until| until <= &now)
+                    .unwrap_or(true)
+            });
+        }
 
+        if let Some(usage) = quota_usage_runtime::get() {
+            let mut scored = Vec::with_capacity(candidates.len());
+            for route in candidates {
+                match usage.route_penalty(&route.account).await {
+                    Ok(Some(penalty)) => scored.push((route, penalty)),
+                    Ok(None) => {
+                        tracing::debug!(
+                            account = %route.account,
+                            route = %route.id,
+                            "quota engine excluded route"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(%error, account = %route.account, "quota scoring failed; keeping route");
+                        scored.push((route, 0));
+                    }
+                }
+            }
+            scored.sort_by_key(|(route, penalty)| route.priority.saturating_add(*penalty));
+            return scored.into_iter().map(|(route, _)| route).collect();
+        }
+
+        candidates.sort_by_key(|route| route.priority);
         candidates
     }
 
@@ -82,7 +110,8 @@ impl Router {
                 && provider_filter.is_none_or(|provider| model.provider == provider)
         }) {
             for binding in model.accounts.into_iter().filter(|binding| {
-                binding.enabled && matches!(binding.availability.as_str(), "available" | "unknown")
+                binding.enabled
+                    && matches!(binding.availability.as_str(), "available" | "unknown")
             }) {
                 let Some(account) = self.config.account(&binding.account_id) else {
                     continue;
