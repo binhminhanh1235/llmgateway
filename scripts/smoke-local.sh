@@ -148,6 +148,16 @@ assert memory["memory"]["code_context"] == ["thread_memories stores schema-versi
 assert memory["memory"]["rolling_summary"].startswith("The thread is validating"), memory
 '
 
+MEMORY_VIEW=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/memory" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$MEMORY_VIEW" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["memory"]["schema_version"] == 1, x
+assert x["memory"]["through_ordinal"] == 2, x
+assert x["memory"]["memory"]["user_preferences"] == ["Prefer local-first behavior"], x
+'
+
 AFTER_COMPACT=$(curl -fsS -X POST \
   "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/messages" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
@@ -165,13 +175,48 @@ assert x["messages"][4]["message"]["content"] == "after compact", x
 assert x["messages"][5]["message"]["content"] == "fake reply messages=4", x
 '
 
+SECOND_COMPACTED=$(curl -fsS -X POST \
+  "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/compact" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{}')
+printf '%s' "$SECOND_COMPACTED" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["checkpoint"]["through_ordinal"] == 4, x
+assert x["memory"]["through_ordinal"] == 4, x
+assert x["memory"]["schema_version"] == 1, x
+assert x["memory"]["memory"]["facts"] == ["The smoke thread has durable context"], x
+assert x["memory"]["memory"]["open_questions"] == ["What should v0.7 optimize next?"], x
+'
+
+AFTER_SECOND_COMPACT=$(curl -fsS -X POST \
+  "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/messages" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"after second compact","stream":false}')
+printf '%s' "$AFTER_SECOND_COMPACT" | grep -q 'fake reply messages=4'
+
+THREAD_FINAL=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$THREAD_FINAL" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert len(x["messages"]) == 8, x
+assert x["messages"][0]["message"]["content"] == "hello thread", x
+assert x["messages"][4]["message"]["content"] == "after compact", x
+assert x["messages"][6]["message"]["content"] == "after second compact", x
+assert x["messages"][7]["message"]["content"] == "fake reply messages=4", x
+'
+
 CONTEXT_AFTER=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/context" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 printf '%s' "$CONTEXT_AFTER" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
 assert x["state"] == "compressed", x
-assert x["checkpoint"]["through_ordinal"] == 2, x
+assert x["checkpoint"]["through_ordinal"] == 4, x
+assert x["memory"]["through_ordinal"] == 4, x
 assert x["memory"]["schema_version"] == 1, x
 assert x["memory"]["memory"]["entities"] == ["llmgateway", "ContextEngine"], x
 assert x["prepared_tokens"] <= x["budget_tokens"], x
