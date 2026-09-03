@@ -4,7 +4,10 @@ mod api;
 mod catalog;
 mod compat;
 mod config;
+mod conversation;
+mod conversation_api;
 mod gateway;
+mod response_state;
 mod routing;
 mod ui;
 
@@ -19,6 +22,8 @@ use axum::{
 };
 use catalog::ModelCatalog;
 use config::AppConfig;
+use conversation::ConversationStore;
+use conversation_api::{create_thread, delete_thread, get_thread, list_threads, send_thread_message};
 use gateway::Gateway;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -43,10 +48,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let catalog = Arc::new(ModelCatalog::connect(config.clone()).await?);
     catalog.seed_from_config().await?;
+    let conversations = Arc::new(ConversationStore::connect(config.clone()).await?);
     let gateway = Arc::new(Gateway::new(config.clone(), catalog.clone())?);
     let state = AppState {
         gateway,
         catalog,
+        conversations,
         gateway_api_key,
     };
 
@@ -59,6 +66,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/responses", post(openai_responses))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/models", get(models))
+        .route("/v1/threads", get(list_threads).post(create_thread))
+        .route("/v1/threads/{thread_id}", get(get_thread).delete(delete_thread))
+        .route(
+            "/v1/threads/{thread_id}/messages",
+            post(send_thread_message),
+        )
         .route("/_llmgateway/health", get(health))
         .route("/_llmgateway/models", get(admin_models))
         .route("/_llmgateway/accounts", get(admin_accounts))
