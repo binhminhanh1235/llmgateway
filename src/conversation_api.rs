@@ -3,9 +3,11 @@ use crate::{
     context_engine::{ContextError, PreparedContext},
     context_runtime,
     conversation::{openai_stream_with_capture, ConversationError},
+    embedding_runtime,
     gateway::GatewayError,
     semantic_retrieval::{
         augment_messages_with_retrieval, estimate_json_messages_tokens, retrieve_relevant_history,
+        RetrievalResult,
     },
 };
 use axum::{
@@ -18,6 +20,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
+use tracing::warn;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateThreadRequest {
@@ -208,6 +211,7 @@ pub async fn send_thread_message(
     };
 
     let mut retrieved_chunks = 0usize;
+    let mut retrieval_backend = "local";
     if state.gateway.config.context.retrieval_enabled {
         if let Some(checkpoint) = prepared.checkpoint.as_ref() {
             let spare_tokens = prepared
@@ -224,14 +228,49 @@ pub async fn send_thread_message(
                     Ok(detail) => detail,
                     Err(error) => return conversation_error(error),
                 };
-                let retrieval = retrieve_relevant_history(
-                    &detail.messages,
-                    checkpoint.through_ordinal,
-                    &user_message,
-                    state.gateway.config.context.retrieval_max_chunks,
-                    retrieval_budget,
-                    state.gateway.config.context.retrieval_min_score,
-                );
+                let local = || {
+                    retrieve_relevant_history(
+                        &detail.messages,
+                        checkpoint.through_ordinal,
+                        &user_message,
+                        state.gateway.config.context.retrieval_max_chunks,
+                        retrieval_budget,
+                        state.gateway.config.context.retrieval_min_score,
+                    )
+                };
+                let retrieval: RetrievalResult = if state.gateway.config.context.retrieval_backend == "hybrid" {
+                    match embedding_runtime::get() {
+                        Some(retriever) => match retriever
+                            .retrieve(
+                                &thread_id,
+                                &detail.messages,
+                                checkpoint.through_ordinal,
+                                &user_message,
+                                state.gateway.config.context.retrieval_max_chunks,
+                                retrieval_budget,
+                                state.gateway.config.context.retrieval_min_score,
+                            )
+                            .await
+                        {
+                            Ok(result) => {
+                                retrieval_backend = "hybrid";
+                                result
+                            }
+                            Err(error) => {
+                                warn!(%thread_id, %error, "hybrid retrieval failed; falling back to lexical retrieval");
+                                retrieval_backend = "local-fallback";
+                                local()
+                            }
+                        },
+                        None => {
+                            retrieval_backend = "local-fallback";
+                            local()
+                        }
+                    }
+                } else {
+                    local()
+                };
+
                 if !retrieval.chunks.is_empty() {
                     let mut augmented = prepared.messages.clone();
                     augment_messages_with_retrieval(&mut augmented, &retrieval);
@@ -306,7 +345,12 @@ pub async fn send_thread_message(
             Body::from_stream(stream),
             &route_id,
         );
-        return with_context_headers(response, &prepared, retrieved_chunks);
+        return with_context_headers(
+            response,
+            &prepared,
+            retrieved_chunks,
+            retrieval_backend,
+        );
     }
 
     match routed.response.json::<Value>().await {
@@ -332,7 +376,7 @@ pub async fn send_thread_message(
                 }
             }
             let response = json_response(StatusCode::OK, openai, Some(&route_id));
-            with_context_headers(response, &prepared, retrieved_chunks)
+            with_context_headers(response, &prepared, retrieved_chunks, retrieval_backend)
         }
         Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
     }
@@ -342,12 +386,9 @@ fn with_context_headers(
     mut response: Response<Body>,
     prepared: &PreparedContext,
     retrieved_chunks: usize,
+    retrieval_backend: &str,
 ) -> Response<Body> {
-    let state = if prepared.compressed {
-        "compressed"
-    } else {
-        "full"
-    };
+    let state = if prepared.compressed { "compressed" } else { "full" };
     if let Ok(value) = HeaderValue::from_str(state) {
         response.headers_mut().insert("x-llmgateway-context", value);
     }
@@ -370,6 +411,11 @@ fn with_context_headers(
         response
             .headers_mut()
             .insert("x-llmgateway-retrieved-chunks", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(retrieval_backend) {
+        response
+            .headers_mut()
+            .insert("x-llmgateway-retrieval-backend", value);
     }
     if let Some(checkpoint) = &prepared.checkpoint {
         if let Ok(value) = HeaderValue::from_str(&checkpoint.id) {
