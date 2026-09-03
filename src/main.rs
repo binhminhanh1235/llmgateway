@@ -5,6 +5,9 @@ mod browser_session;
 mod browser_session_api;
 mod browser_session_runtime;
 mod catalog;
+mod chromium_driver;
+mod chromium_driver_api;
+mod chromium_driver_runtime;
 mod compat;
 mod config;
 mod context_engine;
@@ -43,6 +46,10 @@ use browser_session_api::{
     require_browser_attention, reset_browser_session, verify_browser_session,
 };
 use catalog::ModelCatalog;
+use chromium_driver::{ChromiumConfig, ChromiumDriver};
+use chromium_driver_api::{
+    chromium_status, launch_chromium_login, stop_chromium, verify_chromium_login,
+};
 use config::AppConfig;
 use context_engine::ContextEngine;
 use conversation::ConversationStore;
@@ -80,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
     let usage_config = UsageConfig::load_from_gateway_config(&config_path)?;
     let browser_config = BrowserConfig::load_from_gateway_config(&config_path)?;
+    let chromium_config = ChromiumConfig::load_from_gateway_config(&config_path)?;
     let config = Arc::new(AppConfig::load(&config_path)?);
     let gateway_api_key = Arc::new(config.gateway_api_key()?);
 
@@ -93,10 +101,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let browser_sessions = Arc::new(BrowserSessionStore::connect(config.clone(), browser_config).await?);
     let browser_session_count = browser_sessions.summary().await?.sessions.len();
+    let chromium_driver = Arc::new(ChromiumDriver::new(chromium_config, browser_sessions.clone())?);
+    let chromium_driver_enabled = chromium_driver.enabled();
+    chromium_driver_runtime::install(chromium_driver)
+        .map_err(|_| "Chromium driver was already initialized")?;
     browser_session_runtime::install(browser_sessions)
         .map_err(|_| "browser session store was already initialized")?;
     if browser_session_count > 0 {
         info!(browser_session_count, "browser session registry enabled");
+    }
+    if chromium_driver_enabled {
+        info!("Chromium browser driver enabled");
     }
 
     let gateway = Arc::new(Gateway::new(config.clone(), catalog.clone())?);
@@ -198,6 +213,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/_llmgateway/browser-sessions/{session_id}/reset",
             post(reset_browser_session),
+        )
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}/driver/launch",
+            post(launch_chromium_login),
+        )
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}/driver/status",
+            get(chromium_status),
+        )
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}/driver/verify",
+            post(verify_chromium_login),
+        )
+        .route(
+            "/_llmgateway/browser-sessions/{session_id}/driver/stop",
+            post(stop_chromium),
         )
         .with_state(state)
         .layer(TraceLayer::new_for_http())
