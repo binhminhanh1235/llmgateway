@@ -10,6 +10,7 @@ mod conversation;
 mod conversation_api;
 mod gateway;
 mod memory_api;
+mod memory_backfill;
 mod response_state;
 mod routing;
 mod structured_memory;
@@ -34,6 +35,7 @@ use conversation_api::{
 };
 use gateway::Gateway;
 use memory_api::get_thread_memory;
+use memory_backfill::backfill_legacy_memories;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
@@ -68,6 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?,
     );
+    let legacy_memories = backfill_legacy_memories(config.as_ref()).await?;
+    if legacy_memories > 0 {
+        info!(legacy_memories, "backfilled legacy context checkpoints into structured memory");
+    }
     context_runtime::install(context_engine)
         .map_err(|_| "context engine was already initialized")?;
 
