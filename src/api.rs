@@ -1,7 +1,9 @@
 use crate::{
     catalog::{CatalogError, ModelCatalog},
     compat::{anthropic, responses},
+    conversation::{ConversationError, ConversationStore},
     gateway::{Gateway, GatewayError},
+    response_state::{response_to_openai_assistant, responses_stream_with_capture},
 };
 use axum::{
     body::Body,
@@ -16,11 +18,13 @@ use axum::{
 use futures_util::TryStreamExt;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Arc};
+use tokio::sync::oneshot;
 
 #[derive(Clone)]
 pub struct AppState {
     pub gateway: Arc<Gateway>,
     pub catalog: Arc<ModelCatalog>,
+    pub conversations: Arc<ConversationStore>,
     pub gateway_api_key: Arc<String>,
 }
 
@@ -78,24 +82,89 @@ pub async fn openai_responses(
     if let Err(response) = authorize(&headers, &state.gateway_api_key) {
         return response;
     }
-    let (requested_model, openai_body) = match responses::to_openai_request(&body) {
+
+    let previous_response_id = body
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut normalized_body = body.clone();
+    if let Some(object) = normalized_body.as_object_mut() {
+        object.remove("previous_response_id");
+    }
+
+    let (requested_model, mut openai_body) = match responses::to_openai_request(&normalized_body) {
         Ok(value) => value,
         Err(message) => {
             return json_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message)
         }
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let mut preferred_route = None;
 
+    if let Some(previous_response_id) = previous_response_id {
+        let previous = match state
+            .conversations
+            .response_context(&previous_response_id)
+            .await
+        {
+            Ok(previous) => previous,
+            Err(ConversationError::ResponseNotFound(_)) => {
+                return json_error(
+                    StatusCode::NOT_FOUND,
+                    "invalid_request_error",
+                    &format!("previous_response_id '{previous_response_id}' was not found"),
+                )
+            }
+            Err(error) => return conversation_state_error(error),
+        };
+        preferred_route = previous.route_id.clone();
+        let current = request_messages(&openai_body);
+        let mut merged = previous.messages;
+        merged.extend(current);
+        set_request_messages(&mut openai_body, merged);
+    }
+
+    let history_before_response = request_messages(&openai_body);
     match state
         .gateway
-        .execute_openai_chat(&requested_model, &openai_body)
+        .execute_openai_chat_with_affinity(
+            &requested_model,
+            &openai_body,
+            preferred_route.as_deref(),
+        )
         .await
     {
         Ok(routed) => {
             let route_id = routed.route.id.clone();
             if is_stream {
-                let stream =
-                    responses::openai_stream_to_responses(routed.response, requested_model);
+                let stream = responses::openai_stream_to_responses(
+                    routed.response,
+                    requested_model.clone(),
+                );
+                let (tx, rx) = oneshot::channel();
+                let stream = responses_stream_with_capture(stream, tx);
+                let conversations = state.conversations.clone();
+                let model_for_task = requested_model.clone();
+                let route_for_task = route_id.clone();
+                let history_for_task = history_before_response.clone();
+                tokio::spawn(async move {
+                    if let Ok(response) = rx.await {
+                        let mut history = history_for_task;
+                        if let Some(assistant) = response_to_openai_assistant(&response) {
+                            history.push(assistant);
+                        }
+                        if let Some(response_id) = response.get("id").and_then(Value::as_str) {
+                            let _ = conversations
+                                .save_response_context(
+                                    response_id,
+                                    &model_for_task,
+                                    &history,
+                                    Some(&route_for_task),
+                                )
+                                .await;
+                        }
+                    }
+                });
                 response_with_route(
                     StatusCode::OK,
                     "text/event-stream",
@@ -106,6 +175,29 @@ pub async fn openai_responses(
                 match routed.response.json::<Value>().await {
                     Ok(openai) => {
                         let response = responses::from_openai_response(&openai, &requested_model);
+                        let mut history = history_before_response;
+                        if let Some(assistant) = openai_assistant_message(&openai) {
+                            history.push(assistant);
+                        }
+                        let Some(response_id) = response.get("id").and_then(Value::as_str) else {
+                            return json_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "response_state_error",
+                                "generated Responses object is missing id",
+                            );
+                        };
+                        if let Err(error) = state
+                            .conversations
+                            .save_response_context(
+                                response_id,
+                                &requested_model,
+                                &history,
+                                Some(&route_id),
+                            )
+                            .await
+                        {
+                            return conversation_state_error(error);
+                        }
                         json_response(StatusCode::OK, response, Some(&route_id))
                     }
                     Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
@@ -285,16 +377,23 @@ pub async fn admin_refresh_account_models(
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let routes = state.gateway.router.snapshot().await;
     let catalog_models = state.catalog.models().await.map(|models| models.len()).unwrap_or(0);
+    let threads = state
+        .conversations
+        .list_threads()
+        .await
+        .map(|threads| threads.len())
+        .unwrap_or(0);
     Json(json!({
         "status":"ok",
         "service":"llmgateway",
         "default_model":state.gateway.config.api.default_model,
         "catalog_models":catalog_models,
+        "threads":threads,
         "routes":routes
     }))
 }
 
-fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), Response<Body>> {
+pub(crate) fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), Response<Body>> {
     let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -313,7 +412,7 @@ fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), Response<Body>> 
     }
 }
 
-fn gateway_error(error: GatewayError) -> Response<Body> {
+pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
     match error {
         GatewayError::NoRoute(message) => {
             json_error(StatusCode::BAD_REQUEST, "model_error", &message)
@@ -331,9 +430,7 @@ fn gateway_error(error: GatewayError) -> Response<Body> {
         GatewayError::Transport(message) => {
             json_error(StatusCode::BAD_GATEWAY, "upstream_error", &message)
         }
-        GatewayError::Upstream { status, body } => {
-            json_error(status, "upstream_error", &body)
-        }
+        GatewayError::Upstream { status, body } => json_error(status, "upstream_error", &body),
     }
 }
 
@@ -350,22 +447,47 @@ fn catalog_error(error: CatalogError) -> Response<Body> {
         CatalogError::Transport(message) => {
             json_error(StatusCode::BAD_GATEWAY, "discovery_error", &message)
         }
-        CatalogError::Upstream { status, body } => {
-            json_error(status, "discovery_error", &body)
-        }
+        CatalogError::Upstream { status, body } => json_error(status, "discovery_error", &body),
         CatalogError::InvalidResponse(message) => {
             json_error(StatusCode::BAD_GATEWAY, "discovery_error", &message)
         }
-        CatalogError::Database(error) => {
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "catalog_database_error", &error.to_string())
-        }
-        CatalogError::Io(error) => {
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "catalog_storage_error", &error.to_string())
-        }
+        CatalogError::Database(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "catalog_database_error",
+            &error.to_string(),
+        ),
+        CatalogError::Io(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "catalog_storage_error",
+            &error.to_string(),
+        ),
     }
 }
 
-fn json_error(status: StatusCode, kind: &str, message: &str) -> Response<Body> {
+fn conversation_state_error(error: ConversationError) -> Response<Body> {
+    match error {
+        ConversationError::ThreadNotFound(message) | ConversationError::ResponseNotFound(message) => {
+            json_error(StatusCode::NOT_FOUND, "response_state_error", &message)
+        }
+        ConversationError::InvalidJson(message) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_state_error",
+            &message,
+        ),
+        ConversationError::Database(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_state_database_error",
+            &error.to_string(),
+        ),
+        ConversationError::Io(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_state_storage_error",
+            &error.to_string(),
+        ),
+    }
+}
+
+pub(crate) fn json_error(status: StatusCode, kind: &str, message: &str) -> Response<Body> {
     json_response(
         status,
         json!({"error":{"type":kind,"message":message}}),
@@ -373,7 +495,11 @@ fn json_error(status: StatusCode, kind: &str, message: &str) -> Response<Body> {
     )
 }
 
-fn json_response(status: StatusCode, value: Value, route: Option<&str>) -> Response<Body> {
+pub(crate) fn json_response(
+    status: StatusCode,
+    value: Value,
+    route: Option<&str>,
+) -> Response<Body> {
     response_with_route(
         status,
         "application/json",
@@ -382,7 +508,7 @@ fn json_response(status: StatusCode, value: Value, route: Option<&str>) -> Respo
     )
 }
 
-fn response_with_route(
+pub(crate) fn response_with_route(
     status: StatusCode,
     content_type: &str,
     body: Body,
@@ -402,4 +528,26 @@ fn response_with_route(
         }
     }
     response
+}
+
+fn request_messages(body: &Value) -> Vec<Value> {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn set_request_messages(body: &mut Value, messages: Vec<Value>) {
+    if let Some(object) = body.as_object_mut() {
+        object.insert("messages".into(), Value::Array(messages));
+    }
+}
+
+fn openai_assistant_message(openai: &Value) -> Option<Value> {
+    openai
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .cloned()
 }
