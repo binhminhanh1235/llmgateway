@@ -18,4 +18,5 @@ jobs:
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
       - run: bash scripts/smoke-local.sh
+      - run: bash scripts/smoke-retrieval.sh
       - run: docker build -t llmgateway:ci .
