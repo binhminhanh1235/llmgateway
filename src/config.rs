@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::{collections::HashMap, env, fs, net::IpAddr, path::Path};
+use std::{collections::{HashMap, HashSet}, env, fs, net::IpAddr, path::Path};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -122,15 +122,27 @@ pub struct ProviderConfig {
     pub id: String,
     #[serde(default = "default_provider_kind")]
     pub kind: String,
+    #[serde(default)]
     pub base_url: String,
     #[serde(default = "default_models_path")]
     pub models_path: String,
+}
+
+impl ProviderConfig {
+    pub fn is_browser(&self) -> bool {
+        self.kind.starts_with("browser-")
+    }
+
+    pub fn transport(&self) -> &'static str {
+        if self.is_browser() { "browser" } else { "api" }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccountConfig {
     pub id: String,
     pub provider: String,
+    #[serde(default)]
     pub api_key_env: String,
     #[serde(default = "default_auth_style")]
     pub auth_style: String,
@@ -138,6 +150,16 @@ pub struct AccountConfig {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub discover_models: bool,
+}
+
+impl AccountConfig {
+    pub fn discovery_enabled(&self, provider: &ProviderConfig) -> bool {
+        self.discover_models && !provider.is_browser()
+    }
+
+    pub fn credential_required(&self, provider: &ProviderConfig) -> bool {
+        !provider.is_browser()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -179,9 +201,24 @@ pub enum ConfigError {
 impl AppConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let raw = fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&raw)?;
+        let mut config: Self = toml::from_str(&raw)?;
+        config.normalize();
         config.validate()?;
         Ok(config)
+    }
+
+    fn normalize(&mut self) {
+        let browser_providers = self
+            .providers
+            .iter()
+            .filter(|provider| provider.is_browser())
+            .map(|provider| provider.id.clone())
+            .collect::<HashSet<_>>();
+        for account in &mut self.accounts {
+            if browser_providers.contains(&account.provider) {
+                account.discover_models = false;
+            }
+        }
     }
 
     pub fn gateway_api_key(&self) -> Result<String, ConfigError> {
@@ -291,11 +328,38 @@ impl AppConfig {
             ));
         }
 
+        for provider in &self.providers {
+            if provider.id.trim().is_empty() {
+                return Err(ConfigError::Invalid("provider id cannot be empty".into()));
+            }
+            match provider.kind.as_str() {
+                "openai-compatible" | "browser-http" if provider.base_url.trim().is_empty() => {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider '{}' kind '{}' requires base_url",
+                        provider.id, provider.kind
+                    )));
+                }
+                "openai-compatible" | "browser-http" | "browser-cdp" => {}
+                other => {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider '{}' uses unsupported kind '{}'",
+                        provider.id, other
+                    )));
+                }
+            }
+        }
+
         for account in &self.accounts {
-            if self.provider(&account.provider).is_none() {
-                return Err(ConfigError::Invalid(format!(
+            let provider = self.provider(&account.provider).ok_or_else(|| {
+                ConfigError::Invalid(format!(
                     "account '{}' references unknown provider '{}'",
                     account.id, account.provider
+                ))
+            })?;
+            if account.credential_required(provider) && account.api_key_env.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "account '{}' requires api_key_env for provider kind '{}'",
+                    account.id, provider.kind
                 )));
             }
         }
@@ -319,6 +383,17 @@ impl AppConfig {
             if !account.enabled {
                 return Err(ConfigError::Invalid(format!(
                     "context.retrieval_embedding_account '{account_id}' is disabled"
+                )));
+            }
+            let provider = self.provider(&account.provider).ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "context.retrieval_embedding_account '{account_id}' references unknown provider '{}'",
+                    account.provider
+                ))
+            })?;
+            if provider.is_browser() {
+                return Err(ConfigError::Invalid(format!(
+                    "context.retrieval_embedding_account '{account_id}' must use an API provider"
                 )));
             }
             if self
@@ -393,11 +468,107 @@ fn default_context_retrieval_embedding_batch_size() -> usize { 64 }
 
 #[cfg(test)]
 mod tests {
-    use super::pattern_matches;
+    use super::*;
+
+    fn minimal_config(provider: &str, account: &str) -> String {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+key_env = "LLMGATEWAY_API_KEY"
+default_model = "llmgateway-auto"
+
+[context]
+enabled = false
+retrieval_enabled = false
+
+{provider}
+
+{account}
+
+[[routes]]
+id = "route"
+account = "account"
+model = "model"
+enabled = true
+
+[virtual_models.llmgateway-auto]
+routes = ["route"]
+"#
+        )
+    }
 
     #[test]
     fn wildcard_alias_matches_prefix() {
         assert!(pattern_matches("claude-sonnet-*", "claude-sonnet-4-5"));
         assert!(!pattern_matches("claude-sonnet-*", "claude-opus-4-1"));
+    }
+
+    #[test]
+    fn browser_account_does_not_require_dummy_credentials_or_discovery_flag() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "browser"
+kind = "browser-cdp""#,
+            r#"[[accounts]]
+id = "account"
+provider = "browser"
+enabled = true"#,
+        );
+        let mut config: AppConfig = toml::from_str(&raw).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+        let account = config.account("account").unwrap();
+        let provider = config.provider("browser").unwrap();
+        assert!(account.api_key_env.is_empty());
+        assert!(!account.discover_models);
+        assert!(!account.discovery_enabled(provider));
+        assert!(!account.credential_required(provider));
+        assert_eq!(provider.transport(), "browser");
+    }
+
+    #[test]
+    fn api_account_still_requires_credentials_and_defaults_discovery_on() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "api"
+kind = "openai-compatible"
+base_url = "https://example.test/v1""#,
+            r#"[[accounts]]
+id = "account"
+provider = "api"
+api_key_env = "EXAMPLE_API_KEY"
+enabled = true"#,
+        );
+        let mut config: AppConfig = toml::from_str(&raw).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+        let account = config.account("account").unwrap();
+        let provider = config.provider("api").unwrap();
+        assert!(account.discover_models);
+        assert!(account.discovery_enabled(provider));
+        assert!(account.credential_required(provider));
+        assert_eq!(provider.transport(), "api");
+    }
+
+    #[test]
+    fn browser_account_explicit_discovery_is_normalized_off() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "browser"
+kind = "browser-cdp""#,
+            r#"[[accounts]]
+id = "account"
+provider = "browser"
+enabled = true
+discover_models = true"#,
+        );
+        let mut config: AppConfig = toml::from_str(&raw).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+        assert!(!config.account("account").unwrap().discover_models);
     }
 }

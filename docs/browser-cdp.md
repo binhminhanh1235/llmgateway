@@ -1,4 +1,4 @@
-# Browser CDP adapter (v0.16)
+# Browser CDP adapter (v0.16+)
 
 `browser-cdp` executes a small local adapter script inside an already-authenticated Chromium page through the loopback Chrome DevTools Protocol (CDP).
 
@@ -14,7 +14,7 @@ This is an experimental integration surface. Provider-specific scripts must resp
 
 ## Configuration
 
-A CDP-backed account uses the same routing model as every other llmgateway account:
+A CDP-backed account uses the same routing model as every other llmgateway account. Since v0.17, browser accounts are first-class and do not need dummy API credentials or an explicit `discover_models = false`.
 
 ```toml
 [browser]
@@ -43,16 +43,11 @@ ready_url_prefixes = ["https://example.com/chat"]
 [[providers]]
 id = "example-web"
 kind = "browser-cdp"
-base_url = "https://example.com"
-models_path = ""
 
 [[accounts]]
 id = "example-web-account"
 provider = "example-web"
-api_key_env = "BROWSER_ACCOUNT_UNUSED"
-auth_style = "bearer"
 enabled = true
-discover_models = false
 
 [[routes]]
 id = "example-web-route"
@@ -100,7 +95,7 @@ The result envelope is deliberately small:
 - `content_type`: response media type, default `application/json`.
 - `body`: either a JSON value or a string.
 
-For streaming, return `content_type = "text/event-stream"` and `body` as a complete OpenAI-compatible SSE payload. v0.16 buffers that returned string before forwarding it. True incremental CDP streaming is intentionally deferred to a later milestone.
+For streaming, return `content_type = "text/event-stream"` and `body` as a complete OpenAI-compatible SSE payload. v0.16/v0.17 buffers that returned string before forwarding it. True incremental CDP streaming is intentionally deferred to a later milestone.
 
 ## Failure semantics
 
