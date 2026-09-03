@@ -1,4 +1,5 @@
 use crate::{
+    catalog::ModelCatalog,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
     routing::Router,
 };
@@ -37,13 +38,13 @@ pub enum GatewayError {
 }
 
 impl Gateway {
-    pub fn new(config: Arc<AppConfig>) -> Result<Self, GatewayError> {
+    pub fn new(config: Arc<AppConfig>, catalog: Arc<ModelCatalog>) -> Result<Self, GatewayError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))
             .build()
             .map_err(|error| GatewayError::Transport(error.to_string()))?;
-        let router = Router::new(config.clone());
+        let router = Router::new(config.clone(), catalog);
         Ok(Self {
             config,
             router,

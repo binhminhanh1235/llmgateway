@@ -6,29 +6,36 @@ port = 7331
 key_env = "LLMGATEWAY_API_KEY"
 default_model = "llmgateway-auto"
 
-# Providers describe protocols/endpoints. Multiple accounts can share one provider.
+[storage]
+database_url = "sqlite://data/llmgateway.db"
+
+# Providers describe protocols/endpoints. models_path is used by model discovery.
 [[providers]]
 id = "openrouter"
 kind = "openai-compatible"
 base_url = "https://openrouter.ai/api/v1"
+models_path = "models"
 
 [[providers]]
 id = "gemini"
 kind = "openai-compatible"
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+models_path = "models"
 
 [[providers]]
 id = "qwen"
 kind = "openai-compatible"
 base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+models_path = "models"
 
-# Accounts are credential/quota domains.
+# Accounts are credential/quota domains. Each account gets its own discovered model availability.
 [[accounts]]
 id = "openrouter-main"
 provider = "openrouter"
 api_key_env = "OPENROUTER_API_KEY"
 auth_style = "bearer"
 enabled = true
+discover_models = true
 
 [[accounts]]
 id = "gemini-primary"
@@ -36,6 +43,7 @@ provider = "gemini"
 api_key_env = "GEMINI_API_KEY_PRIMARY"
 auth_style = "bearer"
 enabled = true
+discover_models = true
 
 [[accounts]]
 id = "gemini-secondary"
@@ -43,6 +51,7 @@ provider = "gemini"
 api_key_env = "GEMINI_API_KEY_SECONDARY"
 auth_style = "bearer"
 enabled = true
+discover_models = true
 
 [[accounts]]
 id = "qwen-primary"
@@ -50,8 +59,9 @@ provider = "qwen"
 api_key_env = "QWEN_API_KEY"
 auth_style = "bearer"
 enabled = true
+discover_models = true
 
-# Routes bind account + concrete upstream model.
+# Routes are explicit preferred bindings. Discovered account/model pairs can also be used dynamically.
 [[routes]]
 id = "gemini-primary"
 account = "gemini-primary"

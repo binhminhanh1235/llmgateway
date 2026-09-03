@@ -7,6 +7,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub api: ApiConfig,
     #[serde(default)]
+    pub storage: StorageConfig,
+    #[serde(default)]
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub accounts: Vec<AccountConfig>,
@@ -35,11 +37,27 @@ pub struct ApiConfig {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct StorageConfig {
+    #[serde(default = "default_database_url")]
+    pub database_url: String,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            database_url: default_database_url(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct ProviderConfig {
     pub id: String,
     #[serde(default = "default_provider_kind")]
     pub kind: String,
     pub base_url: String,
+    #[serde(default = "default_models_path")]
+    pub models_path: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,6 +69,8 @@ pub struct AccountConfig {
     pub auth_style: String,
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub discover_models: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -185,7 +205,9 @@ fn default_host() -> IpAddr {
 fn default_port() -> u16 { 7331 }
 fn default_gateway_key_env() -> String { "LLMGATEWAY_API_KEY".into() }
 fn default_model() -> String { "llmgateway-auto".into() }
+fn default_database_url() -> String { "sqlite://data/llmgateway.db".into() }
 fn default_provider_kind() -> String { "openai-compatible".into() }
+fn default_models_path() -> String { "models".into() }
 fn default_auth_style() -> String { "bearer".into() }
 fn default_priority() -> i32 { 100 }
 fn default_true() -> bool { true }

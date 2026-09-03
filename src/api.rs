@@ -1,10 +1,11 @@
 use crate::{
+    catalog::{CatalogError, ModelCatalog},
     compat::{anthropic, responses},
     gateway::{Gateway, GatewayError},
 };
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Path, State},
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         HeaderMap, HeaderValue, Response, StatusCode,
@@ -14,11 +15,12 @@ use axum::{
 };
 use futures_util::TryStreamExt;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone)]
 pub struct AppState {
     pub gateway: Arc<Gateway>,
+    pub catalog: Arc<ModelCatalog>,
     pub gateway_api_key: Arc<String>,
 }
 
@@ -164,41 +166,130 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     if let Err(response) = authorize(&headers, &state.gateway_api_key) {
         return response;
     }
-    let mut ids = state
-        .gateway
-        .config
-        .virtual_models
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    ids.extend(
-        state
-            .gateway
-            .config
-            .routes
+
+    let physical = match state.catalog.selectable_models().await {
+        Ok(models) => models,
+        Err(error) => return catalog_error(error),
+    };
+    let mut data: BTreeMap<String, Value> = BTreeMap::new();
+
+    for id in state.gateway.config.virtual_models.keys() {
+        data.insert(
+            id.clone(),
+            json!({
+                "id":id,
+                "object":"model",
+                "owned_by":"llmgateway",
+                "llmgateway":{"kind":"virtual"}
+            }),
+        );
+    }
+
+    for model in physical {
+        let available_accounts = model
+            .accounts
             .iter()
-            .filter(|route| route.enabled)
-            .map(|route| route.id.clone()),
-    );
-    ids.sort();
-    ids.dedup();
-    let data = ids
-        .into_iter()
-        .map(|id| json!({"id":id,"object":"model","owned_by":"llmgateway"}))
-        .collect::<Vec<_>>();
+            .filter(|account| {
+                account.enabled && matches!(account.availability.as_str(), "available" | "unknown")
+            })
+            .count();
+        data.insert(
+            model.id.clone(),
+            json!({
+                "id":model.id,
+                "object":"model",
+                "owned_by":model.owned_by,
+                "llmgateway":{
+                    "kind":"physical",
+                    "provider":model.provider,
+                    "display_name":model.display_name,
+                    "context_window":model.context_window,
+                    "capabilities":model.capabilities,
+                    "available_accounts":available_accounts
+                }
+            }),
+        );
+    }
+
+    // Preserve v0.1 route IDs as selectable aliases for existing clients.
+    for route in state.gateway.config.routes.iter().filter(|route| route.enabled) {
+        data.entry(route.id.clone()).or_insert_with(|| {
+            json!({
+                "id":route.id,
+                "object":"model",
+                "owned_by":"llmgateway-route",
+                "llmgateway":{"kind":"route","upstream_model":route.model,"account":route.account}
+            })
+        });
+    }
+
     json_response(
         StatusCode::OK,
-        json!({"object":"list","data":data}),
+        json!({"object":"list","data":data.into_values().collect::<Vec<_>>() }),
         None,
     )
 }
 
+pub async fn admin_models(State(state): State<AppState>, headers: HeaderMap) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    match state.catalog.models().await {
+        Ok(models) => json_response(StatusCode::OK, json!({"data":models}), None),
+        Err(error) => catalog_error(error),
+    }
+}
+
+pub async fn admin_accounts(State(state): State<AppState>, headers: HeaderMap) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    match state.catalog.accounts().await {
+        Ok(accounts) => json_response(StatusCode::OK, json!({"data":accounts}), None),
+        Err(error) => catalog_error(error),
+    }
+}
+
+pub async fn admin_account_models(
+    State(state): State<AppState>,
+    Path(account_id): Path<String>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    match state.catalog.account_models(&account_id).await {
+        Ok(models) => json_response(
+            StatusCode::OK,
+            json!({"account_id":account_id,"data":models}),
+            None,
+        ),
+        Err(error) => catalog_error(error),
+    }
+}
+
+pub async fn admin_refresh_account_models(
+    State(state): State<AppState>,
+    Path(account_id): Path<String>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    match state.catalog.refresh_account(&account_id).await {
+        Ok(result) => json_response(StatusCode::OK, json!(result), None),
+        Err(error) => catalog_error(error),
+    }
+}
+
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let routes = state.gateway.router.snapshot().await;
+    let catalog_models = state.catalog.models().await.map(|models| models.len()).unwrap_or(0);
     Json(json!({
         "status":"ok",
         "service":"llmgateway",
         "default_model":state.gateway.config.api.default_model,
+        "catalog_models":catalog_models,
         "routes":routes
     }))
 }
@@ -242,6 +333,34 @@ fn gateway_error(error: GatewayError) -> Response<Body> {
         }
         GatewayError::Upstream { status, body } => {
             json_error(status, "upstream_error", &body)
+        }
+    }
+}
+
+fn catalog_error(error: CatalogError) -> Response<Body> {
+    match error {
+        CatalogError::InvalidConfig(message) => {
+            json_error(StatusCode::BAD_REQUEST, "catalog_error", &message)
+        }
+        CatalogError::MissingCredential(message) => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "credential_error",
+            &message,
+        ),
+        CatalogError::Transport(message) => {
+            json_error(StatusCode::BAD_GATEWAY, "discovery_error", &message)
+        }
+        CatalogError::Upstream { status, body } => {
+            json_error(status, "discovery_error", &body)
+        }
+        CatalogError::InvalidResponse(message) => {
+            json_error(StatusCode::BAD_GATEWAY, "discovery_error", &message)
+        }
+        CatalogError::Database(error) => {
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "catalog_database_error", &error.to_string())
+        }
+        CatalogError::Io(error) => {
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "catalog_storage_error", &error.to_string())
         }
     }
 }

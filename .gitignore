@@ -1,6 +1,8 @@
 /target
 .env
 config/llmgateway.toml
+data/*.db
+data/*.db-*
 .DS_Store
 .idea/
 .vscode/

@@ -1,8 +1,12 @@
-use crate::config::{AppConfig, RouteConfig};
+use crate::{
+    catalog::ModelCatalog,
+    config::{AppConfig, RouteConfig},
+};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RouteHealth {
@@ -14,13 +18,15 @@ pub struct RouteHealth {
 #[derive(Clone)]
 pub struct Router {
     config: Arc<AppConfig>,
+    catalog: Arc<ModelCatalog>,
     health: Arc<RwLock<HashMap<String, RouteHealth>>>,
 }
 
 impl Router {
-    pub fn new(config: Arc<AppConfig>) -> Self {
+    pub fn new(config: Arc<AppConfig>, catalog: Arc<ModelCatalog>) -> Self {
         Self {
             config,
+            catalog,
             health: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -35,18 +41,11 @@ impl Router {
         } else if let Some(route) = self.config.route(resolved) {
             vec![route.clone()]
         } else {
-            let mut exact = self
-                .config
-                .routes
-                .iter()
-                .filter(|route| route.model == resolved)
-                .cloned()
-                .collect::<Vec<_>>();
-            exact.sort_by_key(|route| route.priority);
-            exact
+            self.routes_for_physical_model(resolved).await
         };
 
         candidates.retain(|route| route.enabled);
+        candidates.sort_by_key(|route| route.priority);
 
         let now = Utc::now();
         let health = self.health.read().await;
@@ -59,6 +58,93 @@ impl Router {
         });
 
         candidates
+    }
+
+    async fn routes_for_physical_model(&self, requested: &str) -> Vec<RouteConfig> {
+        let (provider_filter, external_id) = requested
+            .split_once('/')
+            .filter(|(provider, _)| self.config.provider(provider).is_some())
+            .map(|(provider, external)| (Some(provider), external))
+            .unwrap_or((None, requested));
+
+        let models = match self.catalog.models().await {
+            Ok(models) => models,
+            Err(error) => {
+                warn!(%error, "failed to read model catalog while planning route");
+                return self.config_routes_for_model(provider_filter, external_id);
+            }
+        };
+
+        let mut routes = Vec::new();
+        let mut seen = HashSet::new();
+        for model in models.into_iter().filter(|model| {
+            model.external_id == external_id
+                && provider_filter.is_none_or(|provider| model.provider == provider)
+        }) {
+            for binding in model.accounts.into_iter().filter(|binding| {
+                binding.enabled && matches!(binding.availability.as_str(), "available" | "unknown")
+            }) {
+                let Some(account) = self.config.account(&binding.account_id) else {
+                    continue;
+                };
+                if !account.enabled || account.provider != model.provider {
+                    continue;
+                }
+                let key = format!("{}\0{}", account.id, external_id);
+                if !seen.insert(key) {
+                    continue;
+                }
+
+                if let Some(configured) = self.config.routes.iter().find(|route| {
+                    route.enabled && route.account == account.id && route.model == external_id
+                }) {
+                    routes.push(configured.clone());
+                    continue;
+                }
+
+                let account_order = self
+                    .config
+                    .accounts
+                    .iter()
+                    .position(|candidate| candidate.id == account.id)
+                    .unwrap_or(self.config.accounts.len()) as i32;
+                routes.push(RouteConfig {
+                    id: format!("discovered:{}:{}", account.id, external_id),
+                    account: account.id.clone(),
+                    model: external_id.to_string(),
+                    priority: 1000 + account_order,
+                    enabled: true,
+                    capabilities: model.capabilities.clone(),
+                });
+            }
+        }
+
+        if routes.is_empty() {
+            self.config_routes_for_model(provider_filter, external_id)
+        } else {
+            routes
+        }
+    }
+
+    fn config_routes_for_model(
+        &self,
+        provider_filter: Option<&str>,
+        external_id: &str,
+    ) -> Vec<RouteConfig> {
+        self.config
+            .routes
+            .iter()
+            .filter(|route| {
+                route.enabled
+                    && route.model == external_id
+                    && provider_filter.is_none_or(|provider| {
+                        self.config
+                            .account(&route.account)
+                            .is_some_and(|account| account.provider == provider)
+                    })
+            })
+            .cloned()
+            .collect()
     }
 
     pub async fn mark_success(&self, route_id: &str) {

@@ -1,14 +1,19 @@
 mod api;
+mod catalog;
 mod compat;
 mod config;
 mod gateway;
 mod routing;
 
-use api::{anthropic_messages, health, models, openai_chat, openai_responses, AppState};
+use api::{
+    admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
+    anthropic_messages, health, models, openai_chat, openai_responses, AppState,
+};
 use axum::{
     routing::{get, post},
     Router,
 };
+use catalog::ModelCatalog;
 use config::AppConfig;
 use gateway::Gateway;
 use std::{env, net::SocketAddr, sync::Arc};
@@ -30,9 +35,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
     let config = Arc::new(AppConfig::load(&config_path)?);
     let gateway_api_key = Arc::new(config.gateway_api_key()?);
-    let gateway = Arc::new(Gateway::new(config.clone())?);
+
+    let catalog = Arc::new(ModelCatalog::connect(config.clone()).await?);
+    catalog.seed_from_config().await?;
+    let gateway = Arc::new(Gateway::new(config.clone(), catalog.clone())?);
     let state = AppState {
         gateway,
+        catalog,
         gateway_api_key,
     };
 
@@ -42,6 +51,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/models", get(models))
         .route("/_llmgateway/health", get(health))
+        .route("/_llmgateway/models", get(admin_models))
+        .route("/_llmgateway/accounts", get(admin_accounts))
+        .route(
+            "/_llmgateway/accounts/{account_id}/models",
+            get(admin_account_models),
+        )
+        .route(
+            "/_llmgateway/accounts/{account_id}/models/refresh",
+            post(admin_refresh_account_models),
+        )
         .with_state(state)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
