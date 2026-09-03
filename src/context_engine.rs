@@ -126,14 +126,16 @@ impl ContextEngine {
         Ok(())
     }
 
-    pub async fn prepare(
+    pub async fn prepare_turn(
         &self,
         thread_id: &str,
         requested_model: &str,
+        current_message: &Value,
     ) -> Result<PreparedContext, ContextError> {
         let detail = self.conversations.thread(thread_id).await?;
         let budget = self.budget_for_model(requested_model).await;
-        let source_tokens = estimate_stored_tokens(&detail.messages);
+        let current_tokens = estimate_message_tokens(current_message).saturating_add(4);
+        let source_tokens = estimate_stored_tokens(&detail.messages).saturating_add(current_tokens);
         let trigger = self.trigger_tokens(budget);
         let mut checkpoint = self.latest_checkpoint(thread_id).await?;
 
@@ -146,10 +148,9 @@ impl ContextEngine {
                 .await?;
         }
 
-        let prepared = fit_messages_to_budget(
-            self.messages_from_checkpoint(&detail, checkpoint.as_ref()),
-            budget,
-        );
+        let mut candidate = self.messages_from_checkpoint(&detail, checkpoint.as_ref());
+        candidate.push(current_message.clone());
+        let prepared = fit_messages_to_budget(candidate, budget);
         let prepared_tokens = estimate_messages_tokens(&prepared);
 
         Ok(PreparedContext {
