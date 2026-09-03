@@ -1,0 +1,107 @@
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+key_env = "LLMGATEWAY_API_KEY"
+default_model = "llmgateway-auto"
+
+# Providers describe protocols/endpoints. Multiple accounts can share one provider.
+[[providers]]
+id = "openrouter"
+kind = "openai-compatible"
+base_url = "https://openrouter.ai/api/v1"
+
+[[providers]]
+id = "gemini"
+kind = "openai-compatible"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+[[providers]]
+id = "qwen"
+kind = "openai-compatible"
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+# Accounts are credential/quota domains.
+[[accounts]]
+id = "openrouter-main"
+provider = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+auth_style = "bearer"
+enabled = true
+
+[[accounts]]
+id = "gemini-primary"
+provider = "gemini"
+api_key_env = "GEMINI_API_KEY_PRIMARY"
+auth_style = "bearer"
+enabled = true
+
+[[accounts]]
+id = "gemini-secondary"
+provider = "gemini"
+api_key_env = "GEMINI_API_KEY_SECONDARY"
+auth_style = "bearer"
+enabled = true
+
+[[accounts]]
+id = "qwen-primary"
+provider = "qwen"
+api_key_env = "QWEN_API_KEY"
+auth_style = "bearer"
+enabled = true
+
+# Routes bind account + concrete upstream model.
+[[routes]]
+id = "gemini-primary"
+account = "gemini-primary"
+model = "gemini-3.7-flash"
+priority = 10
+enabled = true
+capabilities = ["chat", "tools", "vision", "coding"]
+
+[[routes]]
+id = "gemini-secondary"
+account = "gemini-secondary"
+model = "gemini-3.7-flash"
+priority = 20
+enabled = true
+capabilities = ["chat", "tools", "vision", "coding"]
+
+[[routes]]
+id = "qwen-coder"
+account = "qwen-primary"
+model = "qwen3-coder-plus"
+priority = 10
+enabled = true
+capabilities = ["chat", "tools", "coding"]
+
+[[routes]]
+id = "openrouter-fallback"
+account = "openrouter-main"
+model = "anthropic/claude-sonnet-4.6"
+priority = 100
+enabled = true
+capabilities = ["chat", "tools", "coding"]
+
+[virtual_models.llmgateway-auto]
+routes = ["gemini-primary", "gemini-secondary", "qwen-coder", "openrouter-fallback"]
+
+[virtual_models.llmgateway-coding]
+routes = ["qwen-coder", "gemini-primary", "gemini-secondary", "openrouter-fallback"]
+
+[virtual_models.llmgateway-best]
+routes = ["openrouter-fallback", "gemini-primary", "qwen-coder"]
+
+# Claude Code can keep asking for its normal model names; aliases map them to policies.
+[[aliases]]
+pattern = "claude-sonnet-*"
+target = "llmgateway-coding"
+
+[[aliases]]
+pattern = "claude-opus-*"
+target = "llmgateway-best"
+
+[[aliases]]
+pattern = "claude-haiku-*"
+target = "llmgateway-auto"
