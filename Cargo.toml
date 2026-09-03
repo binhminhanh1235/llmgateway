@@ -1,12 +1,13 @@
 [package]
 name = "llmgateway"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2021"
 description = "Local-first universal LLM gateway with multi-account routing and failover"
 license = "MIT"
 
 [dependencies]
 async-stream = "0.3"
+async-trait = "0.1"
 axum = "0.8"
 bytes = "1"
 chrono = { version = "0.4", features = ["clock", "serde"] }
