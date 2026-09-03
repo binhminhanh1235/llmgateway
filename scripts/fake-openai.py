@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        return
+
+    def do_POST(self):
+        length = int(self.headers.get("content-length", "0"))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        messages = body.get("messages", [])
+        text = f"fake reply messages={len(messages)}"
+        if body.get("stream"):
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.end_headers()
+            chunk = {
+                "id": "chatcmpl_fake",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+            }
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            done = {
+                "id": "chatcmpl_fake",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": len(messages), "completion_tokens": 3},
+            }
+            self.wfile.write(f"data: {json.dumps(done)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            return
+
+        response = {
+            "id": "chatcmpl_fake",
+            "object": "chat.completion",
+            "model": body.get("model", "fake-model"),
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": text},
+            }],
+            "usage": {
+                "prompt_tokens": len(messages),
+                "completion_tokens": 3,
+                "total_tokens": len(messages) + 3,
+            },
+        }
+        payload = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+if __name__ == "__main__":
+    ThreadingHTTPServer(("127.0.0.1", 18080), Handler).serve_forever()
