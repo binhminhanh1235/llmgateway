@@ -22,4 +22,5 @@ jobs:
       - run: bash scripts/smoke-hybrid.sh
       - run: bash scripts/smoke-memory.sh
       - run: bash scripts/smoke-quota.sh
+      - run: bash scripts/smoke-browser-session.sh
       - run: docker build -t llmgateway:ci .
