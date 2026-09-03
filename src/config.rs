@@ -122,22 +122,44 @@ pub struct ProviderConfig {
     pub id: String,
     #[serde(default = "default_provider_kind")]
     pub kind: String,
+    #[serde(default)]
     pub base_url: String,
     #[serde(default = "default_models_path")]
     pub models_path: String,
+}
+
+impl ProviderConfig {
+    pub fn is_browser(&self) -> bool {
+        self.kind.starts_with("browser-")
+    }
+
+    pub fn transport(&self) -> &'static str {
+        if self.is_browser() { "browser" } else { "api" }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccountConfig {
     pub id: String,
     pub provider: String,
+    #[serde(default)]
     pub api_key_env: String,
     #[serde(default = "default_auth_style")]
     pub auth_style: String,
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_true")]
-    pub discover_models: bool,
+    #[serde(default)]
+    pub discover_models: Option<bool>,
+}
+
+impl AccountConfig {
+    pub fn discovery_enabled(&self, provider: &ProviderConfig) -> bool {
+        self.discover_models.unwrap_or(!provider.is_browser())
+    }
+
+    pub fn credential_required(&self, provider: &ProviderConfig) -> bool {
+        !provider.is_browser()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -291,11 +313,44 @@ impl AppConfig {
             ));
         }
 
+        for provider in &self.providers {
+            if provider.id.trim().is_empty() {
+                return Err(ConfigError::Invalid("provider id cannot be empty".into()));
+            }
+            match provider.kind.as_str() {
+                "openai-compatible" | "browser-http" if provider.base_url.trim().is_empty() => {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider '{}' kind '{}' requires base_url",
+                        provider.id, provider.kind
+                    )));
+                }
+                "openai-compatible" | "browser-http" | "browser-cdp" => {}
+                other => {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider '{}' uses unsupported kind '{}'",
+                        provider.id, other
+                    )));
+                }
+            }
+        }
+
         for account in &self.accounts {
-            if self.provider(&account.provider).is_none() {
-                return Err(ConfigError::Invalid(format!(
+            let provider = self.provider(&account.provider).ok_or_else(|| {
+                ConfigError::Invalid(format!(
                     "account '{}' references unknown provider '{}'",
                     account.id, account.provider
+                ))
+            })?;
+            if account.credential_required(provider) && account.api_key_env.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "account '{}' requires api_key_env for provider kind '{}'",
+                    account.id, provider.kind
+                )));
+            }
+            if provider.is_browser() && account.discover_models == Some(true) {
+                return Err(ConfigError::Invalid(format!(
+                    "browser account '{}' cannot enable discover_models",
+                    account.id
                 )));
             }
         }
@@ -319,6 +374,17 @@ impl AppConfig {
             if !account.enabled {
                 return Err(ConfigError::Invalid(format!(
                     "context.retrieval_embedding_account '{account_id}' is disabled"
+                )));
+            }
+            let provider = self.provider(&account.provider).ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "context.retrieval_embedding_account '{account_id}' references unknown provider '{}'",
+                    account.provider
+                ))
+            })?;
+            if provider.is_browser() {
+                return Err(ConfigError::Invalid(format!(
+                    "context.retrieval_embedding_account '{account_id}' must use an API provider"
                 )));
             }
             if self
@@ -393,11 +459,99 @@ fn default_context_retrieval_embedding_batch_size() -> usize { 64 }
 
 #[cfg(test)]
 mod tests {
-    use super::pattern_matches;
+    use super::*;
+
+    fn minimal_config(provider: &str, account: &str) -> String {
+        format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+key_env = "LLMGATEWAY_API_KEY"
+default_model = "llmgateway-auto"
+
+[context]
+enabled = false
+retrieval_enabled = false
+
+{provider}
+
+{account}
+
+[[routes]]
+id = "route"
+account = "account"
+model = "model"
+enabled = true
+
+[virtual_models.llmgateway-auto]
+routes = ["route"]
+"#
+        )
+    }
 
     #[test]
     fn wildcard_alias_matches_prefix() {
         assert!(pattern_matches("claude-sonnet-*", "claude-sonnet-4-5"));
         assert!(!pattern_matches("claude-sonnet-*", "claude-opus-4-1"));
+    }
+
+    #[test]
+    fn browser_account_does_not_require_dummy_credentials_or_discovery_flag() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "browser"
+kind = "browser-cdp""#,
+            r#"[[accounts]]
+id = "account"
+provider = "browser"
+enabled = true"#,
+        );
+        let config: AppConfig = toml::from_str(&raw).unwrap();
+        config.validate().unwrap();
+        let account = config.account("account").unwrap();
+        let provider = config.provider("browser").unwrap();
+        assert!(account.api_key_env.is_empty());
+        assert!(!account.discovery_enabled(provider));
+        assert_eq!(provider.transport(), "browser");
+    }
+
+    #[test]
+    fn api_account_still_requires_credentials_and_defaults_discovery_on() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "api"
+kind = "openai-compatible"
+base_url = "https://example.test/v1""#,
+            r#"[[accounts]]
+id = "account"
+provider = "api"
+api_key_env = "EXAMPLE_API_KEY"
+enabled = true"#,
+        );
+        let config: AppConfig = toml::from_str(&raw).unwrap();
+        config.validate().unwrap();
+        let account = config.account("account").unwrap();
+        let provider = config.provider("api").unwrap();
+        assert!(account.discovery_enabled(provider));
+        assert_eq!(provider.transport(), "api");
+    }
+
+    #[test]
+    fn browser_account_cannot_force_model_discovery() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "browser"
+kind = "browser-cdp""#,
+            r#"[[accounts]]
+id = "account"
+provider = "browser"
+enabled = true
+discover_models = true"#,
+        );
+        let config: AppConfig = toml::from_str(&raw).unwrap();
+        assert!(config.validate().is_err());
     }
 }
