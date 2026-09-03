@@ -19,6 +19,8 @@ mod conversation;
 mod conversation_api;
 mod embedding_retrieval;
 mod embedding_runtime;
+mod execution_trace;
+mod execution_trace_api;
 mod gateway;
 mod memory_api;
 mod memory_backfill;
@@ -64,6 +66,8 @@ use conversation_api::{
     list_threads, send_thread_message,
 };
 use embedding_retrieval::EmbeddingRetriever;
+use execution_trace::ExecutionTraceStore;
+use execution_trace_api::{get_execution, list_executions};
 use gateway::Gateway;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
@@ -103,6 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let catalog = Arc::new(ModelCatalog::connect(config.clone()).await?);
     catalog.seed_from_config().await?;
     let conversations = Arc::new(ConversationStore::connect(config.clone()).await?);
+    let execution_traces = Arc::new(ExecutionTraceStore::connect(config.clone()).await?);
 
     let quota_usage = Arc::new(QuotaUsageStore::connect(config.clone(), usage_config).await?);
     quota_usage_runtime::install(quota_usage)
@@ -132,7 +137,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(browser_provider_bindings, "browser provider account bindings enabled");
     }
 
-    let gateway = Arc::new(Gateway::new(config.clone(), catalog.clone())?);
+    let gateway = Arc::new(Gateway::new(
+        config.clone(),
+        catalog.clone(),
+        execution_traces,
+    )?);
     let context_engine = Arc::new(
         ContextEngine::connect(
             config.clone(),
@@ -196,6 +205,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_llmgateway/accounts", get(admin_accounts))
         .route("/_llmgateway/account-intelligence", get(account_intelligence))
         .route("/_llmgateway/routes/explain", post(explain_routes))
+        .route("/_llmgateway/executions", get(list_executions))
+        .route("/_llmgateway/executions/{request_id}", get(get_execution))
         .route(
             "/_llmgateway/accounts/{account_id}/models",
             get(admin_account_models).patch(set_account_model),
