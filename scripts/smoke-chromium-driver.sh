@@ -154,6 +154,17 @@ done
 
 AUTH=(-H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 
+# Browser Accounts UI must be bundled into the Rust binary and wired to the real driver endpoints.
+UI_HTML=$(curl -fsS http://127.0.0.1:7331/)
+BROWSER_JS=$(curl -fsS http://127.0.0.1:7331/ui/browser-control.js)
+BROWSER_CSS=$(curl -fsS http://127.0.0.1:7331/ui/browser-control.css)
+grep -q '/ui/browser-control.js' <<<"$UI_HTML"
+grep -q '/ui/browser-control.css' <<<"$UI_HTML"
+grep -q '/driver/launch' <<<"$BROWSER_JS"
+grep -q '/driver/verify' <<<"$BROWSER_JS"
+grep -q 'login_in_progress' <<<"$BROWSER_JS"
+grep -q '.browser-control-panel' <<<"$BROWSER_CSS"
+
 LAUNCH=$(curl -fsS -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/launch \
   "${AUTH[@]}")
@@ -216,4 +227,4 @@ assert x["status"]["running"] is False, x
 '
 BROWSER_PID=""
 
-echo "llmgateway Chromium driver smoke test passed"
+echo "llmgateway Chromium driver + Browser Accounts UI smoke test passed"
