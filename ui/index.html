@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>llmgateway</title>
+  <link rel="stylesheet" href="/ui/app.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-row">
+        <div class="brand-mark">LG</div>
+        <div>
+          <div class="brand-name">llmgateway</div>
+          <div class="brand-subtitle">one endpoint, many routes</div>
+        </div>
+      </div>
+
+      <button id="newChatButton" class="primary-button full-width" type="button">+ New chat</button>
+
+      <div class="sidebar-section-label">Threads</div>
+      <div id="threadList" class="thread-list" aria-label="Chat threads"></div>
+
+      <div class="sidebar-footer">
+        <button class="nav-button active" data-view="chat" type="button">Chat</button>
+        <button class="nav-button" data-view="accounts" type="button">Accounts</button>
+        <button class="nav-button" data-view="models" type="button">Models</button>
+        <div class="gateway-status-row">
+          <span id="statusDot" class="status-dot"></span>
+          <span id="statusText">Checking gateway…</span>
+          <button id="changeKeyButton" class="icon-button" type="button" title="Change API key">⚙</button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <section id="chatView" class="view active-view">
+        <header class="topbar">
+          <div>
+            <h1 id="threadTitle" class="page-title">New chat</h1>
+            <div id="threadMeta" class="page-subtitle">Context stays with this thread</div>
+          </div>
+          <button id="modelButton" class="model-button" type="button">
+            <span class="model-button-icon">✦</span>
+            <span id="modelButtonText">Auto</span>
+            <span class="chevron">⌄</span>
+          </button>
+        </header>
+
+        <div id="messages" class="messages" aria-live="polite"></div>
+
+        <div class="composer-wrap">
+          <div id="routeNotice" class="route-notice hidden"></div>
+          <div class="composer">
+            <textarea id="composerInput" rows="1" placeholder="Ask anything…" aria-label="Message"></textarea>
+            <button id="sendButton" class="send-button" type="button" title="Send">↑</button>
+          </div>
+          <div class="composer-help">Enter to send · Shift+Enter for a new line</div>
+        </div>
+      </section>
+
+      <section id="accountsView" class="view">
+        <header class="topbar">
+          <div>
+            <h1 class="page-title">Accounts</h1>
+            <div class="page-subtitle">See exactly which models each account can use</div>
+          </div>
+          <button id="refreshAccountsButton" class="secondary-button" type="button">Refresh list</button>
+        </header>
+        <div id="accountsContent" class="content-scroll"></div>
+      </section>
+
+      <section id="modelsView" class="view">
+        <header class="topbar">
+          <div>
+            <h1 class="page-title">Model catalog</h1>
+            <div class="page-subtitle">Physical models discovered across all accounts</div>
+          </div>
+          <input id="modelCatalogSearch" class="search-input compact" type="search" placeholder="Search models…" />
+        </header>
+        <div id="modelsContent" class="content-scroll"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modelModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modelModalTitle">
+    <div class="modal model-modal">
+      <div class="modal-header">
+        <div>
+          <h2 id="modelModalTitle">Choose model</h2>
+          <p>Pick what you want. llmgateway chooses the best healthy account.</p>
+        </div>
+        <button class="icon-button" data-close-modal="modelModal" type="button">✕</button>
+      </div>
+      <input id="modelSearch" class="search-input" type="search" placeholder="Search model or provider…" autofocus />
+      <div id="modelPickerContent" class="model-picker-content"></div>
+    </div>
+  </div>
+
+  <div id="authModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="authModalTitle">
+    <div class="modal auth-modal">
+      <div class="auth-logo">LG</div>
+      <h2 id="authModalTitle">Connect to llmgateway</h2>
+      <p>Enter the local gateway API key from your <code>.env</code>. It stays in this browser only.</p>
+      <label class="field-label" for="apiKeyInput">API key</label>
+      <input id="apiKeyInput" class="search-input" type="password" autocomplete="off" placeholder="LLMGATEWAY_API_KEY" />
+      <label class="checkbox-row"><input id="rememberKeyInput" type="checkbox" /> Remember on this device</label>
+      <div id="authError" class="form-error hidden"></div>
+      <button id="saveKeyButton" class="primary-button full-width" type="button">Connect</button>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/ui/app.js" defer></script>
+</body>
+</html>
