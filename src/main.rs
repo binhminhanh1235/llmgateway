@@ -13,6 +13,7 @@ mod memory_api;
 mod memory_backfill;
 mod response_state;
 mod routing;
+mod semantic_retrieval;
 mod structured_memory;
 mod ui;
 
