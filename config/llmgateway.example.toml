@@ -29,6 +29,25 @@ profile_root = "data/browser-profiles"
 # login_url = "https://chat.qwen.ai/"
 # enabled = true
 
+# Optional local Chromium launcher. This is separate from browser session persistence so API-only
+# and headless deployments remain unchanged. The driver always uses the isolated profile above,
+# binds DevTools to 127.0.0.1, and observes only sanitized page URLs (query/fragment removed).
+[chromium]
+enabled = false
+# executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+startup_timeout_seconds = 15
+extra_args = []
+
+# Enable a driver mapping for each browser session you want llmgateway to launch/verify.
+# ready_url_prefixes are used only to decide whether normal interactive login reached an authenticated page.
+# [chromium.sessions.gemini-web-primary]
+# enabled = true
+# ready_url_prefixes = ["https://gemini.google.com/app"]
+#
+# [chromium.sessions.qwen-web-primary]
+# enabled = true
+# ready_url_prefixes = ["https://chat.qwen.ai/"]
+
 # Account-level usage/quota state is persisted in the same SQLite database.
 # 429 cooldown applies to the whole account, not only the route that failed.
 [usage]

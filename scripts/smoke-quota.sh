@@ -103,11 +103,15 @@ for _ in {1..60}; do
 done
 
 # v0.11 embeds the account control-plane module in the Rust binary and loads it from the UI shell.
-curl -fsS http://127.0.0.1:7331/ | grep -q '/ui/account-control.js'
-curl -fsS http://127.0.0.1:7331/ | grep -q '/ui/account-control.css'
-curl -fsS http://127.0.0.1:7331/ui/account-control.js | grep -q '/_llmgateway/usage'
-curl -fsS http://127.0.0.1:7331/ui/account-control.js | grep -q 'quota/reset'
-curl -fsS http://127.0.0.1:7331/ui/account-control.css | grep -q '.usage-overview'
+# Capture responses before grepping so `grep -q` cannot close a curl pipe early under `pipefail`.
+UI_HTML=$(curl -fsS http://127.0.0.1:7331/)
+UI_JS=$(curl -fsS http://127.0.0.1:7331/ui/account-control.js)
+UI_CSS=$(curl -fsS http://127.0.0.1:7331/ui/account-control.css)
+grep -q '/ui/account-control.js' <<<"$UI_HTML"
+grep -q '/ui/account-control.css' <<<"$UI_HTML"
+grep -q '/_llmgateway/usage' <<<"$UI_JS"
+grep -q 'quota/reset' <<<"$UI_JS"
+grep -q '.usage-overview' <<<"$UI_CSS"
 
 curl -fsS -D /tmp/quota-first.headers -o /tmp/quota-first.json \
   -X POST http://127.0.0.1:7331/v1/chat/completions \
