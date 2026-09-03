@@ -72,6 +72,8 @@ class Handler(BaseHTTPRequestHandler):
             text = f"fake reply messages={len(messages)}"
             if "retrieved earlier transcript excerpts" in system_text.lower():
                 text += " retrieval=yes"
+            if "pinned llmgateway memory" in system_text.lower():
+                text += " pin=yes"
 
         if body.get("stream"):
             self.send_response(200)
