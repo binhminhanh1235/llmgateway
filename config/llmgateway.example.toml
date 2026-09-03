@@ -21,12 +21,21 @@ summary_input_tokens = 12000
 summary_max_tokens = 1200
 # summary_model = "llmgateway-auto" # optional; defaults to the thread/requested model
 
-# Relevant excerpts can be retrieved from the part of the transcript already represented by a checkpoint.
-# Retrieval is local and only consumes spare context budget after durable memory + recent turns + current turn.
+# Relevant excerpts are retrieved only from transcript history already represented by a checkpoint.
 retrieval_enabled = true
 retrieval_max_chunks = 3
 retrieval_max_tokens = 2400
 retrieval_min_score = 0.35
+
+# "local" is zero-config and uses the v0.7 lexical/phrase scorer.
+# "hybrid" adds OpenAI-compatible embeddings as a semantic reranker and falls back to local
+# retrieval in the same request if embedding credentials, quota, transport, or response fail.
+retrieval_backend = "local"
+# retrieval_embedding_account = "openrouter-main"
+# retrieval_embedding_model = "openai/text-embedding-3-small"
+retrieval_semantic_weight = 0.70
+retrieval_min_similarity = 0.15
+retrieval_embedding_batch_size = 64
 
 # Providers describe protocols/endpoints. models_path is used by model discovery.
 [[providers]]
