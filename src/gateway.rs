@@ -3,6 +3,7 @@ use crate::{
     browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
+    execution_trace::{AttemptRecord, ExecutionTraceStore},
     quota_usage::{QuotaUsageStore, UsageEvent},
     quota_usage_runtime,
     routing::Router,
@@ -12,14 +13,20 @@ use reqwest::{
     Client, StatusCode,
 };
 use serde_json::Value;
-use std::{env, sync::Arc, time::Duration};
+use std::{
+    env,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
 use tracing::warn;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Gateway {
     pub config: Arc<AppConfig>,
     pub router: Router,
+    pub execution_traces: Arc<ExecutionTraceStore>,
     client: Client,
 }
 
@@ -27,6 +34,7 @@ pub struct RoutedResponse {
     pub response: reqwest::Response,
     pub route: RouteConfig,
     pub usage_event_id: Option<String>,
+    pub request_id: String,
 }
 
 #[derive(Debug, Error)]
@@ -41,10 +49,20 @@ pub enum GatewayError {
     Transport(String),
     #[error("upstream rejected request with {status}: {body}")]
     Upstream { status: StatusCode, body: String },
+    #[error("{source}")]
+    Execution {
+        request_id: String,
+        #[source]
+        source: Box<GatewayError>,
+    },
 }
 
 impl Gateway {
-    pub fn new(config: Arc<AppConfig>, catalog: Arc<ModelCatalog>) -> Result<Self, GatewayError> {
+    pub fn new(
+        config: Arc<AppConfig>,
+        catalog: Arc<ModelCatalog>,
+        execution_traces: Arc<ExecutionTraceStore>,
+    ) -> Result<Self, GatewayError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))
@@ -54,6 +72,7 @@ impl Gateway {
         Ok(Self {
             config,
             router,
+            execution_traces,
             client,
         })
     }
@@ -73,6 +92,18 @@ impl Gateway {
         body: &Value,
         preferred_route: Option<&str>,
     ) -> Result<RoutedResponse, GatewayError> {
+        let request_id = match self
+            .execution_traces
+            .start(requested_model, preferred_route)
+            .await
+        {
+            Ok(request_id) => request_id,
+            Err(error) => {
+                warn!(%error, "failed to start execution trace; continuing request");
+                format!("req_{}", Uuid::new_v4().simple())
+            }
+        };
+
         let mut routes = self.router.plan(requested_model).await;
         if let Some(preferred_route) = preferred_route {
             if let Some(index) = routes.iter().position(|route| route.id == preferred_route) {
@@ -81,26 +112,55 @@ impl Gateway {
             }
         }
         if routes.is_empty() {
-            return Err(GatewayError::NoRoute(requested_model.to_string()));
+            let error = GatewayError::NoRoute(requested_model.to_string());
+            return Err(self.finish_execution_error(&request_id, error).await);
         }
 
         let estimated_input_tokens = QuotaUsageStore::estimate_input_tokens(body);
         let mut last_error: Option<GatewayError> = None;
 
-        for route in routes {
-            let account = self.config.account(&route.account).ok_or_else(|| {
-                GatewayError::InvalidConfig(format!("unknown account '{}'", route.account))
-            })?;
+        for (attempt_index, route) in routes.into_iter().enumerate() {
+            let account = match self.config.account(&route.account) {
+                Some(account) => account,
+                None => {
+                    let error = GatewayError::InvalidConfig(format!(
+                        "unknown account '{}'",
+                        route.account
+                    ));
+                    return Err(self.finish_execution_error(&request_id, error).await);
+                }
+            };
             if !account.enabled {
                 continue;
             }
-            let provider = self.config.provider(&account.provider).ok_or_else(|| {
-                GatewayError::InvalidConfig(format!("unknown provider '{}'", account.provider))
-            })?;
+            let provider = match self.config.provider(&account.provider) {
+                Some(provider) => provider,
+                None => {
+                    let error = GatewayError::InvalidConfig(format!(
+                        "unknown provider '{}'",
+                        account.provider
+                    ));
+                    return Err(self.finish_execution_error(&request_id, error).await);
+                }
+            };
 
+            let attempt_started = Instant::now();
             match self.send_route_chat(provider, account, &route, body).await {
                 Ok(response) if response.status().is_success() => {
                     let status = response.status();
+                    self.record_execution_attempt(AttemptRecord {
+                        request_id: &request_id,
+                        attempt_index,
+                        route_id: &route.id,
+                        account_id: &account.id,
+                        model: &route.model,
+                        status_code: Some(status.as_u16()),
+                        outcome: "success",
+                        retryable: false,
+                        duration_ms: attempt_started.elapsed().as_millis(),
+                        error: None,
+                    })
+                    .await;
                     let usage_event_id = self
                         .record_usage(
                             account,
@@ -120,10 +180,13 @@ impl Gateway {
                         }
                     }
                     self.router.mark_success(&route.id).await;
+                    self.complete_execution(&request_id, "success", Some(&route.id), None)
+                        .await;
                     return Ok(RoutedResponse {
                         response,
                         route,
                         usage_event_id,
+                        request_id,
                     });
                 }
                 Ok(response) => {
@@ -148,6 +211,19 @@ impl Gateway {
                     } else {
                         "upstream_error"
                     };
+                    self.record_execution_attempt(AttemptRecord {
+                        request_id: &request_id,
+                        attempt_index,
+                        route_id: &route.id,
+                        account_id: &account.id,
+                        model: &route.model,
+                        status_code: Some(status.as_u16()),
+                        outcome,
+                        retryable,
+                        duration_ms: attempt_started.elapsed().as_millis(),
+                        error: Some(&body_text),
+                    })
+                    .await;
                     self.record_usage(
                         account,
                         &route,
@@ -192,21 +268,35 @@ impl Gateway {
                         body: body_text,
                     };
                     if !retryable {
-                        return Err(error);
+                        return Err(self.finish_execution_error(&request_id, error).await);
                     }
                     last_error = Some(error);
                 }
                 Err(error) => {
+                    let error_text = error.to_string();
                     self.router
-                        .mark_failure(&route.id, error.to_string(), 10)
+                        .mark_failure(&route.id, error_text.clone(), 10)
                         .await;
+                    self.record_execution_attempt(AttemptRecord {
+                        request_id: &request_id,
+                        attempt_index,
+                        route_id: &route.id,
+                        account_id: &account.id,
+                        model: &route.model,
+                        status_code: None,
+                        outcome: "transport_error",
+                        retryable: true,
+                        duration_ms: attempt_started.elapsed().as_millis(),
+                        error: Some(&error_text),
+                    })
+                    .await;
                     self.record_usage(
                         account,
                         &route,
                         None,
                         "transport_error",
                         estimated_input_tokens,
-                        Some(&error.to_string()),
+                        Some(&error_text),
                     )
                     .await;
                     last_error = Some(error);
@@ -214,7 +304,40 @@ impl Gateway {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| GatewayError::NoRoute(requested_model.to_string())))
+        let error = last_error.unwrap_or_else(|| GatewayError::NoRoute(requested_model.to_string()));
+        Err(self.finish_execution_error(&request_id, error).await)
+    }
+
+    async fn record_execution_attempt(&self, record: AttemptRecord<'_>) {
+        if let Err(error) = self.execution_traces.record_attempt(record).await {
+            warn!(%error, "failed to record execution attempt");
+        }
+    }
+
+    async fn complete_execution(
+        &self,
+        request_id: &str,
+        status: &str,
+        selected_route: Option<&str>,
+        final_error: Option<&str>,
+    ) {
+        if let Err(error) = self
+            .execution_traces
+            .complete(request_id, status, selected_route, final_error)
+            .await
+        {
+            warn!(%error, request_id, "failed to complete execution trace");
+        }
+    }
+
+    async fn finish_execution_error(&self, request_id: &str, error: GatewayError) -> GatewayError {
+        let error_text = error.to_string();
+        self.complete_execution(request_id, "failed", None, Some(&error_text))
+            .await;
+        GatewayError::Execution {
+            request_id: request_id.to_string(),
+            source: Box::new(error),
+        }
     }
 
     async fn record_usage(
