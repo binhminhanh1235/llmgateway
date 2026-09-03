@@ -102,6 +102,13 @@ for _ in {1..60}; do
   sleep 0.2
 done
 
+# v0.11 embeds the account control-plane module in the Rust binary and loads it from the UI shell.
+curl -fsS http://127.0.0.1:7331/ | grep -q '/ui/account-control.js'
+curl -fsS http://127.0.0.1:7331/ | grep -q '/ui/account-control.css'
+curl -fsS http://127.0.0.1:7331/ui/account-control.js | grep -q '/_llmgateway/usage'
+curl -fsS http://127.0.0.1:7331/ui/account-control.js | grep -q 'quota/reset'
+curl -fsS http://127.0.0.1:7331/ui/account-control.css | grep -q '.usage-overview'
+
 curl -fsS -D /tmp/quota-first.headers -o /tmp/quota-first.json \
   -X POST http://127.0.0.1:7331/v1/chat/completions \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
@@ -170,4 +177,4 @@ assert x["remaining_requests_hint"] is None, x
 assert x["daily"]["requests"] == 1, x
 '
 
-echo "llmgateway quota usage smoke test passed"
+echo "llmgateway quota usage + account control UI smoke test passed"
