@@ -1,12 +1,14 @@
 use crate::{
     api::{authorize, gateway_error, json_error, json_response, response_with_route, AppState},
+    context_engine::{ContextError, PreparedContext},
+    context_runtime,
     conversation::{openai_stream_with_capture, ConversationError},
     gateway::GatewayError,
 };
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::Response,
     Json,
 };
@@ -27,6 +29,11 @@ pub struct ThreadMessageRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub stream: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompactContextRequest {
+    pub model: Option<String>,
 }
 
 pub async fn create_thread(
@@ -109,6 +116,55 @@ pub async fn delete_thread(
     }
 }
 
+pub async fn get_thread_context(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    let engine = match context_runtime::get() {
+        Some(engine) => engine,
+        None => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "context_engine_error",
+                "context engine is not initialized",
+            )
+        }
+    };
+    match engine.status(&thread_id, None).await {
+        Ok(status) => json_response(StatusCode::OK, json!(status), None),
+        Err(error) => context_error(error),
+    }
+}
+
+pub async fn compact_thread_context(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<CompactContextRequest>,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    let engine = match context_runtime::get() {
+        Some(engine) => engine,
+        None => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "context_engine_error",
+                "context engine is not initialized",
+            )
+        }
+    };
+    match engine.compact(&thread_id, body.model.as_deref()).await {
+        Ok(status) => json_response(StatusCode::OK, json!(status), None),
+        Err(error) => context_error(error),
+    }
+}
+
 pub async fn send_thread_message(
     State(state): State<AppState>,
     Path(thread_id): Path<String>,
@@ -119,13 +175,32 @@ pub async fn send_thread_message(
         return response;
     }
 
-    let context = match state.conversations.context(&thread_id).await {
+    let thread_context = match state.conversations.context(&thread_id).await {
         Ok(context) => context,
         Err(error) => return conversation_error(error),
     };
-    let requested_model = body.model.as_deref().unwrap_or(&context.model).to_string();
+    let requested_model = body
+        .model
+        .as_deref()
+        .unwrap_or(&thread_context.model)
+        .to_string();
+    let engine = match context_runtime::get() {
+        Some(engine) => engine,
+        None => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "context_engine_error",
+                "context engine is not initialized",
+            )
+        }
+    };
+    let prepared = match engine.prepare(&thread_id, &requested_model).await {
+        Ok(prepared) => prepared,
+        Err(error) => return context_error(error),
+    };
+
     let user_message = json!({"role":"user","content":body.content});
-    let mut messages = context.messages.clone();
+    let mut messages = prepared.messages.clone();
     messages.push(user_message.clone());
     let request = json!({
         "model":requested_model,
@@ -138,7 +213,7 @@ pub async fn send_thread_message(
         .execute_openai_chat_with_affinity(
             &requested_model,
             &request,
-            context.sticky_route.as_deref(),
+            thread_context.sticky_route.as_deref(),
         )
         .await
     {
@@ -181,12 +256,13 @@ pub async fn send_thread_message(
                     .await;
             }
         });
-        return response_with_route(
+        let response = response_with_route(
             StatusCode::OK,
             "text/event-stream",
             Body::from_stream(stream),
             &route_id,
         );
+        return with_context_headers(response, &prepared);
     }
 
     match routed.response.json::<Value>().await {
@@ -211,9 +287,55 @@ pub async fn send_thread_message(
                     return conversation_error(error);
                 }
             }
-            json_response(StatusCode::OK, openai, Some(&route_id))
+            let response = json_response(StatusCode::OK, openai, Some(&route_id));
+            with_context_headers(response, &prepared)
         }
         Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
+    }
+}
+
+fn with_context_headers(mut response: Response<Body>, prepared: &PreparedContext) -> Response<Body> {
+    let state = if prepared.compressed { "compressed" } else { "full" };
+    if let Ok(value) = HeaderValue::from_str(state) {
+        response.headers_mut().insert("x-llmgateway-context", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&prepared.estimated_prepared_tokens.to_string()) {
+        response
+            .headers_mut()
+            .insert("x-llmgateway-context-tokens", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&prepared.budget_tokens.to_string()) {
+        response
+            .headers_mut()
+            .insert("x-llmgateway-context-budget", value);
+    }
+    response
+}
+
+fn context_error(error: ContextError) -> Response<Body> {
+    match error {
+        ContextError::Conversation(error) => conversation_error(error),
+        ContextError::Gateway(error) => gateway_error(error),
+        ContextError::Database(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "context_database_error",
+            &error.to_string(),
+        ),
+        ContextError::Io(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "context_storage_error",
+            &error.to_string(),
+        ),
+        ContextError::InvalidJson(message) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "context_json_error",
+            &message,
+        ),
+        ContextError::EmptySummary => json_error(
+            StatusCode::BAD_GATEWAY,
+            "context_summary_error",
+            "summary model returned no text",
+        ),
     }
 }
 
