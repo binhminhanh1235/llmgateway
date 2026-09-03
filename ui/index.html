@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark" />
   <title>llmgateway</title>
   <link rel="stylesheet" href="/ui/app.css" />
+  <link rel="stylesheet" href="/ui/account-control.css" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -65,9 +66,9 @@
         <header class="topbar">
           <div>
             <h1 class="page-title">Accounts</h1>
-            <div class="page-subtitle">See exactly which models each account can use</div>
+            <div class="page-subtitle">Quota, health, and model availability across every account</div>
           </div>
-          <button id="refreshAccountsButton" class="secondary-button" type="button">Refresh list</button>
+          <button id="refreshAccountsButton" class="secondary-button" type="button">Refresh</button>
         </header>
         <div id="accountsContent" class="content-scroll"></div>
       </section>
@@ -115,5 +116,6 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="/ui/app.js" defer></script>
+  <script src="/ui/account-control.js" defer></script>
 </body>
 </html>
