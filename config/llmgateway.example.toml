@@ -9,6 +9,27 @@ default_model = "llmgateway-auto"
 [storage]
 database_url = "sqlite://data/llmgateway.db"
 
+# Account-level usage/quota state is persisted in the same SQLite database.
+# 429 cooldown applies to the whole account, not only the route that failed.
+[usage]
+enabled = true
+hard_limits = true
+default_rate_limit_cooldown_seconds = 60
+# Adds a small penalty for accounts already used more today. Set 0 to disable balancing.
+balance_weight = 1
+
+# Optional local budget hints. Leave a field unset when the provider does not expose a stable limit.
+# [usage.accounts.gemini-primary]
+# daily_request_limit = 1000
+# monthly_request_limit = 20000
+# daily_token_limit = 2000000
+# monthly_token_limit = 40000000
+# rate_limit_cooldown_seconds = 60
+
+# [usage.accounts.gemini-secondary]
+# daily_request_limit = 1000
+# monthly_request_limit = 20000
+
 # Context is compiled before persistent-thread requests are sent upstream.
 # Full transcripts remain in SQLite; checkpoints only replace older turns in the model input.
 [context]
