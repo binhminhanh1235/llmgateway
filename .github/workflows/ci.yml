@@ -13,6 +13,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - run: node --check ui/app.js
       - run: cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
