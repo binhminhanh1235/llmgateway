@@ -1,6 +1,8 @@
 use crate::{
     catalog::ModelCatalog,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
+    quota_usage::{QuotaUsageStore, UsageEvent},
+    quota_usage_runtime,
     routing::Router,
 };
 use reqwest::{
@@ -10,6 +12,7 @@ use reqwest::{
 use serde_json::Value;
 use std::{env, sync::Arc, time::Duration};
 use thiserror::Error;
+use tracing::warn;
 
 #[derive(Clone)]
 pub struct Gateway {
@@ -21,6 +24,7 @@ pub struct Gateway {
 pub struct RoutedResponse {
     pub response: reqwest::Response,
     pub route: RouteConfig,
+    pub usage_event_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -78,6 +82,7 @@ impl Gateway {
             return Err(GatewayError::NoRoute(requested_model.to_string()));
         }
 
+        let estimated_input_tokens = QuotaUsageStore::estimate_input_tokens(body);
         let mut last_error: Option<GatewayError> = None;
 
         for route in routes {
@@ -103,17 +108,80 @@ impl Gateway {
                 .await
             {
                 Ok(response) if response.status().is_success() => {
+                    let status = response.status();
+                    let usage_event_id = self
+                        .record_usage(
+                            account,
+                            &route,
+                            Some(status),
+                            "success",
+                            estimated_input_tokens,
+                            None,
+                        )
+                        .await;
+                    if let Some(usage) = quota_usage_runtime::get() {
+                        if let Err(error) = usage.observe_headers(&account.id, response.headers()).await {
+                            warn!(%error, account = %account.id, "failed to observe quota headers");
+                        }
+                        if let Err(error) = usage.mark_success(&account.id).await {
+                            warn!(%error, account = %account.id, "failed to clear quota cooldown");
+                        }
+                    }
                     self.router.mark_success(&route.id).await;
-                    return Ok(RoutedResponse { response, route });
+                    return Ok(RoutedResponse {
+                        response,
+                        route,
+                        usage_event_id,
+                    });
                 }
                 Ok(response) => {
                     let status = response.status();
+                    let retry_after = QuotaUsageStore::retry_after_seconds(response.headers());
+                    if let Some(usage) = quota_usage_runtime::get() {
+                        if let Err(error) = usage.observe_headers(&account.id, response.headers()).await {
+                            warn!(%error, account = %account.id, "failed to observe quota headers");
+                        }
+                    }
                     let body_text = response.text().await.unwrap_or_default();
                     let retryable = is_retryable_status(status);
                     let cooldown = cooldown_for(status);
                     self.router
                         .mark_failure(&route.id, format!("HTTP {status}: {body_text}"), cooldown)
                         .await;
+
+                    let outcome = if status == StatusCode::TOO_MANY_REQUESTS {
+                        "rate_limited"
+                    } else if matches!(status.as_u16(), 401 | 403) {
+                        "authentication_error"
+                    } else {
+                        "upstream_error"
+                    };
+                    self.record_usage(
+                        account,
+                        &route,
+                        Some(status),
+                        outcome,
+                        estimated_input_tokens,
+                        Some(&body_text),
+                    )
+                    .await;
+                    if let Some(usage) = quota_usage_runtime::get() {
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            if let Err(error) = usage
+                                .mark_rate_limited(&account.id, retry_after, &body_text)
+                                .await
+                            {
+                                warn!(%error, account = %account.id, "failed to persist rate limit");
+                            }
+                        } else if matches!(status.as_u16(), 401 | 403) {
+                            if let Err(error) = usage
+                                .mark_account_cooldown(&account.id, cooldown, &body_text)
+                                .await
+                            {
+                                warn!(%error, account = %account.id, "failed to persist account cooldown");
+                            }
+                        }
+                    }
 
                     let error = GatewayError::Upstream {
                         status,
@@ -128,12 +196,53 @@ impl Gateway {
                     self.router
                         .mark_failure(&route.id, error.to_string(), 10)
                         .await;
+                    self.record_usage(
+                        account,
+                        &route,
+                        None,
+                        "transport_error",
+                        estimated_input_tokens,
+                        Some(&error.to_string()),
+                    )
+                    .await;
                     last_error = Some(error);
                 }
             }
         }
 
         Err(last_error.unwrap_or_else(|| GatewayError::NoRoute(requested_model.to_string())))
+    }
+
+    async fn record_usage(
+        &self,
+        account: &AccountConfig,
+        route: &RouteConfig,
+        status: Option<StatusCode>,
+        outcome: &str,
+        input_tokens: u64,
+        error: Option<&str>,
+    ) -> Option<String> {
+        let usage = quota_usage_runtime::get()?;
+        match usage
+            .record_event(UsageEvent {
+                account_id: &account.id,
+                route_id: &route.id,
+                model: &route.model,
+                status_code: status.map(|value| value.as_u16()),
+                outcome,
+                input_tokens,
+                output_tokens: 0,
+                usage_source: "estimated-input",
+                error,
+            })
+            .await
+        {
+            Ok(event_id) => event_id,
+            Err(error) => {
+                warn!(%error, account = %account.id, route = %route.id, "failed to record usage event");
+                None
+            }
+        }
     }
 
     async fn send_openai_chat(
