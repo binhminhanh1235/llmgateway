@@ -1,6 +1,6 @@
 [package]
 name = "llmgateway"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 description = "Local-first universal LLM gateway with multi-account routing and failover"
 license = "MIT"
@@ -19,6 +19,7 @@ serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.28"
 toml = "0.8"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
