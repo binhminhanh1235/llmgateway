@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 #[derive(Debug, Deserialize)]
 pub struct ExplainRoutesRequest {
@@ -30,6 +30,3 @@ pub async fn explain_routes(
     let trace = state.gateway.router.explain(&requested_model).await;
     json_response(StatusCode::OK, json!(trace), None)
 }
-
-#[allow(dead_code)]
-fn _assert_json_value(_: Value) {}
