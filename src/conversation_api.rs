@@ -194,17 +194,18 @@ pub async fn send_thread_message(
             )
         }
     };
-    let prepared = match engine.prepare(&thread_id, &requested_model).await {
+
+    let user_message = json!({"role":"user","content":body.content});
+    let prepared = match engine
+        .prepare_turn(&thread_id, &requested_model, &user_message)
+        .await
+    {
         Ok(prepared) => prepared,
         Err(error) => return context_error(error),
     };
-
-    let user_message = json!({"role":"user","content":body.content});
-    let mut messages = prepared.messages.clone();
-    messages.push(user_message.clone());
     let request = json!({
         "model":requested_model,
-        "messages":messages,
+        "messages":prepared.messages,
         "stream":body.stream
     });
 
@@ -299,6 +300,11 @@ fn with_context_headers(mut response: Response<Body>, prepared: &PreparedContext
     if let Ok(value) = HeaderValue::from_str(state) {
         response.headers_mut().insert("x-llmgateway-context", value);
     }
+    if let Ok(value) = HeaderValue::from_str(&prepared.estimated_source_tokens.to_string()) {
+        response
+            .headers_mut()
+            .insert("x-llmgateway-context-source-tokens", value);
+    }
     if let Ok(value) = HeaderValue::from_str(&prepared.estimated_prepared_tokens.to_string()) {
         response
             .headers_mut()
@@ -308,6 +314,13 @@ fn with_context_headers(mut response: Response<Body>, prepared: &PreparedContext
         response
             .headers_mut()
             .insert("x-llmgateway-context-budget", value);
+    }
+    if let Some(checkpoint) = &prepared.checkpoint {
+        if let Ok(value) = HeaderValue::from_str(&checkpoint.id) {
+            response
+                .headers_mut()
+                .insert("x-llmgateway-context-checkpoint", value);
+        }
     }
     response
 }
