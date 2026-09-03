@@ -1,13 +1,16 @@
 # llmgateway
 
-A local-first universal LLM gateway written in Rust. Point coding agents and OpenAI/Anthropic-compatible clients at one endpoint, or use the built-in local chat UI, while llmgateway selects an account/model route and fails over when an upstream becomes unavailable or rate-limited.
+A local-first universal LLM gateway written in Rust. Point coding agents and OpenAI/Anthropic-compatible clients at one endpoint, or use the built-in local chat UI, while llmgateway selects an account/model route, keeps conversation state, and fails over when an upstream becomes unavailable or rate-limited.
 
-## What exists in v0.3
+## What exists in v0.4
 
 - OpenAI-compatible `POST /v1/chat/completions`
 - OpenAI-compatible `POST /v1/responses` for clients such as Codex
 - Anthropic-compatible `POST /v1/messages` for clients such as Claude Code
 - OpenAI-compatible `GET /v1/models`
+- Persistent server-side threads and messages in SQLite
+- Stateful `previous_response_id` for Responses API chains
+- Sticky route affinity per persistent thread and Responses chain
 - Multi-provider and multi-account configuration
 - SQLite-backed model catalog
 - Per-account model discovery through provider `/models` endpoints
@@ -16,11 +19,12 @@ A local-first universal LLM gateway written in Rust. Point coding agents and Ope
 - Canonical physical model IDs such as `gemini/gemini-3.7-flash`
 - Dynamic routes for discovered account/model pairs
 - Virtual models such as `llmgateway-auto`, `llmgateway-coding`, and `llmgateway-best`
-- Ordered failover and lightweight route cooldown for 401/403/429/5xx responses
+- Ordered failover and route cooldown for 401/403/429/5xx responses
 - OpenAI SSE passthrough and Anthropic SSE translation
 - `x-llmgateway-route` response header for route diagnostics
 - Embedded local chat/admin UI with no frontend build step
-- Local chat threads with independent context in browser storage
+- Local UI backed by server-side SQLite threads
+- Automatic migration of v0.3 browser-local threads when the server has no threads yet
 - Model picker driven by the live model catalog
 - Account/model management and model refresh from the UI
 - Example configurations for Claude Code, Codex, and OpenCode
@@ -33,17 +37,19 @@ The gateway currently uses OpenAI Chat Completions as the common upstream protoc
 Claude Code ─ Anthropic Messages ─┐
 Codex ───── OpenAI Responses ─────┤
 OpenCode ───── OpenAI Chat ───────┤
-Local UI ───── OpenAI Chat ───────┤
+Local UI ───── Thread API ─────────┤
                                   ▼
                            ┌──────────────┐
                            │  llmgateway  │
                            └──────┬───────┘
                                   │
-                         virtual / physical model
-                                  │
-                           SQLite model catalog
-                                  │
-                     account-model availability
+                   ┌──────────────┴──────────────┐
+                   │                             │
+              Conversation                  Model catalog
+                 store                         store
+                   │                             │
+            messages / route            account availability
+                   └──────────────┬──────────────┘
                                   │
                            route planning
                                   │
@@ -55,33 +61,13 @@ Local UI ───── OpenAI Chat ───────┤
 
 ## Quick start
 
-### 1. Configure
-
 ```bash
 cp config/llmgateway.example.toml config/llmgateway.toml
 cp .env.example .env
-```
-
-Add at least one upstream credential and set `LLMGATEWAY_API_KEY` in `.env`.
-
-The default catalog database is:
-
-```text
-data/llmgateway.db
-```
-
-You can change it with:
-
-```toml
-[storage]
-database_url = "sqlite://data/llmgateway.db"
-```
-
-### 2. Run
-
-```bash
 cargo run --release
 ```
+
+Set `LLMGATEWAY_API_KEY` and at least one upstream credential in `.env`.
 
 Default endpoint:
 
@@ -89,7 +75,13 @@ Default endpoint:
 http://127.0.0.1:7331
 ```
 
-### 3. Open the local UI
+The default SQLite database is:
+
+```text
+data/llmgateway.db
+```
+
+## Local UI
 
 Open:
 
@@ -97,22 +89,119 @@ Open:
 http://127.0.0.1:7331/
 ```
 
-Enter `LLMGATEWAY_API_KEY` when prompted. The UI can keep the key for the browser session or, only when explicitly selected, remember it in local browser storage.
+The UI now uses the persistent thread API. A brand-new chat stays as an in-browser draft until the first message is sent. At that point the gateway creates a server thread and SQLite becomes the source of truth for its history.
 
 The UI supports:
 
-- multiple chat threads
-- separate message context for each thread
+- multiple persistent chat threads
 - streaming responses
 - `Auto`, virtual policies, and physical model selection
-- automatic account selection after choosing a physical model
+- sticky account/model routing behind each thread
+- automatic failover when the sticky route becomes unavailable
 - actual route display after each response
 - account cards showing which models each account exposes
 - refresh model discovery per account
 - enable/disable individual account-model bindings
 - full model catalog search
 
-v0.3 chat threads are stored client-side in browser `localStorage`. Each request sends that thread's message history, so context remains isolated per thread. Server-side persistent threads and checkpoints are planned for a later release.
+When upgrading from v0.3, the UI can import old browser-local chat history into SQLite when the server has no persistent threads yet.
+
+## Persistent Thread API
+
+Create a thread:
+
+```bash
+curl -X POST http://127.0.0.1:7331/v1/threads \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":"Kafka deep dive",
+    "model":"llmgateway-auto"
+  }'
+```
+
+List threads:
+
+```bash
+curl http://127.0.0.1:7331/v1/threads \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
+```
+
+Read one thread:
+
+```bash
+curl http://127.0.0.1:7331/v1/threads/<thread_id> \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
+```
+
+Send a message while letting llmgateway own the context:
+
+```bash
+curl -N -X POST http://127.0.0.1:7331/v1/threads/<thread_id>/messages \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content":"Explain Kafka zero copy",
+    "model":"llmgateway-auto",
+    "stream":true
+  }'
+```
+
+The request contains only the new message. llmgateway loads prior messages from SQLite, prefers the thread's sticky route, and stores the completed assistant message back into the thread.
+
+Delete a thread:
+
+```bash
+curl -X DELETE http://127.0.0.1:7331/v1/threads/<thread_id> \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
+```
+
+`POST /v1/threads` also accepts an optional `messages` array, used by the UI to import v0.3 local history.
+
+## Responses API state
+
+`previous_response_id` is supported in v0.4. llmgateway stores the full normalized OpenAI message context plus the selected route for each completed response.
+
+First response:
+
+```bash
+curl http://127.0.0.1:7331/v1/responses \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model":"llmgateway-coding",
+    "input":"Inspect this design"
+  }'
+```
+
+Then continue with the returned response ID:
+
+```bash
+curl http://127.0.0.1:7331/v1/responses \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model":"llmgateway-coding",
+    "previous_response_id":"resp_...",
+    "input":"Now challenge the concurrency assumptions"
+  }'
+```
+
+For streaming Responses requests, state is committed after the `response.completed` event is consumed.
+
+## Sticky routing
+
+A persistent conversation stores the route that successfully served its last turn:
+
+```text
+thread_123
+  model: llmgateway-auto
+  sticky_route: discovered:qwen-primary:qwen-coder
+```
+
+The next turn tries that route first. If it is unavailable, rate-limited, or cooling down, the normal route planner continues through the fallback candidates. The successful replacement route becomes the new sticky route.
+
+The same affinity behavior is used for `previous_response_id` chains.
 
 ## API example
 
@@ -126,11 +215,11 @@ curl http://127.0.0.1:7331/v1/chat/completions \
   }'
 ```
 
+`/v1/chat/completions` remains stateless by design because many external clients already own their full message history. Use `/v1/threads` when llmgateway should own the conversation state.
+
 ## Model catalog and discovery
 
 Configured route models are seeded into SQLite at startup. They begin with `unknown` availability until provider discovery verifies them.
-
-List accounts:
 
 ```bash
 curl http://127.0.0.1:7331/_llmgateway/accounts \
@@ -145,13 +234,6 @@ curl -X POST \
   -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
 ```
 
-Show that account's models:
-
-```bash
-curl http://127.0.0.1:7331/_llmgateway/accounts/gemini-primary/models \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
-```
-
 Enable or disable a model for one account:
 
 ```bash
@@ -159,26 +241,12 @@ curl -X PATCH \
   http://127.0.0.1:7331/_llmgateway/accounts/gemini-primary/models \
   -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model_id":"gemini/gemini-3.7-flash",
-    "enabled":false
-  }'
+  -d '{"model_id":"gemini/gemini-3.7-flash","enabled":false}'
 ```
 
-Show the full catalog:
+`GET /v1/models` exposes virtual policies, canonical physical models, and older explicit route IDs retained for compatibility.
 
-```bash
-curl http://127.0.0.1:7331/_llmgateway/models \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
-```
-
-`GET /v1/models` exposes:
-
-- virtual policies, for example `llmgateway-auto`
-- canonical physical models, for example `gemini/gemini-3.7-flash`
-- older explicit route IDs retained for client compatibility
-
-### Choose a model, not an account
+## Choose a model, not an account
 
 ```bash
 curl http://127.0.0.1:7331/v1/chat/completions \
@@ -190,37 +258,7 @@ curl http://127.0.0.1:7331/v1/chat/completions \
   }'
 ```
 
-The `gemini/` prefix locks the provider/model choice, but llmgateway still chooses the best enabled Gemini account that exposes the model. If that account fails with a retryable error, another enabled account for the same physical model may take over.
-
-## Provider discovery configuration
-
-```toml
-[[providers]]
-id = "openrouter"
-kind = "openai-compatible"
-base_url = "https://openrouter.ai/api/v1"
-models_path = "models"
-
-[[accounts]]
-id = "openrouter-main"
-provider = "openrouter"
-api_key_env = "OPENROUTER_API_KEY"
-enabled = true
-discover_models = true
-```
-
-Discovery supports common OpenAI model-list responses (`data: [...]`) and Gemini-style native responses (`models: [...]`). Raw model metadata is retained in SQLite for richer capability/routing logic later.
-
-## Virtual models
-
-A virtual model is a routing policy rather than a concrete upstream model.
-
-```toml
-[virtual_models.llmgateway-coding]
-routes = ["qwen-coder", "gemini-primary", "openrouter-fallback"]
-```
-
-If a route receives a retryable failure such as `429`, llmgateway cools that route down and tries the next candidate.
+The `gemini/` prefix locks the provider/model choice, but llmgateway still chooses the best enabled Gemini account that exposes that model.
 
 ## Claude Code
 
@@ -231,11 +269,9 @@ export ANTHROPIC_AUTH_TOKEN="$LLMGATEWAY_API_KEY"
 claude
 ```
 
-Model aliases let Claude Code continue requesting familiar Claude model names while llmgateway maps them to routing policies.
-
 ## Codex
 
-Use `examples/codex-config.toml`. The provider uses the Responses wire protocol. `previous_response_id` is still intentionally unsupported until server-side response/thread state is implemented.
+Use `examples/codex-config.toml`. The provider uses the Responses wire protocol. v0.4 persists Responses chains so clients can continue via `previous_response_id`.
 
 ## OpenCode
 
@@ -268,16 +304,16 @@ Security defaults:
 
 ## Failover behavior
 
-Retryable statuses currently include 401, 403, 408, 409, 429, and common 5xx failures. Failover happens before a successful upstream stream is handed to the client. Once output is already streaming, v0.3 does not splice a second model into the same answer.
+Retryable statuses currently include 401, 403, 408, 409, 429, and common 5xx failures. Failover happens before a successful upstream stream is handed to the client. Once output is already streaming, llmgateway does not splice a second model into the same answer.
 
 ## Roadmap
 
-1. Persistent server-side threads, checkpoints, and `previous_response_id`.
-2. Sticky account routing and quota-domain/usage persistence.
+1. Conversation checkpoints, rolling summaries, and context compaction.
+2. Persistent quota-domain and usage tracking.
 3. Browser-session accounts using isolated persistent profiles.
 4. Cost, latency, and capability-aware route scoring.
 5. Per-client API keys, budgets, and routing policies.
-6. Richer UI controls for priorities, usage, and route explanations.
+6. Route explanations and usage dashboards.
 
 ## License
 
