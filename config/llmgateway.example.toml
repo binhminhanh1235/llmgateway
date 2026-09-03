@@ -16,26 +16,31 @@ database_url = "sqlite://data/llmgateway.db"
 enabled = false
 profile_root = "data/browser-profiles"
 
-# Enable the browser section and one or more sessions when you are ready to use the web adapter.
+# Enable the browser section and one or more sessions when you are ready to use a browser adapter.
 # [browser.sessions.gemini-web-primary]
-# provider = "gemini"
+# provider = "gemini-web"
 # label = "Gemini web primary"
 # login_url = "https://gemini.google.com/app"
 # enabled = true
 #
 # [browser.sessions.qwen-web-primary]
-# provider = "qwen"
+# provider = "qwen-web"
 # label = "Qwen web primary"
 # login_url = "https://chat.qwen.ai/"
 # enabled = true
 #
 # Browser-backed gateway accounts are explicitly bound to one session. A browser route is
-# eligible only while its bound session is READY.
+# eligible only while its bound session is READY. CDP bindings can also choose the page and
+# provider-specific trusted local adapter script.
 # [browser.bindings.gemini-web-account]
 # session = "gemini-web-primary"
+# target_url_prefix = "https://gemini.google.com/app"
+# adapter_script = "adapters/gemini.js"
 #
 # [browser.bindings.qwen-web-account]
 # session = "qwen-web-primary"
+# target_url_prefix = "https://chat.qwen.ai/"
+# adapter_script = "adapters/qwen.js"
 
 # Optional local Chromium launcher. This is separate from browser session persistence so API-only
 # and headless deployments remain unchanged. The driver always uses the isolated profile above,
@@ -105,7 +110,7 @@ retrieval_semantic_weight = 0.70
 retrieval_min_similarity = 0.15
 retrieval_embedding_batch_size = 64
 
-# Providers describe protocols/endpoints. models_path is used by model discovery.
+# Providers describe execution protocols/endpoints. models_path is used by API model discovery.
 [[providers]]
 id = "openrouter"
 kind = "openai-compatible"
@@ -124,15 +129,25 @@ kind = "openai-compatible"
 base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 models_path = "models"
 
-# v0.15 also registers the browser-http adapter contract. It is intended for a local bridge
-# implementation and sends only opaque session/account/route IDs, never raw cookies or profile paths.
+# v0.16+ browser-cdp executes a trusted local adapter script inside an authenticated Chromium page.
+# Browser providers do not require base_url unless their adapter itself uses it as configuration.
+# [[providers]]
+# id = "gemini-web"
+# kind = "browser-cdp"
+#
+# [[providers]]
+# id = "qwen-web"
+# kind = "browser-cdp"
+
+# v0.15 browser-http remains available for a local bridge/test adapter.
 # [[providers]]
 # id = "gemini-web-bridge"
 # kind = "browser-http"
 # base_url = "http://127.0.0.1:7441/v1"
 # models_path = "models"
 
-# Accounts are credential/quota domains. Each account gets its own discovered model availability.
+# Accounts are credential/quota domains. API accounts require api_key_env and default to
+# model discovery enabled.
 [[accounts]]
 id = "openrouter-main"
 provider = "openrouter"
@@ -165,17 +180,19 @@ auth_style = "bearer"
 enabled = true
 discover_models = true
 
-# The generic v0.15 account schema still requires api_key_env/auth_style for browser accounts,
-# but browser-http never reads the credential environment variable. Model discovery must stay off.
+# v0.17 browser accounts are first-class: no dummy api_key_env/auth_style is required and
+# API model discovery is automatically disabled for every browser-* provider.
 # [[accounts]]
 # id = "gemini-web-account"
-# provider = "gemini-web-bridge"
-# api_key_env = "BROWSER_ACCOUNT_UNUSED"
-# auth_style = "bearer"
+# provider = "gemini-web"
 # enabled = true
-# discover_models = false
+#
+# [[accounts]]
+# id = "qwen-web-account"
+# provider = "qwen-web"
+# enabled = true
 
-# Routes are explicit preferred bindings. Discovered account/model pairs can also be used dynamically.
+# Routes are explicit preferred bindings. Discovered API account/model pairs can also be used dynamically.
 [[routes]]
 id = "gemini-primary"
 account = "gemini-primary"
@@ -213,6 +230,14 @@ capabilities = ["chat", "tools", "coding"]
 # account = "gemini-web-account"
 # model = "gemini-web-model"
 # priority = 5
+# enabled = true
+# capabilities = ["chat"]
+#
+# [[routes]]
+# id = "qwen-web-route"
+# account = "qwen-web-account"
+# model = "qwen-web-model"
+# priority = 6
 # enabled = true
 # capabilities = ["chat"]
 
