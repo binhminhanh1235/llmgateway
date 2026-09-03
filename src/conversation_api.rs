@@ -1,0 +1,221 @@
+use crate::{
+    api::{authorize, gateway_error, json_error, json_response, response_with_route, AppState},
+    conversation::{openai_stream_with_capture, ConversationError},
+    gateway::GatewayError,
+};
+use axum::{
+    body::Body,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    response::Response,
+    Json,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tokio::sync::oneshot;
+
+#[derive(Debug, Deserialize)]
+pub struct CreateThreadRequest {
+    pub title: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ThreadMessageRequest {
+    pub content: Value,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub stream: bool,
+}
+
+pub async fn create_thread(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateThreadRequest>,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    let model = body
+        .model
+        .as_deref()
+        .unwrap_or(&state.gateway.config.api.default_model);
+    match state
+        .conversations
+        .create_thread(body.title.as_deref(), model)
+        .await
+    {
+        Ok(thread) => json_response(StatusCode::CREATED, json!(thread), None),
+        Err(error) => conversation_error(error),
+    }
+}
+
+pub async fn list_threads(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    match state.conversations.list_threads().await {
+        Ok(threads) => json_response(StatusCode::OK, json!({"data":threads}), None),
+        Err(error) => conversation_error(error),
+    }
+}
+
+pub async fn get_thread(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    match state.conversations.thread(&thread_id).await {
+        Ok(thread) => json_response(StatusCode::OK, json!(thread), None),
+        Err(error) => conversation_error(error),
+    }
+}
+
+pub async fn delete_thread(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    match state.conversations.delete_thread(&thread_id).await {
+        Ok(()) => json_response(StatusCode::OK, json!({"deleted":true,"id":thread_id}), None),
+        Err(error) => conversation_error(error),
+    }
+}
+
+pub async fn send_thread_message(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ThreadMessageRequest>,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+
+    let context = match state.conversations.context(&thread_id).await {
+        Ok(context) => context,
+        Err(error) => return conversation_error(error),
+    };
+    let requested_model = body.model.as_deref().unwrap_or(&context.model).to_string();
+    let user_message = json!({"role":"user","content":body.content});
+    let mut messages = context.messages.clone();
+    messages.push(user_message.clone());
+    let request = json!({
+        "model":requested_model,
+        "messages":messages,
+        "stream":body.stream
+    });
+
+    let routed = match state
+        .gateway
+        .execute_openai_chat_with_affinity(
+            &requested_model,
+            &request,
+            context.sticky_route.as_deref(),
+        )
+        .await
+    {
+        Ok(routed) => routed,
+        Err(error) => return gateway_error(error),
+    };
+    let route_id = routed.route.id.clone();
+
+    if let Err(error) = state
+        .conversations
+        .append_message(&thread_id, &user_message, Some(&requested_model), Some(&route_id))
+        .await
+    {
+        return conversation_error(error);
+    }
+    if let Err(error) = state
+        .conversations
+        .update_thread_route_and_model(&thread_id, &route_id, &requested_model)
+        .await
+    {
+        return conversation_error(error);
+    }
+
+    if body.stream {
+        let (tx, rx) = oneshot::channel();
+        let stream = openai_stream_with_capture(routed.response, tx);
+        let conversations = state.conversations.clone();
+        let thread_id_for_task = thread_id.clone();
+        let model_for_task = requested_model.clone();
+        let route_for_task = route_id.clone();
+        tokio::spawn(async move {
+            if let Ok(assistant) = rx.await {
+                let _ = conversations
+                    .append_message(
+                        &thread_id_for_task,
+                        &assistant,
+                        Some(&model_for_task),
+                        Some(&route_for_task),
+                    )
+                    .await;
+            }
+        });
+        return response_with_route(
+            StatusCode::OK,
+            "text/event-stream",
+            Body::from_stream(stream),
+            &route_id,
+        );
+    }
+
+    match routed.response.json::<Value>().await {
+        Ok(openai) => {
+            if let Some(assistant) = openai
+                .get("choices")
+                .and_then(Value::as_array)
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.get("message"))
+                .cloned()
+            {
+                if let Err(error) = state
+                    .conversations
+                    .append_message(
+                        &thread_id,
+                        &assistant,
+                        Some(&requested_model),
+                        Some(&route_id),
+                    )
+                    .await
+                {
+                    return conversation_error(error);
+                }
+            }
+            json_response(StatusCode::OK, openai, Some(&route_id))
+        }
+        Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
+    }
+}
+
+fn conversation_error(error: ConversationError) -> Response<Body> {
+    match error {
+        ConversationError::ThreadNotFound(message) | ConversationError::ResponseNotFound(message) => {
+            json_error(StatusCode::NOT_FOUND, "not_found_error", &message)
+        }
+        ConversationError::InvalidJson(message) => {
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "conversation_json_error", &message)
+        }
+        ConversationError::Database(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "conversation_database_error",
+            &error.to_string(),
+        ),
+        ConversationError::Io(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "conversation_storage_error",
+            &error.to_string(),
+        ),
+    }
+}
