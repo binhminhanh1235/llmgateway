@@ -70,6 +70,14 @@ pub struct ContextConfig {
     pub summary_max_tokens: usize,
     #[serde(default)]
     pub summary_model: Option<String>,
+    #[serde(default = "default_true")]
+    pub retrieval_enabled: bool,
+    #[serde(default = "default_context_retrieval_max_chunks")]
+    pub retrieval_max_chunks: usize,
+    #[serde(default = "default_context_retrieval_max_tokens")]
+    pub retrieval_max_tokens: usize,
+    #[serde(default = "default_context_retrieval_min_score")]
+    pub retrieval_min_score: f64,
 }
 
 impl Default for ContextConfig {
@@ -83,6 +91,10 @@ impl Default for ContextConfig {
             summary_input_tokens: default_context_summary_input_tokens(),
             summary_max_tokens: default_context_summary_max_tokens(),
             summary_model: None,
+            retrieval_enabled: true,
+            retrieval_max_chunks: default_context_retrieval_max_chunks(),
+            retrieval_max_tokens: default_context_retrieval_max_tokens(),
+            retrieval_min_score: default_context_retrieval_min_score(),
         }
     }
 }
@@ -219,6 +231,23 @@ impl AppConfig {
                 "context.summary_max_tokens must be greater than zero".into(),
             ));
         }
+        if self.context.retrieval_enabled && self.context.retrieval_max_chunks == 0 {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_max_chunks must be greater than zero when retrieval is enabled"
+                    .into(),
+            ));
+        }
+        if self.context.retrieval_enabled && self.context.retrieval_max_tokens < 128 {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_max_tokens must be at least 128 when retrieval is enabled"
+                    .into(),
+            ));
+        }
+        if !self.context.retrieval_min_score.is_finite() || self.context.retrieval_min_score < 0.0 {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_min_score must be a finite non-negative number".into(),
+            ));
+        }
 
         for account in &self.accounts {
             if self.provider(&account.provider).is_none() {
@@ -279,6 +308,9 @@ fn default_context_recent_messages() -> usize { 12 }
 fn default_context_trigger_ratio() -> f64 { 0.85 }
 fn default_context_summary_input_tokens() -> usize { 12_000 }
 fn default_context_summary_max_tokens() -> usize { 1_200 }
+fn default_context_retrieval_max_chunks() -> usize { 3 }
+fn default_context_retrieval_max_tokens() -> usize { 2_400 }
+fn default_context_retrieval_min_score() -> f64 { 0.35 }
 
 #[cfg(test)]
 mod tests {
