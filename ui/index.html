@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/ui/account-control.css" />
   <link rel="stylesheet" href="/ui/account-intelligence.css" />
   <link rel="stylesheet" href="/ui/browser-control.css" />
+  <link rel="stylesheet" href="/ui/trace-console.css" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -30,6 +31,7 @@
         <button class="nav-button active" data-view="chat" type="button">Chat</button>
         <button class="nav-button" data-view="accounts" type="button">Accounts</button>
         <button class="nav-button" data-view="models" type="button">Models</button>
+        <button class="nav-button" data-view="traces" type="button">Traces</button>
         <div class="gateway-status-row">
           <span id="statusDot" class="status-dot"></span>
           <span id="statusText">Checking gateway…</span>
@@ -85,6 +87,22 @@
         </header>
         <div id="modelsContent" class="content-scroll"></div>
       </section>
+
+      <section id="tracesView" class="view">
+        <header class="topbar">
+          <div>
+            <h1 class="page-title">Execution traces</h1>
+            <div class="page-subtitle">See every route actually attempted, why failover happened, and which route completed the request</div>
+          </div>
+          <div class="trace-toolbar">
+            <input id="traceSearch" class="search-input compact trace-search" type="search" placeholder="Filter request, model, route…" />
+            <button id="refreshTracesButton" class="secondary-button" type="button">Refresh</button>
+          </div>
+        </header>
+        <div id="tracesContent" class="content-scroll">
+          <div class="loading-box">Open Traces to load the execution flight recorder.</div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -121,5 +139,6 @@
   <script src="/ui/account-control.js" defer></script>
   <script src="/ui/account-intelligence.js" defer></script>
   <script src="/ui/browser-control.js" defer></script>
+  <script src="/ui/trace-console.js" defer></script>
 </body>
 </html>
