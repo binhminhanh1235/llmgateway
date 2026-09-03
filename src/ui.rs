@@ -9,6 +9,8 @@ const APP_CSS: &str = include_str!("../ui/app.css");
 const APP_JS: &str = include_str!("../ui/app.js");
 const ACCOUNT_CONTROL_CSS: &str = include_str!("../ui/account-control.css");
 const ACCOUNT_CONTROL_JS: &str = include_str!("../ui/account-control.js");
+const ACCOUNT_INTELLIGENCE_CSS: &str = include_str!("../ui/account-intelligence.css");
+const ACCOUNT_INTELLIGENCE_JS: &str = include_str!("../ui/account-intelligence.js");
 const BROWSER_CONTROL_CSS: &str = include_str!("../ui/browser-control.css");
 const BROWSER_CONTROL_JS: &str = include_str!("../ui/browser-control.js");
 
@@ -30,6 +32,14 @@ pub async fn account_control_css() -> Response<Body> {
 
 pub async fn account_control_js() -> Response<Body> {
     asset_response("text/javascript; charset=utf-8", ACCOUNT_CONTROL_JS)
+}
+
+pub async fn account_intelligence_css() -> Response<Body> {
+    asset_response("text/css; charset=utf-8", ACCOUNT_INTELLIGENCE_CSS)
+}
+
+pub async fn account_intelligence_js() -> Response<Body> {
+    asset_response("text/javascript; charset=utf-8", ACCOUNT_INTELLIGENCE_JS)
 }
 
 pub async fn browser_control_css() -> Response<Body> {
