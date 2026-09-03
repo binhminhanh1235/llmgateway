@@ -3,6 +3,7 @@ set -euo pipefail
 
 export LLMGATEWAY_API_KEY="ci-local-key"
 export FAKE_API_KEY="healthy"
+unset MISSING_API_KEY || true
 export LLMGATEWAY_CONFIG="/tmp/llmgateway-account-intelligence.toml"
 PROFILE_ROOT="/tmp/llmgateway-account-intelligence-profiles"
 
@@ -55,11 +56,26 @@ provider = "fake-web"
 enabled = true
 
 [[accounts]]
+id = "missing-key-account"
+provider = "fake-api"
+api_key_env = "MISSING_API_KEY"
+enabled = true
+discover_models = false
+
+[[accounts]]
 id = "api-account"
 provider = "fake-api"
 api_key_env = "FAKE_API_KEY"
 enabled = true
 discover_models = false
+
+[[routes]]
+id = "missing-key-route"
+account = "missing-key-account"
+model = "fake-model"
+priority = 0
+enabled = true
+capabilities = ["chat"]
 
 [[routes]]
 id = "browser-route"
@@ -78,7 +94,7 @@ enabled = true
 capabilities = ["chat"]
 
 [virtual_models.llmgateway-auto]
-routes = ["browser-route", "api-route"]
+routes = ["missing-key-route", "browser-route", "api-route"]
 EOF
 
 python3 scripts/fake-openai.py >/tmp/llmgateway-account-intelligence-fake.log 2>&1 &
@@ -102,6 +118,13 @@ for _ in {1..60}; do
   sleep 0.2
 done
 
+curl -fsS -D /tmp/llmgateway-readiness.headers -o /tmp/llmgateway-readiness.json \
+  -X POST http://127.0.0.1:7331/v1/chat/completions \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"readiness should choose the healthy API account"}]}'
+grep -qi '^x-llmgateway-route: api-route' /tmp/llmgateway-readiness.headers
+
 INTELLIGENCE=$(curl -fsS \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   http://127.0.0.1:7331/_llmgateway/account-intelligence)
@@ -119,9 +142,18 @@ assert browser["credential_required"] is False, browser
 assert browser["credential_configured"] is None, browser
 assert browser["discover_models"] is False, browser
 assert browser["route_ids"] == ["browser-route"], browser
-assert browser["routing_state"] == "requires_login", browser
+assert browser["routing_state"] == "unavailable", browser
+assert browser["readiness"]["effective_status"] == "unavailable", browser
+assert browser["readiness"]["routable"] is False, browser
+assert "browser_session_not_ready" in browser["readiness"]["reasons"], browser
 assert browser["browser_session"]["id"] == "fake-web", browser
-assert browser["browser_session"]["label"] == "Fake Browser", browser
+assert browser["browser_session"]["status"] == "requires_login", browser
+
+missing=accounts["missing-key-account"]
+assert missing["routing_state"] == "unavailable", missing
+assert missing["readiness"]["routable"] is False, missing
+assert missing["readiness"]["credential_configured"] is False, missing
+assert "credential_missing" in missing["readiness"]["reasons"], missing
 
 api=accounts["api-account"]
 assert api["provider"] == "fake-api", api
@@ -132,7 +164,10 @@ assert api["credential_configured"] is True, api
 assert api["discover_models"] is False, api
 assert api["route_ids"] == ["api-route"], api
 assert api["routing_state"] == "ready", api
+assert api["readiness"]["effective_status"] == "ready", api
+assert api["readiness"]["routable"] is True, api
+assert api["readiness"]["healthy_route_count"] == 1, api
 assert api["browser_session"] is None, api
 '
 
-echo "llmgateway account intelligence smoke test passed"
+echo "llmgateway unified account readiness smoke test passed"
