@@ -12,6 +12,7 @@ mod gateway;
 mod memory_api;
 mod memory_backfill;
 mod response_state;
+mod retrieval_api;
 mod routing;
 mod semantic_retrieval;
 mod structured_memory;
@@ -37,6 +38,7 @@ use conversation_api::{
 use gateway::Gateway;
 use memory_api::get_thread_memory;
 use memory_backfill::backfill_legacy_memories;
+use retrieval_api::inspect_thread_retrieval;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
@@ -107,6 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/v1/threads/{thread_id}/memory",
             get(get_thread_memory),
+        )
+        .route(
+            "/v1/threads/{thread_id}/retrieve",
+            post(inspect_thread_retrieval),
         )
         .route(
             "/v1/threads/{thread_id}/compact",
