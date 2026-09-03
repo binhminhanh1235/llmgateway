@@ -64,8 +64,6 @@ pub struct ContextConfig {
     pub recent_messages: usize,
     #[serde(default = "default_context_trigger_ratio")]
     pub compaction_trigger_ratio: f64,
-    #[serde(default = "default_context_min_checkpoint_tokens")]
-    pub min_checkpoint_tokens: usize,
     #[serde(default = "default_context_summary_input_tokens")]
     pub summary_input_tokens: usize,
     #[serde(default = "default_context_summary_max_tokens")]
@@ -82,7 +80,6 @@ impl Default for ContextConfig {
             reserve_output_tokens: default_context_reserve_output_tokens(),
             recent_messages: default_context_recent_messages(),
             compaction_trigger_ratio: default_context_trigger_ratio(),
-            min_checkpoint_tokens: default_context_min_checkpoint_tokens(),
             summary_input_tokens: default_context_summary_input_tokens(),
             summary_max_tokens: default_context_summary_max_tokens(),
             summary_model: None,
@@ -280,7 +277,6 @@ fn default_context_target_tokens() -> usize { 16_000 }
 fn default_context_reserve_output_tokens() -> usize { 4_000 }
 fn default_context_recent_messages() -> usize { 12 }
 fn default_context_trigger_ratio() -> f64 { 0.85 }
-fn default_context_min_checkpoint_tokens() -> usize { 4_000 }
 fn default_context_summary_input_tokens() -> usize { 12_000 }
 fn default_context_summary_max_tokens() -> usize { 1_200 }
 
