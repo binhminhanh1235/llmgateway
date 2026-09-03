@@ -29,6 +29,7 @@ mod quota_usage_runtime;
 mod response_state;
 mod retrieval_api;
 mod routing;
+mod routing_api;
 mod semantic_retrieval;
 mod structured_memory;
 mod ui;
@@ -69,6 +70,7 @@ use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
 use quota_usage::{QuotaUsageStore, UsageConfig};
 use retrieval_api::inspect_thread_retrieval;
+use routing_api::explain_routes;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
@@ -193,6 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_llmgateway/models", get(admin_models))
         .route("/_llmgateway/accounts", get(admin_accounts))
         .route("/_llmgateway/account-intelligence", get(account_intelligence))
+        .route("/_llmgateway/routes/explain", post(explain_routes))
         .route(
             "/_llmgateway/accounts/{account_id}/models",
             get(admin_account_models).patch(set_account_model),
