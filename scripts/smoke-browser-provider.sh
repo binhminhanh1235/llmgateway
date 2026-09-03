@@ -124,6 +124,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             payload = {"error": {"message": "browser session expired"}}
             raw = json.dumps(payload).encode()
             self.send_response(401)
+            content_type = "application/json"
+        elif body.get("stream") is True:
+            chunks = [
+                {"id":"chatcmpl_browser_stream","object":"chat.completion.chunk","model":"browser-model","choices":[{"index":0,"delta":{"role":"assistant","content":"browser-stream-"},"finish_reason":None}]},
+                {"id":"chatcmpl_browser_stream","object":"chat.completion.chunk","model":"browser-model","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":None}]},
+                {"id":"chatcmpl_browser_stream","object":"chat.completion.chunk","model":"browser-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]},
+            ]
+            frames = [f"data: {json.dumps(chunk)}\n\n" for chunk in chunks]
+            frames.append("data: [DONE]\n\n")
+            raw = "".join(frames).encode()
+            self.send_response(200)
+            content_type = "text/event-stream"
         else:
             payload = {
                 "id": "chatcmpl_browser",
@@ -134,7 +146,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             }
             raw = json.dumps(payload).encode()
             self.send_response(200)
-        self.send_header("content-type", "application/json")
+            content_type = "application/json"
+        self.send_header("content-type", content_type)
         self.send_header("content-length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
@@ -194,6 +207,28 @@ with open(sys.argv[1], encoding="utf-8") as f:
 assert x["choices"][0]["message"]["content"] == "browser-adapter-ok", x
 PY
 
+# Streaming uses the same adapter lane and remains OpenAI-compatible end to end.
+curl -fsS -N -D /tmp/browser-provider-stream.headers -o /tmp/browser-provider-stream.txt \
+  -X POST http://127.0.0.1:7331/v1/chat/completions \
+  "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model":"llmgateway-auto","stream":true,"messages":[{"role":"user","content":"stream through browser route"}]}'
+grep -qi '^x-llmgateway-route: browser-route' /tmp/browser-provider-stream.headers
+python3 - /tmp/browser-provider-stream.txt <<'PY'
+import json,sys
+text=""
+with open(sys.argv[1], encoding="utf-8") as f:
+    for line in f:
+        if not line.startswith("data: "):
+            continue
+        data=line[len("data: "):].strip()
+        if data == "[DONE]":
+            continue
+        chunk=json.loads(data)
+        choice=(chunk.get("choices") or [{}])[0]
+        text += (choice.get("delta") or {}).get("content") or ""
+assert text == "browser-stream-ok", text
+PY
+
 # 401 from a browser adapter means the session needs user attention, then the same request fails over.
 curl -fsS -D /tmp/browser-provider-expired.headers -o /tmp/browser-provider-expired.json \
   -X POST http://127.0.0.1:7331/v1/chat/completions \
@@ -217,4 +252,4 @@ curl -fsS -D /tmp/browser-provider-after.headers -o /tmp/browser-provider-after.
   -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"after browser expiry"}]}'
 grep -qi '^x-llmgateway-route: api-route' /tmp/browser-provider-after.headers
 
-echo "llmgateway browser provider adapter + routing smoke test passed"
+echo "llmgateway browser provider adapter + routing + streaming smoke test passed"
