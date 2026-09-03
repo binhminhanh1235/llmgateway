@@ -50,23 +50,29 @@ pub async fn openai_chat(
     {
         Ok(routed) => {
             let route_id = routed.route.id.clone();
+            let request_id = routed.request_id.clone();
             if is_stream {
                 let stream = routed.response.bytes_stream().map_err(std::io::Error::other);
-                response_with_route(
+                response_with_route_and_request(
                     StatusCode::OK,
                     "text/event-stream",
                     Body::from_stream(stream),
                     &route_id,
+                    &request_id,
                 )
             } else {
                 match routed.response.bytes().await {
-                    Ok(bytes) => response_with_route(
+                    Ok(bytes) => response_with_route_and_request(
                         StatusCode::OK,
                         "application/json",
                         Body::from(bytes),
                         &route_id,
+                        &request_id,
                     ),
-                    Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
+                    Err(error) => gateway_error(GatewayError::Execution {
+                        request_id,
+                        source: Box::new(GatewayError::Transport(error.to_string())),
+                    }),
                 }
             }
         }
@@ -136,6 +142,7 @@ pub async fn openai_responses(
     {
         Ok(routed) => {
             let route_id = routed.route.id.clone();
+            let request_id = routed.request_id.clone();
             if is_stream {
                 let stream = responses::openai_stream_to_responses(
                     routed.response,
@@ -165,11 +172,12 @@ pub async fn openai_responses(
                         }
                     }
                 });
-                response_with_route(
+                response_with_route_and_request(
                     StatusCode::OK,
                     "text/event-stream",
                     Body::from_stream(stream),
                     &route_id,
+                    &request_id,
                 )
             } else {
                 match routed.response.json::<Value>().await {
@@ -198,9 +206,17 @@ pub async fn openai_responses(
                         {
                             return conversation_state_error(error);
                         }
-                        json_response(StatusCode::OK, response, Some(&route_id))
+                        json_response_with_request(
+                            StatusCode::OK,
+                            response,
+                            Some(&route_id),
+                            &request_id,
+                        )
                     }
-                    Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
+                    Err(error) => gateway_error(GatewayError::Execution {
+                        request_id,
+                        source: Box::new(GatewayError::Transport(error.to_string())),
+                    }),
                 }
             }
         }
@@ -231,22 +247,32 @@ pub async fn anthropic_messages(
     {
         Ok(routed) => {
             let route_id = routed.route.id.clone();
+            let request_id = routed.request_id.clone();
             if is_stream {
                 let stream =
                     anthropic::openai_stream_to_anthropic(routed.response, requested_model);
-                response_with_route(
+                response_with_route_and_request(
                     StatusCode::OK,
                     "text/event-stream",
                     Body::from_stream(stream),
                     &route_id,
+                    &request_id,
                 )
             } else {
                 match routed.response.json::<Value>().await {
                     Ok(openai) => {
                         let anthropic = anthropic::from_openai_response(&openai, &requested_model);
-                        json_response(StatusCode::OK, anthropic, Some(&route_id))
+                        json_response_with_request(
+                            StatusCode::OK,
+                            anthropic,
+                            Some(&route_id),
+                            &request_id,
+                        )
                     }
-                    Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
+                    Err(error) => gateway_error(GatewayError::Execution {
+                        request_id,
+                        source: Box::new(GatewayError::Transport(error.to_string())),
+                    }),
                 }
             }
         }
@@ -431,6 +457,11 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
             json_error(StatusCode::BAD_GATEWAY, "upstream_error", &message)
         }
         GatewayError::Upstream { status, body } => json_error(status, "upstream_error", &body),
+        GatewayError::Execution { request_id, source } => {
+            let mut response = gateway_error(*source);
+            insert_request_id(&mut response, &request_id);
+            response
+        }
     }
 }
 
@@ -508,11 +539,36 @@ pub(crate) fn json_response(
     )
 }
 
+fn json_response_with_request(
+    status: StatusCode,
+    value: Value,
+    route: Option<&str>,
+    request_id: &str,
+) -> Response<Body> {
+    response_with_route_and_request(
+        status,
+        "application/json",
+        Body::from(value.to_string()),
+        route.unwrap_or(""),
+        request_id,
+    )
+}
+
 pub(crate) fn response_with_route(
     status: StatusCode,
     content_type: &str,
     body: Body,
     route: &str,
+) -> Response<Body> {
+    response_with_route_and_request(status, content_type, body, route, "")
+}
+
+fn response_with_route_and_request(
+    status: StatusCode,
+    content_type: &str,
+    body: Body,
+    route: &str,
+    request_id: &str,
 ) -> Response<Body> {
     let mut response = Response::builder()
         .status(status)
@@ -527,7 +583,18 @@ pub(crate) fn response_with_route(
             response.headers_mut().insert("x-llmgateway-route", value);
         }
     }
+    insert_request_id(&mut response, request_id);
     response
+}
+
+fn insert_request_id(response: &mut Response<Body>, request_id: &str) {
+    if !request_id.is_empty() {
+        if let Ok(value) = HeaderValue::from_str(request_id) {
+            response
+                .headers_mut()
+                .insert("x-llmgateway-request-id", value);
+        }
+    }
 }
 
 fn request_messages(body: &Value) -> Vec<Value> {
