@@ -115,7 +115,7 @@ curl -fsS -D /tmp/first-class-browser.headers -o /tmp/first-class-browser.json \
 
 grep -qi '^x-llmgateway-route: api-route' /tmp/first-class-browser.headers
 
-ACCOUNTS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/admin/accounts "${AUTH[@]}")
+ACCOUNTS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/accounts "${AUTH[@]}")
 printf '%s' "$ACCOUNTS" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
