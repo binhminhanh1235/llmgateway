@@ -78,6 +78,18 @@ pub struct ContextConfig {
     pub retrieval_max_tokens: usize,
     #[serde(default = "default_context_retrieval_min_score")]
     pub retrieval_min_score: f64,
+    #[serde(default = "default_context_retrieval_backend")]
+    pub retrieval_backend: String,
+    #[serde(default)]
+    pub retrieval_embedding_account: Option<String>,
+    #[serde(default)]
+    pub retrieval_embedding_model: Option<String>,
+    #[serde(default = "default_context_retrieval_semantic_weight")]
+    pub retrieval_semantic_weight: f64,
+    #[serde(default = "default_context_retrieval_min_similarity")]
+    pub retrieval_min_similarity: f64,
+    #[serde(default = "default_context_retrieval_embedding_batch_size")]
+    pub retrieval_embedding_batch_size: usize,
 }
 
 impl Default for ContextConfig {
@@ -95,6 +107,12 @@ impl Default for ContextConfig {
             retrieval_max_chunks: default_context_retrieval_max_chunks(),
             retrieval_max_tokens: default_context_retrieval_max_tokens(),
             retrieval_min_score: default_context_retrieval_min_score(),
+            retrieval_backend: default_context_retrieval_backend(),
+            retrieval_embedding_account: None,
+            retrieval_embedding_model: None,
+            retrieval_semantic_weight: default_context_retrieval_semantic_weight(),
+            retrieval_min_similarity: default_context_retrieval_min_similarity(),
+            retrieval_embedding_batch_size: default_context_retrieval_embedding_batch_size(),
         }
     }
 }
@@ -248,6 +266,30 @@ impl AppConfig {
                 "context.retrieval_min_score must be a finite non-negative number".into(),
             ));
         }
+        if !matches!(self.context.retrieval_backend.as_str(), "local" | "hybrid") {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_backend must be 'local' or 'hybrid'".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.context.retrieval_semantic_weight)
+            || !self.context.retrieval_semantic_weight.is_finite()
+        {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_semantic_weight must be between 0 and 1".into(),
+            ));
+        }
+        if !(-1.0..=1.0).contains(&self.context.retrieval_min_similarity)
+            || !self.context.retrieval_min_similarity.is_finite()
+        {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_min_similarity must be between -1 and 1".into(),
+            ));
+        }
+        if self.context.retrieval_embedding_batch_size == 0 {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_embedding_batch_size must be greater than zero".into(),
+            ));
+        }
 
         for account in &self.accounts {
             if self.provider(&account.provider).is_none() {
@@ -255,6 +297,39 @@ impl AppConfig {
                     "account '{}' references unknown provider '{}'",
                     account.id, account.provider
                 )));
+            }
+        }
+
+        if self.context.retrieval_backend == "hybrid" {
+            let account_id = self
+                .context
+                .retrieval_embedding_account
+                .as_deref()
+                .ok_or_else(|| {
+                    ConfigError::Invalid(
+                        "context.retrieval_embedding_account is required for hybrid retrieval"
+                            .into(),
+                    )
+                })?;
+            let account = self.account(account_id).ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "context.retrieval_embedding_account references unknown account '{account_id}'"
+                ))
+            })?;
+            if !account.enabled {
+                return Err(ConfigError::Invalid(format!(
+                    "context.retrieval_embedding_account '{account_id}' is disabled"
+                )));
+            }
+            if self
+                .context
+                .retrieval_embedding_model
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                return Err(ConfigError::Invalid(
+                    "context.retrieval_embedding_model is required for hybrid retrieval".into(),
+                ));
             }
         }
 
@@ -311,6 +386,10 @@ fn default_context_summary_max_tokens() -> usize { 1_200 }
 fn default_context_retrieval_max_chunks() -> usize { 3 }
 fn default_context_retrieval_max_tokens() -> usize { 2_400 }
 fn default_context_retrieval_min_score() -> f64 { 0.35 }
+fn default_context_retrieval_backend() -> String { "local".into() }
+fn default_context_retrieval_semantic_weight() -> f64 { 0.70 }
+fn default_context_retrieval_min_similarity() -> f64 { 0.15 }
+fn default_context_retrieval_embedding_batch_size() -> usize { 64 }
 
 #[cfg(test)]
 mod tests {
