@@ -1,4 +1,6 @@
 use crate::{
+    browser_provider::{BrowserProviderError, BrowserProviderRegistry},
+    browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
     quota_usage::{QuotaUsageStore, UsageEvent},
@@ -95,18 +97,8 @@ impl Gateway {
             let provider = self.config.provider(&account.provider).ok_or_else(|| {
                 GatewayError::InvalidConfig(format!("unknown provider '{}'", account.provider))
             })?;
-            if provider.kind != "openai-compatible" {
-                last_error = Some(GatewayError::InvalidConfig(format!(
-                    "provider '{}' uses unsupported kind '{}'",
-                    provider.id, provider.kind
-                )));
-                continue;
-            }
 
-            match self
-                .send_openai_chat(provider, account, &route, body)
-                .await
-            {
+            match self.send_route_chat(provider, account, &route, body).await {
                 Ok(response) if response.status().is_success() => {
                     let status = response.status();
                     let usage_event_id = self
@@ -182,6 +174,18 @@ impl Gateway {
                             }
                         }
                     }
+                    if matches!(status.as_u16(), 401 | 403)
+                        && BrowserProviderRegistry::is_browser_kind(&provider.kind)
+                    {
+                        if let Some(registry) = browser_provider_runtime::get() {
+                            if let Err(error) = registry
+                                .require_attention(&account.id, &format!("HTTP {status}: {body_text}"))
+                                .await
+                            {
+                                warn!(%error, account = %account.id, "failed to mark browser session as requiring attention");
+                            }
+                        }
+                    }
 
                     let error = GatewayError::Upstream {
                         status,
@@ -245,6 +249,33 @@ impl Gateway {
         }
     }
 
+    async fn send_route_chat(
+        &self,
+        provider: &ProviderConfig,
+        account: &AccountConfig,
+        route: &RouteConfig,
+        body: &Value,
+    ) -> Result<reqwest::Response, GatewayError> {
+        match provider.kind.as_str() {
+            "openai-compatible" => self.send_openai_chat(provider, account, route, body).await,
+            kind if BrowserProviderRegistry::is_browser_kind(kind) => {
+                let registry = browser_provider_runtime::get().ok_or_else(|| {
+                    GatewayError::InvalidConfig(
+                        "browser provider runtime is not initialized".into(),
+                    )
+                })?;
+                registry
+                    .execute_chat(provider, account, route, body)
+                    .await
+                    .map_err(map_browser_provider_error)
+            }
+            other => Err(GatewayError::InvalidConfig(format!(
+                "provider '{}' uses unsupported kind '{}'",
+                provider.id, other
+            ))),
+        }
+    }
+
     async fn send_openai_chat(
         &self,
         provider: &ProviderConfig,
@@ -275,6 +306,19 @@ impl Gateway {
             .send()
             .await
             .map_err(|error| GatewayError::Transport(error.to_string()))
+    }
+}
+
+fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
+    match error {
+        BrowserProviderError::InvalidConfig(_)
+        | BrowserProviderError::UnsupportedAdapter(_)
+        | BrowserProviderError::MissingBinding(_)
+        | BrowserProviderError::Io(_)
+        | BrowserProviderError::Toml(_) => GatewayError::InvalidConfig(error.to_string()),
+        BrowserProviderError::SessionUnavailable { .. } | BrowserProviderError::Transport(_) => {
+            GatewayError::Transport(error.to_string())
+        }
     }
 }
 
