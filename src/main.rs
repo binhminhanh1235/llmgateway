@@ -53,7 +53,9 @@ use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use ui::{app_css, app_js, index as ui_index};
+use ui::{
+    account_control_css, account_control_js, app_css, app_js, index as ui_index,
+};
 use usage_api::{get_account_usage, get_usage, reset_account_quota};
 
 #[tokio::main]
@@ -117,6 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui", get(ui_index))
         .route("/ui/app.css", get(app_css))
         .route("/ui/app.js", get(app_js))
+        .route("/ui/account-control.css", get(account_control_css))
+        .route("/ui/account-control.js", get(account_control_js))
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/responses", post(openai_responses))
         .route("/v1/messages", post(anthropic_messages))
