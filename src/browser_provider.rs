@@ -130,6 +130,32 @@ impl BrowserProviderRegistry {
         }
     }
 
+    pub async fn require_attention(
+        &self,
+        account_id: &str,
+        error: &str,
+    ) -> Result<(), BrowserProviderError> {
+        let binding = self
+            .config
+            .bindings
+            .get(account_id)
+            .ok_or_else(|| BrowserProviderError::MissingBinding(account_id.to_string()))?;
+        let Some(store) = browser_session_runtime::get() else {
+            return Err(BrowserProviderError::SessionUnavailable {
+                account_id: account_id.to_string(),
+                session_id: binding.session.clone(),
+            });
+        };
+        store
+            .require_attention(&binding.session, error)
+            .await
+            .map_err(|_| BrowserProviderError::SessionUnavailable {
+                account_id: account_id.to_string(),
+                session_id: binding.session.clone(),
+            })?;
+        Ok(())
+    }
+
     pub async fn execute_chat(
         &self,
         provider: &ProviderConfig,
