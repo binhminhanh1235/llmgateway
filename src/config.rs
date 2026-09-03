@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::{collections::HashMap, env, fs, net::IpAddr, path::Path};
+use std::{collections::{HashMap, HashSet}, env, fs, net::IpAddr, path::Path};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -148,13 +148,13 @@ pub struct AccountConfig {
     pub auth_style: String,
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub discover_models: Option<bool>,
+    #[serde(default = "default_true")]
+    pub discover_models: bool,
 }
 
 impl AccountConfig {
     pub fn discovery_enabled(&self, provider: &ProviderConfig) -> bool {
-        self.discover_models.unwrap_or(!provider.is_browser())
+        self.discover_models && !provider.is_browser()
     }
 
     pub fn credential_required(&self, provider: &ProviderConfig) -> bool {
@@ -201,9 +201,24 @@ pub enum ConfigError {
 impl AppConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let raw = fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&raw)?;
+        let mut config: Self = toml::from_str(&raw)?;
+        config.normalize();
         config.validate()?;
         Ok(config)
+    }
+
+    fn normalize(&mut self) {
+        let browser_providers = self
+            .providers
+            .iter()
+            .filter(|provider| provider.is_browser())
+            .map(|provider| provider.id.clone())
+            .collect::<HashSet<_>>();
+        for account in &mut self.accounts {
+            if browser_providers.contains(&account.provider) {
+                account.discover_models = false;
+            }
+        }
     }
 
     pub fn gateway_api_key(&self) -> Result<String, ConfigError> {
@@ -345,12 +360,6 @@ impl AppConfig {
                 return Err(ConfigError::Invalid(format!(
                     "account '{}' requires api_key_env for provider kind '{}'",
                     account.id, provider.kind
-                )));
-            }
-            if provider.is_browser() && account.discover_models == Some(true) {
-                return Err(ConfigError::Invalid(format!(
-                    "browser account '{}' cannot enable discover_models",
-                    account.id
                 )));
             }
         }
@@ -509,12 +518,15 @@ id = "account"
 provider = "browser"
 enabled = true"#,
         );
-        let config: AppConfig = toml::from_str(&raw).unwrap();
+        let mut config: AppConfig = toml::from_str(&raw).unwrap();
+        config.normalize();
         config.validate().unwrap();
         let account = config.account("account").unwrap();
         let provider = config.provider("browser").unwrap();
         assert!(account.api_key_env.is_empty());
+        assert!(!account.discover_models);
         assert!(!account.discovery_enabled(provider));
+        assert!(!account.credential_required(provider));
         assert_eq!(provider.transport(), "browser");
     }
 
@@ -531,16 +543,19 @@ provider = "api"
 api_key_env = "EXAMPLE_API_KEY"
 enabled = true"#,
         );
-        let config: AppConfig = toml::from_str(&raw).unwrap();
+        let mut config: AppConfig = toml::from_str(&raw).unwrap();
+        config.normalize();
         config.validate().unwrap();
         let account = config.account("account").unwrap();
         let provider = config.provider("api").unwrap();
+        assert!(account.discover_models);
         assert!(account.discovery_enabled(provider));
+        assert!(account.credential_required(provider));
         assert_eq!(provider.transport(), "api");
     }
 
     #[test]
-    fn browser_account_cannot_force_model_discovery() {
+    fn browser_account_explicit_discovery_is_normalized_off() {
         let raw = minimal_config(
             r#"[[providers]]
 id = "browser"
@@ -551,7 +566,9 @@ provider = "browser"
 enabled = true
 discover_models = true"#,
         );
-        let config: AppConfig = toml::from_str(&raw).unwrap();
-        assert!(config.validate().is_err());
+        let mut config: AppConfig = toml::from_str(&raw).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+        assert!(!config.account("account").unwrap().discover_models);
     }
 }
