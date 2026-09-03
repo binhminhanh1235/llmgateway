@@ -88,6 +88,14 @@
       if (snapshot.remaining_requests_hint != null) hints.push(`${formatNumber(snapshot.remaining_requests_hint)} req remaining upstream`);
       if (snapshot.remaining_tokens_hint != null) hints.push(`${formatNumber(snapshot.remaining_tokens_hint)} tokens remaining upstream`);
       if (snapshot.consecutive_429) hints.push(`${snapshot.consecutive_429} consecutive 429`);
+      const resettable = Boolean(
+        snapshot.blocked ||
+        snapshot.consecutive_429 ||
+        snapshot.cooldown_until ||
+        snapshot.remaining_requests_hint != null ||
+        snapshot.remaining_tokens_hint != null ||
+        snapshot.last_error
+      );
 
       panel.innerHTML = `
         <div class="quota-status-row">
@@ -102,7 +110,7 @@
         ${snapshot.last_error ? `<div class="quota-last-error" title="${escapeAttr(snapshot.last_error)}">Last upstream error: ${escapeHtml(shorten(snapshot.last_error, 120))}</div>` : ""}
         <div class="quota-actions">
           <span class="quota-updated">${snapshot.last_429_at ? `Last 429 ${escapeHtml(relativeTime(snapshot.last_429_at))}` : "No recent rate-limit event"}</span>
-          <button type="button" class="quota-reset-button" data-reset-quota="${escapeAttr(snapshot.account_id)}" ${snapshot.blocked || snapshot.consecutive_429 || snapshot.cooldown_until ? "" : "disabled"}>Reset quota state</button>
+          <button type="button" class="quota-reset-button" data-reset-quota="${escapeAttr(snapshot.account_id)}" ${resettable ? "" : "disabled"}>Reset quota state</button>
         </div>`;
     }
 
@@ -173,7 +181,18 @@
   }
 
   function renderUsageError(error) {
-    const existing = accountsContent.querySelector(".usage-overview");
+    let existing = accountsContent.querySelector(".usage-overview");
+    if (!existing && accountsContent.querySelector(".account-grid")) {
+      existing = document.createElement("section");
+      existing.className = "usage-overview usage-overview-error";
+      existing.innerHTML = `
+        <div class="usage-overview-copy">
+          <div class="usage-eyebrow">Quota control plane</div>
+          <div class="usage-overview-title">Quota telemetry unavailable</div>
+          <div class="usage-overview-subtitle"></div>
+        </div>`;
+      accountsContent.prepend(existing);
+    }
     if (existing) {
       existing.classList.add("usage-overview-error");
       existing.querySelector(".usage-overview-title").textContent = "Quota telemetry unavailable";
