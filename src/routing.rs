@@ -96,7 +96,7 @@ impl Router {
     }
 
     async fn filter_account_ready(&self, candidates: Vec<RouteConfig>) -> Vec<RouteConfig> {
-        let mut readiness_by_account = HashMap::new();
+        let mut readiness_by_account: HashMap<String, AccountReadiness> = HashMap::new();
         let mut available = Vec::with_capacity(candidates.len());
         for route in candidates {
             let readiness = if let Some(readiness) = readiness_by_account.get(&route.account) {
