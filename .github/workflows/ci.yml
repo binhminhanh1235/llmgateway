@@ -19,4 +19,5 @@ jobs:
       - run: cargo test --all-targets
       - run: bash scripts/smoke-local.sh
       - run: bash scripts/smoke-hybrid.sh
+      - run: bash scripts/smoke-memory.sh
       - run: docker build -t llmgateway:ci .
