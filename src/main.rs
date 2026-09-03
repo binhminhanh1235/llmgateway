@@ -9,6 +9,7 @@ mod context_runtime;
 mod conversation;
 mod conversation_api;
 mod gateway;
+mod memory_api;
 mod response_state;
 mod routing;
 mod structured_memory;
@@ -32,6 +33,7 @@ use conversation_api::{
     list_threads, send_thread_message,
 };
 use gateway::Gateway;
+use memory_api::get_thread_memory;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
@@ -94,6 +96,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/v1/threads/{thread_id}/context",
             get(get_thread_context),
+        )
+        .route(
+            "/v1/threads/{thread_id}/memory",
+            get(get_thread_memory),
         )
         .route(
             "/v1/threads/{thread_id}/compact",
