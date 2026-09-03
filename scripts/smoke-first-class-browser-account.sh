@@ -119,7 +119,7 @@ ACCOUNTS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/accounts "${AUTH[@]}")
 printf '%s' "$ACCOUNTS" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
-items=x if isinstance(x,list) else x.get("accounts",[])
+items=x if isinstance(x,list) else x.get("data",[])
 account=next(a for a in items if a.get("id") == "browser-account")
 assert account.get("discover_models") is False, account
 '
