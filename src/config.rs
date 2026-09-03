@@ -70,6 +70,14 @@ pub struct ContextConfig {
     pub summary_max_tokens: usize,
     #[serde(default)]
     pub summary_model: Option<String>,
+    #[serde(default = "default_true")]
+    pub retrieval_enabled: bool,
+    #[serde(default = "default_retrieval_top_k")]
+    pub retrieval_top_k: usize,
+    #[serde(default = "default_retrieval_max_tokens")]
+    pub retrieval_max_tokens: usize,
+    #[serde(default = "default_retrieval_min_score")]
+    pub retrieval_min_score: f64,
 }
 
 impl Default for ContextConfig {
@@ -83,6 +91,10 @@ impl Default for ContextConfig {
             summary_input_tokens: default_context_summary_input_tokens(),
             summary_max_tokens: default_context_summary_max_tokens(),
             summary_model: None,
+            retrieval_enabled: true,
+            retrieval_top_k: default_retrieval_top_k(),
+            retrieval_max_tokens: default_retrieval_max_tokens(),
+            retrieval_min_score: default_retrieval_min_score(),
         }
     }
 }
@@ -219,6 +231,21 @@ impl AppConfig {
                 "context.summary_max_tokens must be greater than zero".into(),
             ));
         }
+        if self.context.retrieval_top_k > 20 {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_top_k must be <= 20".into(),
+            ));
+        }
+        if self.context.retrieval_max_tokens > self.context.target_tokens {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_max_tokens must not exceed context.target_tokens".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.context.retrieval_min_score) {
+            return Err(ConfigError::Invalid(
+                "context.retrieval_min_score must be between 0 and 1".into(),
+            ));
+        }
 
         for account in &self.accounts {
             if self.provider(&account.provider).is_none() {
@@ -261,9 +288,7 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     }
 }
 
-fn default_host() -> IpAddr {
-    "127.0.0.1".parse().expect("valid loopback address")
-}
+fn default_host() -> IpAddr { "127.0.0.1".parse().expect("valid loopback address") }
 fn default_port() -> u16 { 7331 }
 fn default_gateway_key_env() -> String { "LLMGATEWAY_API_KEY".into() }
 fn default_model() -> String { "llmgateway-auto".into() }
@@ -279,6 +304,9 @@ fn default_context_recent_messages() -> usize { 12 }
 fn default_context_trigger_ratio() -> f64 { 0.85 }
 fn default_context_summary_input_tokens() -> usize { 12_000 }
 fn default_context_summary_max_tokens() -> usize { 1_200 }
+fn default_retrieval_top_k() -> usize { 4 }
+fn default_retrieval_max_tokens() -> usize { 2_000 }
+fn default_retrieval_min_score() -> f64 { 0.08 }
 
 #[cfg(test)]
 mod tests {
