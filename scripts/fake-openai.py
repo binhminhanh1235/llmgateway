@@ -28,8 +28,9 @@ class Handler(BaseHTTPRequestHandler):
                 "rolling_summary": "The thread is validating structured memory compaction end to end."
             })
         else:
-            retrieved = "retrieved earlier transcript excerpts" in system_text.lower()
-            text = f"fake reply messages={len(messages)} retrieval={'yes' if retrieved else 'no'}"
+            text = f"fake reply messages={len(messages)}"
+            if "retrieved earlier transcript excerpts" in system_text.lower():
+                text += " retrieval=yes"
 
         if body.get("stream"):
             self.send_response(200)
