@@ -116,7 +116,12 @@ assert x["messages"][3]["message"]["content"] == "fake reply messages=3", x
 
 CONTEXT_BEFORE=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/context" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
-printf '%s' "$CONTEXT_BEFORE" | grep -q '"state":"full"'
+printf '%s' "$CONTEXT_BEFORE" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["state"] == "full", x
+assert x["memory"] is None, x
+'
 
 COMPACTED=$(curl -fsS -X POST \
   "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/compact" \
@@ -129,8 +134,18 @@ x=json.load(sys.stdin)
 assert x["state"] == "compressed", x
 assert x["checkpoint"] is not None, x
 assert x["checkpoint"]["through_ordinal"] == 2, x
-assert x["checkpoint"]["summary"] == "fake reply messages=2", x
+assert "Structured conversation memory (schema v1)" in x["checkpoint"]["summary"], x
 assert x["checkpoint"]["route_id"] == "fake-route", x
+memory=x["memory"]
+assert memory is not None, x
+assert memory["through_ordinal"] == 2, memory
+assert memory["schema_version"] == 1, memory
+assert memory["route_id"] == "fake-route", memory
+assert memory["memory"]["facts"] == ["The smoke thread has durable context"], memory
+assert memory["memory"]["decisions"] == ["Use structured memory snapshots"], memory
+assert memory["memory"]["constraints"] == ["Keep the full transcript in SQLite"], memory
+assert memory["memory"]["code_context"] == ["thread_memories stores schema-versioned JSON"], memory
+assert memory["memory"]["rolling_summary"].startswith("The thread is validating"), memory
 '
 
 AFTER_COMPACT=$(curl -fsS -X POST \
@@ -157,6 +172,8 @@ import json,sys
 x=json.load(sys.stdin)
 assert x["state"] == "compressed", x
 assert x["checkpoint"]["through_ordinal"] == 2, x
+assert x["memory"]["schema_version"] == 1, x
+assert x["memory"]["memory"]["entities"] == ["llmgateway", "ContextEngine"], x
 assert x["prepared_tokens"] <= x["budget_tokens"], x
 '
 
