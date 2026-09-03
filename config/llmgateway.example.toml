@@ -28,6 +28,14 @@ profile_root = "data/browser-profiles"
 # label = "Qwen web primary"
 # login_url = "https://chat.qwen.ai/"
 # enabled = true
+#
+# Browser-backed gateway accounts are explicitly bound to one session. A browser route is
+# eligible only while its bound session is READY.
+# [browser.bindings.gemini-web-account]
+# session = "gemini-web-primary"
+#
+# [browser.bindings.qwen-web-account]
+# session = "qwen-web-primary"
 
 # Optional local Chromium launcher. This is separate from browser session persistence so API-only
 # and headless deployments remain unchanged. The driver always uses the isolated profile above,
@@ -116,6 +124,14 @@ kind = "openai-compatible"
 base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 models_path = "models"
 
+# v0.15 also registers the browser-http adapter contract. It is intended for a local bridge
+# implementation and sends only opaque session/account/route IDs, never raw cookies or profile paths.
+# [[providers]]
+# id = "gemini-web-bridge"
+# kind = "browser-http"
+# base_url = "http://127.0.0.1:7441/v1"
+# models_path = "models"
+
 # Accounts are credential/quota domains. Each account gets its own discovered model availability.
 [[accounts]]
 id = "openrouter-main"
@@ -149,6 +165,16 @@ auth_style = "bearer"
 enabled = true
 discover_models = true
 
+# The generic v0.15 account schema still requires api_key_env/auth_style for browser accounts,
+# but browser-http never reads the credential environment variable. Model discovery must stay off.
+# [[accounts]]
+# id = "gemini-web-account"
+# provider = "gemini-web-bridge"
+# api_key_env = "BROWSER_ACCOUNT_UNUSED"
+# auth_style = "bearer"
+# enabled = true
+# discover_models = false
+
 # Routes are explicit preferred bindings. Discovered account/model pairs can also be used dynamically.
 [[routes]]
 id = "gemini-primary"
@@ -181,6 +207,14 @@ model = "anthropic/claude-sonnet-4.6"
 priority = 100
 enabled = true
 capabilities = ["chat", "tools", "coding"]
+
+# [[routes]]
+# id = "gemini-web-route"
+# account = "gemini-web-account"
+# model = "gemini-web-model"
+# priority = 5
+# enabled = true
+# capabilities = ["chat"]
 
 [virtual_models.llmgateway-auto]
 routes = ["gemini-primary", "gemini-secondary", "qwen-coder", "openrouter-fallback"]
