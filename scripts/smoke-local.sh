@@ -29,6 +29,10 @@ compaction_trigger_ratio = 0.5
 summary_input_tokens = 512
 summary_max_tokens = 128
 summary_model = "llmgateway-auto"
+retrieval_enabled = true
+retrieval_max_chunks = 2
+retrieval_max_tokens = 320
+retrieval_min_score = 0.2
 
 [[providers]]
 id = "fake"
@@ -92,7 +96,7 @@ THREAD_STREAM=$(curl -fsS -N -X POST \
   "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/messages" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"content":"hello thread","stream":true}')
+  -d '{"content":"invoice optimistic locking conflicts return HTTP 409","stream":true}')
 printf '%s' "$THREAD_STREAM" | grep -q 'fake reply messages=1'
 sleep 0.1
 
@@ -110,6 +114,7 @@ import json,sys
 x=json.load(sys.stdin)
 assert len(x["messages"]) == 4, x
 assert x["sticky_route"] == "fake-route", x
+assert x["messages"][0]["message"]["content"] == "invoice optimistic locking conflicts return HTTP 409", x
 assert x["messages"][1]["message"]["content"] == "fake reply messages=1", x
 assert x["messages"][3]["message"]["content"] == "fake reply messages=3", x
 '
@@ -164,6 +169,10 @@ AFTER_COMPACT=$(curl -fsS -X POST \
   -H "Content-Type: application/json" \
   -d '{"content":"after compact","stream":false}')
 printf '%s' "$AFTER_COMPACT" | grep -q 'fake reply messages=4'
+if printf '%s' "$AFTER_COMPACT" | grep -q 'retrieval=yes'; then
+  echo "unexpected retrieval for unrelated query" >&2
+  exit 1
+fi
 
 THREAD_AFTER=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
@@ -190,12 +199,15 @@ assert x["memory"]["memory"]["facts"] == ["The smoke thread has durable context"
 assert x["memory"]["memory"]["open_questions"] == ["What should v0.7 optimize next?"], x
 '
 
-AFTER_SECOND_COMPACT=$(curl -fsS -X POST \
+RETRIEVAL_HEADERS=$(mktemp)
+AFTER_SECOND_COMPACT=$(curl -fsS -D "$RETRIEVAL_HEADERS" -X POST \
   "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/messages" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"content":"after second compact","stream":false}')
-printf '%s' "$AFTER_SECOND_COMPACT" | grep -q 'fake reply messages=4'
+  -d '{"content":"remind me how invoice optimistic locking HTTP 409 conflicts work","stream":false}')
+printf '%s' "$AFTER_SECOND_COMPACT" | grep -q 'fake reply messages=4 retrieval=yes'
+grep -qi '^x-llmgateway-retrieved-chunks: [1-9]' "$RETRIEVAL_HEADERS"
+rm -f "$RETRIEVAL_HEADERS"
 
 THREAD_FINAL=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
@@ -203,10 +215,10 @@ printf '%s' "$THREAD_FINAL" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
 assert len(x["messages"]) == 8, x
-assert x["messages"][0]["message"]["content"] == "hello thread", x
+assert x["messages"][0]["message"]["content"] == "invoice optimistic locking conflicts return HTTP 409", x
 assert x["messages"][4]["message"]["content"] == "after compact", x
-assert x["messages"][6]["message"]["content"] == "after second compact", x
-assert x["messages"][7]["message"]["content"] == "fake reply messages=4", x
+assert "invoice optimistic locking HTTP 409" in x["messages"][6]["message"]["content"], x
+assert x["messages"][7]["message"]["content"].endswith("retrieval=yes"), x
 '
 
 CONTEXT_AFTER=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/context" \
