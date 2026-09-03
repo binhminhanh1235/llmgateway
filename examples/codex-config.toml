@@ -1,0 +1,9 @@
+model = "llmgateway-coding"
+model_provider = "llmgateway"
+
+[model_providers.llmgateway]
+name = "LLM Gateway"
+base_url = "http://127.0.0.1:7331/v1"
+env_key = "LLMGATEWAY_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
