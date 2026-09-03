@@ -57,7 +57,23 @@ impl Gateway {
         requested_model: &str,
         body: &Value,
     ) -> Result<RoutedResponse, GatewayError> {
-        let routes = self.router.plan(requested_model).await;
+        self.execute_openai_chat_with_affinity(requested_model, body, None)
+            .await
+    }
+
+    pub async fn execute_openai_chat_with_affinity(
+        &self,
+        requested_model: &str,
+        body: &Value,
+        preferred_route: Option<&str>,
+    ) -> Result<RoutedResponse, GatewayError> {
+        let mut routes = self.router.plan(requested_model).await;
+        if let Some(preferred_route) = preferred_route {
+            if let Some(index) = routes.iter().position(|route| route.id == preferred_route) {
+                let preferred = routes.remove(index);
+                routes.insert(0, preferred);
+            }
+        }
         if routes.is_empty() {
             return Err(GatewayError::NoRoute(requested_model.to_string()));
         }
