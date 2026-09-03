@@ -20,6 +20,17 @@ default_model = "llmgateway-auto"
 [storage]
 database_url = "sqlite://data/llmgateway.db"
 
+[context]
+enabled = true
+target_tokens = 1024
+reserve_output_tokens = 128
+recent_messages = 2
+compaction_trigger_ratio = 0.5
+min_checkpoint_tokens = 1
+summary_input_tokens = 512
+summary_max_tokens = 128
+summary_model = "llmgateway-auto"
+
 [[providers]]
 id = "fake"
 kind = "openai-compatible"
@@ -86,14 +97,68 @@ THREAD_STREAM=$(curl -fsS -N -X POST \
 printf '%s' "$THREAD_STREAM" | grep -q 'fake reply messages=1'
 sleep 0.1
 
+SECOND_TURN=$(curl -fsS -X POST \
+  "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/messages" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"second turn","stream":false}')
+printf '%s' "$SECOND_TURN" | grep -q 'fake reply messages=3'
+
 THREAD_DETAIL=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 printf '%s' "$THREAD_DETAIL" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
-assert len(x["messages"]) == 2, x
+assert len(x["messages"]) == 4, x
 assert x["sticky_route"] == "fake-route", x
 assert x["messages"][1]["message"]["content"] == "fake reply messages=1", x
+assert x["messages"][3]["message"]["content"] == "fake reply messages=3", x
+'
+
+CONTEXT_BEFORE=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/context" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$CONTEXT_BEFORE" | grep -q '"state":"full"'
+
+COMPACTED=$(curl -fsS -X POST \
+  "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/compact" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{}')
+printf '%s' "$COMPACTED" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["state"] == "compressed", x
+assert x["checkpoint"] is not None, x
+assert x["checkpoint"]["through_ordinal"] == 2, x
+assert x["checkpoint"]["summary"] == "fake reply messages=2", x
+assert x["checkpoint"]["route_id"] == "fake-route", x
+'
+
+AFTER_COMPACT=$(curl -fsS -X POST \
+  "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/messages" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"after compact","stream":false}')
+printf '%s' "$AFTER_COMPACT" | grep -q 'fake reply messages=4'
+
+THREAD_AFTER=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$THREAD_AFTER" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert len(x["messages"]) == 6, x
+assert x["messages"][4]["message"]["content"] == "after compact", x
+assert x["messages"][5]["message"]["content"] == "fake reply messages=4", x
+'
+
+CONTEXT_AFTER=$(curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}/context" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$CONTEXT_AFTER" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["state"] == "compressed", x
+assert x["checkpoint"]["through_ordinal"] == 2, x
+assert x["prepared_tokens"] <= x["source_tokens"], x
 '
 
 FIRST_RESPONSE=$(curl -fsS -X POST http://127.0.0.1:7331/v1/responses \
