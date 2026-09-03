@@ -2,6 +2,7 @@ use crate::{
     api::{authorize, json_error, json_response, AppState},
     browser_provider::BrowserProviderConfig,
     browser_session_runtime,
+    routing::AccountReadiness,
 };
 use axum::{
     body::Body,
@@ -36,6 +37,7 @@ struct AccountIntelligence {
     available_model_count: i64,
     route_ids: Vec<String>,
     routing_state: String,
+    readiness: AccountReadiness,
     browser_session: Option<BrowserSessionIntelligence>,
 }
 
@@ -89,43 +91,27 @@ pub async fn account_intelligence(
             .map(|route| route.id.clone())
             .collect::<Vec<_>>();
 
+        let readiness = state.gateway.router.account_readiness(&account.id).await;
         let credential_required = account.credential_required(provider);
-        let credential_configured = credential_required.then(|| {
-            env::var(&account.api_key_env)
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-        });
+        let credential_configured = readiness.credential_configured;
 
         let mut browser_session = None;
-        let routing_state = if !account.enabled {
-            "disabled".to_string()
-        } else if provider.is_browser() {
-            match browser_config.bindings.get(&account.id) {
-                None => "unbound".to_string(),
-                Some(binding) => match browser_session_runtime::get() {
-                    None => "browser_runtime_unavailable".to_string(),
-                    Some(store) => match store.session(&binding.session).await {
-                        Ok(session) => {
-                            let status = session.status.clone();
-                            browser_session = Some(BrowserSessionIntelligence {
-                                id: session.id,
-                                label: session.label,
-                                status: session.status,
-                                enabled: session.enabled,
-                                last_verified_at: session.last_verified_at,
-                                last_error: session.last_error,
-                            });
-                            status
-                        }
-                        Err(_) => "session_unavailable".to_string(),
-                    },
-                },
+        if provider.is_browser() {
+            if let Some(binding) = browser_config.bindings.get(&account.id) {
+                if let Some(store) = browser_session_runtime::get() {
+                    if let Ok(session) = store.session(&binding.session).await {
+                        browser_session = Some(BrowserSessionIntelligence {
+                            id: session.id,
+                            label: session.label,
+                            status: session.status,
+                            enabled: session.enabled,
+                            last_verified_at: session.last_verified_at,
+                            last_error: session.last_error,
+                        });
+                    }
+                }
             }
-        } else if credential_configured == Some(false) {
-            "credential_missing".to_string()
-        } else {
-            "ready".to_string()
-        };
+        }
 
         data.push(AccountIntelligence {
             id: summary.id,
@@ -139,7 +125,8 @@ pub async fn account_intelligence(
             model_count: summary.model_count,
             available_model_count: summary.available_model_count,
             route_ids,
-            routing_state,
+            routing_state: readiness.effective_status.clone(),
+            readiness,
             browser_session,
         });
     }
