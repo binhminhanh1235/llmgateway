@@ -12,28 +12,24 @@ mod gateway;
 mod memory_api;
 mod memory_backfill;
 mod response_state;
+mod retrieval_api;
 mod routing;
 mod semantic_retrieval;
 mod structured_memory;
 mod ui;
 
 use admin_api::set_account_model;
-use api::{
-    admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
-    anthropic_messages, health, models, openai_chat, openai_responses, AppState,
-};
+use api::{admin_account_models, admin_accounts, admin_models, admin_refresh_account_models, anthropic_messages, health, models, openai_chat, openai_responses, AppState};
 use axum::{routing::{get, post}, Router};
 use catalog::ModelCatalog;
 use config::AppConfig;
 use context_engine::ContextEngine;
 use conversation::ConversationStore;
-use conversation_api::{
-    compact_thread_context, create_thread, delete_thread, get_thread, get_thread_context,
-    list_threads, send_thread_message,
-};
+use conversation_api::{compact_thread_context, create_thread, delete_thread, get_thread, get_thread_context, list_threads, send_thread_message};
 use gateway::Gateway;
 use memory_api::get_thread_memory;
 use memory_backfill::backfill_legacy_memories;
+use retrieval_api::get_thread_retrieval;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
@@ -44,10 +40,7 @@ use ui::{app_css, app_js, index as ui_index};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("llmgateway=info,tower_http=info")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("llmgateway=info,tower_http=info")))
         .init();
 
     let config_path = env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
@@ -59,9 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gateway = Arc::new(Gateway::new(config.clone(), catalog.clone())?);
     let context_engine = Arc::new(ContextEngine::connect(config.clone(), conversations.clone(), catalog.clone(), gateway.clone()).await?);
     let legacy_memories = backfill_legacy_memories(config.as_ref()).await?;
-    if legacy_memories > 0 {
-        info!(legacy_memories, "backfilled legacy context checkpoints into structured memory");
-    }
+    if legacy_memories > 0 { info!(legacy_memories, "backfilled legacy context checkpoints into structured memory"); }
     context_runtime::install(context_engine).map_err(|_| "context engine was already initialized")?;
 
     let state = AppState { gateway, catalog, conversations, gateway_api_key };
@@ -79,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/threads/{thread_id}/messages", post(send_thread_message))
         .route("/v1/threads/{thread_id}/context", get(get_thread_context))
         .route("/v1/threads/{thread_id}/memory", get(get_thread_memory))
+        .route("/v1/threads/{thread_id}/retrieval", get(get_thread_retrieval))
         .route("/v1/threads/{thread_id}/compact", post(compact_thread_context))
         .route("/_llmgateway/health", get(health))
         .route("/_llmgateway/models", get(admin_models))
