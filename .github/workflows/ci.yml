@@ -17,3 +17,4 @@ jobs:
       - run: cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
+      - run: docker build -t llmgateway:ci .
