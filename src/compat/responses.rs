@@ -611,10 +611,10 @@ mod tests {
 
         let (_, translated) = to_openai_request(&request).unwrap();
         assert_eq!(
-            translated["messages"][1]["tool_calls"][0]["function"]["name"],
+            translated["messages"][2]["tool_calls"][0]["function"]["name"],
             "shell"
         );
-        assert_eq!(translated["messages"][2]["role"], "tool");
+        assert_eq!(translated["messages"][3]["role"], "tool");
         assert_eq!(translated["tools"][0]["function"]["name"], "shell");
     }
 }
