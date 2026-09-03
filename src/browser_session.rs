@@ -28,7 +28,7 @@ pub struct BrowserConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             profile_root: default_profile_root(),
             sessions: BTreeMap::new(),
         }
@@ -53,7 +53,6 @@ struct ConfigEnvelope {
 
 #[derive(Clone)]
 pub struct BrowserSessionStore {
-    app_config: Arc<AppConfig>,
     browser_config: Arc<BrowserConfig>,
     pool: SqlitePool,
 }
@@ -120,7 +119,9 @@ impl BrowserSessionStore {
         browser_config: BrowserConfig,
     ) -> Result<Self, BrowserSessionError> {
         ensure_sqlite_parent(&app_config.storage.database_url)?;
-        ensure_private_dir(Path::new(&browser_config.profile_root))?;
+        if browser_config.enabled || !browser_config.sessions.is_empty() {
+            ensure_private_dir(Path::new(&browser_config.profile_root))?;
+        }
         let options = SqliteConnectOptions::from_str(&app_config.storage.database_url)?
             .create_if_missing(true)
             .foreign_keys(true);
@@ -129,7 +130,6 @@ impl BrowserSessionStore {
             .connect_with(options)
             .await?;
         let store = Self {
-            app_config,
             browser_config: Arc::new(browser_config),
             pool,
         };
@@ -345,7 +345,9 @@ impl BrowserSessionStore {
             .bind(now_string())
             .execute(&self.pool)
             .await?;
-            ensure_private_dir(&self.profile_dir(id))?;
+            if self.browser_config.enabled && spec.enabled {
+                ensure_private_dir(&self.profile_dir(id))?;
+            }
         }
         Ok(())
     }
@@ -372,7 +374,10 @@ fn validate_browser_config(config: &BrowserConfig) -> Result<(), BrowserSessionE
                 "browser session '{id}' requires provider"
             )));
         }
-        if !(spec.login_url.starts_with("https://") || spec.login_url.starts_with("http://127.0.0.1") || spec.login_url.starts_with("http://localhost")) {
+        if !(spec.login_url.starts_with("https://")
+            || spec.login_url.starts_with("http://127.0.0.1")
+            || spec.login_url.starts_with("http://localhost"))
+        {
             return Err(BrowserSessionError::InvalidConfig(format!(
                 "browser session '{id}' login_url must use HTTPS (localhost is allowed for tests)"
             )));
@@ -422,6 +427,11 @@ fn default_profile_root() -> String {
 mod tests {
     use super::{validate_browser_config, BrowserConfig, BrowserSessionSpec};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn missing_browser_section_is_opt_in_disabled() {
+        assert!(!BrowserConfig::default().enabled);
+    }
 
     #[test]
     fn rejects_session_ids_that_can_escape_profile_root() {
