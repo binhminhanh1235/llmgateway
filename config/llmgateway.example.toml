@@ -21,6 +21,13 @@ summary_input_tokens = 12000
 summary_max_tokens = 1200
 # summary_model = "llmgateway-auto" # optional; defaults to the thread/requested model
 
+# Relevant excerpts can be retrieved from the part of the transcript already represented by a checkpoint.
+# Retrieval is local and only consumes spare context budget after durable memory + recent turns + current turn.
+retrieval_enabled = true
+retrieval_max_chunks = 3
+retrieval_max_tokens = 2400
+retrieval_min_score = 0.35
+
 # Providers describe protocols/endpoints. models_path is used by model discovery.
 [[providers]]
 id = "openrouter"
