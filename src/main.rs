@@ -15,19 +15,25 @@ mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
 mod memory_provenance_runtime;
+mod quota_usage;
+mod quota_usage_runtime;
 mod response_state;
 mod retrieval_api;
 mod routing;
 mod semantic_retrieval;
 mod structured_memory;
 mod ui;
+mod usage_api;
 
 use admin_api::set_account_model;
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
     anthropic_messages, health, models, openai_chat, openai_responses, AppState,
 };
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use catalog::ModelCatalog;
 use config::AppConfig;
 use context_engine::ContextEngine;
@@ -41,12 +47,14 @@ use gateway::Gateway;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
+use quota_usage::{QuotaUsageStore, UsageConfig};
 use retrieval_api::inspect_thread_retrieval;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use ui::{app_css, app_js, index as ui_index};
+use usage_api::{get_account_usage, get_usage, reset_account_quota};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,16 +66,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let config_path = env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
+    let config_path =
+        env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
+    let usage_config = UsageConfig::load_from_gateway_config(&config_path)?;
     let config = Arc::new(AppConfig::load(&config_path)?);
     let gateway_api_key = Arc::new(config.gateway_api_key()?);
 
     let catalog = Arc::new(ModelCatalog::connect(config.clone()).await?);
     catalog.seed_from_config().await?;
     let conversations = Arc::new(ConversationStore::connect(config.clone()).await?);
+
+    let quota_usage = Arc::new(QuotaUsageStore::connect(config.clone(), usage_config).await?);
+    quota_usage_runtime::install(quota_usage)
+        .map_err(|_| "quota usage store was already initialized")?;
+
     let gateway = Arc::new(Gateway::new(config.clone(), catalog.clone())?);
     let context_engine = Arc::new(
-        ContextEngine::connect(config.clone(), conversations.clone(), catalog.clone(), gateway.clone()).await?,
+        ContextEngine::connect(
+            config.clone(),
+            conversations.clone(),
+            catalog.clone(),
+            gateway.clone(),
+        )
+        .await?,
     );
     let legacy_memories = backfill_legacy_memories(config.as_ref()).await?;
     if legacy_memories > 0 {
@@ -85,7 +106,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("hybrid embedding retrieval enabled");
     }
 
-    let state = AppState { gateway, catalog, conversations, gateway_api_key };
+    let state = AppState {
+        gateway,
+        catalog,
+        conversations,
+        gateway_api_key,
+    };
     let app = Router::new()
         .route("/", get(ui_index))
         .route("/ui", get(ui_index))
@@ -110,8 +136,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_llmgateway/health", get(health))
         .route("/_llmgateway/models", get(admin_models))
         .route("/_llmgateway/accounts", get(admin_accounts))
-        .route("/_llmgateway/accounts/{account_id}/models", get(admin_account_models).patch(set_account_model))
-        .route("/_llmgateway/accounts/{account_id}/models/refresh", post(admin_refresh_account_models))
+        .route(
+            "/_llmgateway/accounts/{account_id}/models",
+            get(admin_account_models).patch(set_account_model),
+        )
+        .route(
+            "/_llmgateway/accounts/{account_id}/models/refresh",
+            post(admin_refresh_account_models),
+        )
+        .route("/_llmgateway/usage", get(get_usage))
+        .route(
+            "/_llmgateway/accounts/{account_id}/usage",
+            get(get_account_usage),
+        )
+        .route(
+            "/_llmgateway/accounts/{account_id}/quota/reset",
+            post(reset_account_quota),
+        )
         .with_state(state)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
