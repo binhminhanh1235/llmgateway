@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "llmgateway/llmgateway-coding",
+  "providers": {
+    "llmgateway": {
+      "name": "LLM Gateway",
+      "package": "@opencode-ai/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:7331/v1",
+        "apiKey": "{env:LLMGATEWAY_API_KEY}"
+      },
+      "models": {
+        "llmgateway-auto": { "name": "LLM Gateway Auto" },
+        "llmgateway-coding": { "name": "LLM Gateway Coding" },
+        "llmgateway-best": { "name": "LLM Gateway Best" }
+      }
+    }
+  }
+}
