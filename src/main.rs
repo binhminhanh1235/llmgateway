@@ -1,3 +1,4 @@
+mod account_intelligence_api;
 mod admin;
 mod admin_api;
 mod api;
@@ -33,6 +34,7 @@ mod structured_memory;
 mod ui;
 mod usage_api;
 
+use account_intelligence_api::account_intelligence;
 use admin_api::set_account_model;
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
@@ -72,8 +74,8 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use ui::{
-    account_control_css, account_control_js, app_css, app_js, browser_control_css,
-    browser_control_js, index as ui_index,
+    account_control_css, account_control_js, account_intelligence_css, account_intelligence_js,
+    app_css, app_js, browser_control_css, browser_control_js, index as ui_index,
 };
 use usage_api::{get_account_usage, get_usage, reset_account_quota};
 
@@ -167,6 +169,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui/app.js", get(app_js))
         .route("/ui/account-control.css", get(account_control_css))
         .route("/ui/account-control.js", get(account_control_js))
+        .route("/ui/account-intelligence.css", get(account_intelligence_css))
+        .route("/ui/account-intelligence.js", get(account_intelligence_js))
         .route("/ui/browser-control.css", get(browser_control_css))
         .route("/ui/browser-control.js", get(browser_control_js))
         .route("/v1/chat/completions", post(openai_chat))
@@ -188,6 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_llmgateway/health", get(health))
         .route("/_llmgateway/models", get(admin_models))
         .route("/_llmgateway/accounts", get(admin_accounts))
+        .route("/_llmgateway/account-intelligence", get(account_intelligence))
         .route(
             "/_llmgateway/accounts/{account_id}/models",
             get(admin_account_models).patch(set_account_model),
