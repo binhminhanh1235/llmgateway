@@ -1,4 +1,6 @@
 use crate::{
+    browser_provider::BrowserProviderRegistry,
+    browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AppConfig, RouteConfig},
     quota_usage_runtime,
@@ -62,6 +64,8 @@ impl Router {
             });
         }
 
+        candidates = self.filter_runtime_available(candidates).await;
+
         if let Some(usage) = quota_usage_runtime::get() {
             let mut scored = Vec::with_capacity(candidates.len());
             for route in candidates {
@@ -86,6 +90,35 @@ impl Router {
 
         candidates.sort_by_key(|route| route.priority);
         candidates
+    }
+
+    async fn filter_runtime_available(&self, candidates: Vec<RouteConfig>) -> Vec<RouteConfig> {
+        let mut available = Vec::with_capacity(candidates.len());
+        for route in candidates {
+            let Some(account) = self.config.account(&route.account) else {
+                continue;
+            };
+            let Some(provider) = self.config.provider(&account.provider) else {
+                continue;
+            };
+            if BrowserProviderRegistry::is_browser_kind(&provider.kind) {
+                let Some(registry) = browser_provider_runtime::get() else {
+                    tracing::debug!(route = %route.id, "browser provider runtime unavailable; skipping route");
+                    continue;
+                };
+                if !registry.route_available(&provider.kind, &account.id).await {
+                    tracing::debug!(
+                        route = %route.id,
+                        account = %account.id,
+                        provider = %provider.id,
+                        "browser route skipped because its session is not ready"
+                    );
+                    continue;
+                }
+            }
+            available.push(route);
+        }
+        available
     }
 
     async fn routes_for_physical_model(&self, requested: &str) -> Vec<RouteConfig> {

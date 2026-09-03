@@ -1,6 +1,8 @@
 mod admin;
 mod admin_api;
 mod api;
+mod browser_provider;
+mod browser_provider_runtime;
 mod browser_session;
 mod browser_session_api;
 mod browser_session_runtime;
@@ -40,6 +42,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
 use browser_session::{BrowserConfig, BrowserSessionStore};
 use browser_session_api::{
     begin_browser_login, complete_browser_login, get_browser_session, list_browser_sessions,
@@ -88,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
     let usage_config = UsageConfig::load_from_gateway_config(&config_path)?;
     let browser_config = BrowserConfig::load_from_gateway_config(&config_path)?;
+    let browser_provider_config = BrowserProviderConfig::load_from_gateway_config(&config_path)?;
     let chromium_config = ChromiumConfig::load_from_gateway_config(&config_path)?;
     let config = Arc::new(AppConfig::load(&config_path)?);
     let gateway_api_key = Arc::new(config.gateway_api_key()?);
@@ -108,11 +112,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "Chromium driver was already initialized")?;
     browser_session_runtime::install(browser_sessions)
         .map_err(|_| "browser session store was already initialized")?;
+
+    let browser_providers = Arc::new(BrowserProviderRegistry::new(browser_provider_config)?);
+    let browser_provider_bindings = browser_providers.binding_count();
+    browser_provider_runtime::install(browser_providers)
+        .map_err(|_| "browser provider registry was already initialized")?;
+
     if browser_session_count > 0 {
         info!(browser_session_count, "browser session registry enabled");
     }
     if chromium_driver_enabled {
         info!("Chromium browser driver enabled");
+    }
+    if browser_provider_bindings > 0 {
+        info!(browser_provider_bindings, "browser provider account bindings enabled");
     }
 
     let gateway = Arc::new(Gateway::new(config.clone(), catalog.clone())?);
