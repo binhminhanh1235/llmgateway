@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+EMBED_LOG = os.environ.get("FAKE_EMBED_LOG", "/tmp/llmgateway-fake-embeddings.log")
+
+
+def embedding_for(text):
+    text = str(text).lower()
+    if any(term in text for term in [
+        "optimistic", "version column", "conflict", "invoice", "payment update",
+        "lost update", "lost updates", "concurrency control", "concurrent write",
+    ]):
+        return [1.0, 0.0, 0.0, 0.0]
+    if any(term in text for term in ["kafka", "sendfile", "zero copy", "kernel copy"]):
+        return [0.0, 1.0, 0.0, 0.0]
+    if any(term in text for term in ["deploy", "release", "container rollout"]):
+        return [0.0, 0.0, 1.0, 0.0]
+    return [0.0, 0.0, 0.0, 1.0]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -10,6 +27,30 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")
+
+        if self.path.rstrip("/").endswith("/embeddings"):
+            inputs = body.get("input", [])
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            with open(EMBED_LOG, "a", encoding="utf-8") as log:
+                log.write(json.dumps({"model": body.get("model"), "count": len(inputs)}) + "\n")
+            response = {
+                "object": "list",
+                "model": body.get("model", "fake-embedding"),
+                "data": [
+                    {"object": "embedding", "index": index, "embedding": embedding_for(text)}
+                    for index, text in enumerate(inputs)
+                ],
+                "usage": {"prompt_tokens": len(inputs), "total_tokens": len(inputs)},
+            }
+            payload = json.dumps(response).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         messages = body.get("messages", [])
         system_text = "\n".join(
             str(message.get("content", ""))
