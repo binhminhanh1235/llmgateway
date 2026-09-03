@@ -17,6 +17,7 @@ jobs:
       - run: node --check ui/account-control.js
       - run: node --check ui/account-intelligence.js
       - run: node --check ui/browser-control.js
+      - run: node --check ui/trace-console.js
       - run: cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
