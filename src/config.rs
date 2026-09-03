@@ -9,6 +9,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
+    pub context: ContextConfig,
+    #[serde(default)]
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub accounts: Vec<AccountConfig>,
@@ -46,6 +48,44 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             database_url: default_database_url(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ContextConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_context_target_tokens")]
+    pub target_tokens: usize,
+    #[serde(default = "default_context_reserve_output_tokens")]
+    pub reserve_output_tokens: usize,
+    #[serde(default = "default_context_recent_messages")]
+    pub recent_messages: usize,
+    #[serde(default = "default_context_trigger_ratio")]
+    pub compaction_trigger_ratio: f64,
+    #[serde(default = "default_context_min_checkpoint_tokens")]
+    pub min_checkpoint_tokens: usize,
+    #[serde(default = "default_context_summary_input_tokens")]
+    pub summary_input_tokens: usize,
+    #[serde(default = "default_context_summary_max_tokens")]
+    pub summary_max_tokens: usize,
+    #[serde(default)]
+    pub summary_model: Option<String>,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            target_tokens: default_context_target_tokens(),
+            reserve_output_tokens: default_context_reserve_output_tokens(),
+            recent_messages: default_context_recent_messages(),
+            compaction_trigger_ratio: default_context_trigger_ratio(),
+            min_checkpoint_tokens: default_context_min_checkpoint_tokens(),
+            summary_input_tokens: default_context_summary_input_tokens(),
+            summary_max_tokens: default_context_summary_max_tokens(),
+            summary_model: None,
         }
     }
 }
@@ -157,6 +197,31 @@ impl AppConfig {
                 self.api.default_model
             )));
         }
+        if !(0.5..=1.0).contains(&self.context.compaction_trigger_ratio) {
+            return Err(ConfigError::Invalid(
+                "context.compaction_trigger_ratio must be between 0.5 and 1.0".into(),
+            ));
+        }
+        if self.context.target_tokens < 1024 {
+            return Err(ConfigError::Invalid(
+                "context.target_tokens must be at least 1024".into(),
+            ));
+        }
+        if self.context.recent_messages == 0 {
+            return Err(ConfigError::Invalid(
+                "context.recent_messages must be greater than zero".into(),
+            ));
+        }
+        if self.context.summary_input_tokens < 512 {
+            return Err(ConfigError::Invalid(
+                "context.summary_input_tokens must be at least 512".into(),
+            ));
+        }
+        if self.context.summary_max_tokens == 0 {
+            return Err(ConfigError::Invalid(
+                "context.summary_max_tokens must be greater than zero".into(),
+            ));
+        }
 
         for account in &self.accounts {
             if self.provider(&account.provider).is_none() {
@@ -211,6 +276,13 @@ fn default_models_path() -> String { "models".into() }
 fn default_auth_style() -> String { "bearer".into() }
 fn default_priority() -> i32 { 100 }
 fn default_true() -> bool { true }
+fn default_context_target_tokens() -> usize { 16_000 }
+fn default_context_reserve_output_tokens() -> usize { 4_000 }
+fn default_context_recent_messages() -> usize { 12 }
+fn default_context_trigger_ratio() -> f64 { 0.85 }
+fn default_context_min_checkpoint_tokens() -> usize { 4_000 }
+fn default_context_summary_input_tokens() -> usize { 12_000 }
+fn default_context_summary_max_tokens() -> usize { 1_200 }
 
 #[cfg(test)]
 mod tests {
