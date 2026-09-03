@@ -17,14 +17,14 @@ pub struct ExplainRoutesRequest {
 pub async fn explain_routes(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Option<Json<ExplainRoutesRequest>>,
+    Json(request): Json<ExplainRoutesRequest>,
 ) -> Response<Body> {
     if let Err(response) = authorize(&headers, &state.gateway_api_key) {
         return response;
     }
 
-    let requested_model = body
-        .and_then(|Json(request)| request.model)
+    let requested_model = request
+        .model
         .filter(|model| !model.trim().is_empty())
         .unwrap_or_else(|| state.gateway.config.api.default_model.clone());
     let trace = state.gateway.router.explain(&requested_model).await;
