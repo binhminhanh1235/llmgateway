@@ -13,6 +13,8 @@ mod embedding_runtime;
 mod gateway;
 mod memory_api;
 mod memory_backfill;
+mod memory_provenance;
+mod memory_provenance_runtime;
 mod response_state;
 mod retrieval_api;
 mod routing;
@@ -36,8 +38,9 @@ use conversation_api::{
 };
 use embedding_retrieval::EmbeddingRetriever;
 use gateway::Gateway;
-use memory_api::get_thread_memory;
+use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
+use memory_provenance::MemoryProvenanceStore;
 use retrieval_api::inspect_thread_retrieval;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -72,6 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     context_runtime::install(context_engine).map_err(|_| "context engine was already initialized")?;
 
+    let memory_provenance = Arc::new(MemoryProvenanceStore::connect(config.clone()).await?);
+    memory_provenance_runtime::install(memory_provenance)
+        .map_err(|_| "memory provenance store was already initialized")?;
+
     if let Some(retriever) = EmbeddingRetriever::connect(config.clone()).await? {
         embedding_runtime::install(Arc::new(retriever))
             .map_err(|_| "embedding retriever was already initialized")?;
@@ -93,6 +100,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/threads/{thread_id}/messages", post(send_thread_message))
         .route("/v1/threads/{thread_id}/context", get(get_thread_context))
         .route("/v1/threads/{thread_id}/memory", get(get_thread_memory))
+        .route("/v1/threads/{thread_id}/memory/pins", post(add_thread_memory_pin))
+        .route(
+            "/v1/threads/{thread_id}/memory/items/{item_key}",
+            axum::routing::patch(update_thread_memory_item),
+        )
         .route("/v1/threads/{thread_id}/retrieve", post(inspect_thread_retrieval))
         .route("/v1/threads/{thread_id}/compact", post(compact_thread_context))
         .route("/_llmgateway/health", get(health))
