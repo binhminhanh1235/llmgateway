@@ -1,12 +1,15 @@
 use crate::{
     catalog::ModelCatalog,
     config::AppConfig,
-    conversation::{ConversationError, ConversationStore, ThreadDetail},
+    conversation::{ConversationError, ConversationStore, StoredMessage, ThreadDetail},
     gateway::{Gateway, GatewayError},
 };
 use serde::Serialize;
 use serde_json::{json, Value};
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, Row, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
+    Row, SqlitePool,
+};
 use std::{path::Path, str::FromStr, sync::Arc};
 use thiserror::Error;
 use uuid::Uuid;
@@ -130,12 +133,7 @@ impl ContextEngine {
     ) -> Result<PreparedContext, ContextError> {
         let detail = self.conversations.thread(thread_id).await?;
         let budget = self.budget_for_model(requested_model).await;
-        let source_messages = detail
-            .messages
-            .iter()
-            .map(|message| message.message.clone())
-            .collect::<Vec<_>>();
-        let source_tokens = estimate_messages_tokens(&source_messages);
+        let source_tokens = estimate_stored_tokens(&detail.messages);
         let trigger = self.trigger_tokens(budget);
         let mut checkpoint = self.latest_checkpoint(thread_id).await?;
 
@@ -144,12 +142,14 @@ impl ContextEngine {
             && self.can_compact(&detail, checkpoint.as_ref())
         {
             checkpoint = self
-                .compact_detail(&detail, requested_model, checkpoint, false)
+                .compact_detail(&detail, requested_model, checkpoint)
                 .await?;
         }
 
-        let mut prepared = self.messages_from_checkpoint(&detail, checkpoint.as_ref());
-        prepared = fit_messages_to_budget(prepared, budget);
+        let prepared = fit_messages_to_budget(
+            self.messages_from_checkpoint(&detail, checkpoint.as_ref()),
+            budget,
+        );
         let prepared_tokens = estimate_messages_tokens(&prepared);
 
         Ok(PreparedContext {
@@ -172,12 +172,7 @@ impl ContextEngine {
         let budget = self.budget_for_model(model).await;
         let trigger = self.trigger_tokens(budget);
         let checkpoint = self.latest_checkpoint(thread_id).await?;
-        let source_messages = detail
-            .messages
-            .iter()
-            .map(|message| message.message.clone())
-            .collect::<Vec<_>>();
-        let source_tokens = estimate_messages_tokens(&source_messages);
+        let source_tokens = estimate_stored_tokens(&detail.messages);
         let prepared = fit_messages_to_budget(
             self.messages_from_checkpoint(&detail, checkpoint.as_ref()),
             budget,
@@ -210,9 +205,7 @@ impl ContextEngine {
         let detail = self.conversations.thread(thread_id).await?;
         let model = requested_model.unwrap_or(&detail.model);
         let checkpoint = self.latest_checkpoint(thread_id).await?;
-        let _ = self
-            .compact_detail(&detail, model, checkpoint, true)
-            .await?;
+        let _ = self.compact_detail(&detail, model, checkpoint).await?;
         self.status(thread_id, Some(model)).await
     }
 
@@ -221,12 +214,12 @@ impl ContextEngine {
         detail: &ThreadDetail,
         requested_model: &str,
         mut checkpoint: Option<ContextCheckpoint>,
-        force: bool,
     ) -> Result<Option<ContextCheckpoint>, ContextError> {
         let keep_recent = self.config.context.recent_messages.max(1);
         if detail.messages.len() <= keep_recent {
             return Ok(checkpoint);
         }
+
         let cutoff_index = detail.messages.len() - keep_recent;
         let cutoff_ordinal = detail.messages[cutoff_index - 1].ordinal;
         if checkpoint
@@ -251,29 +244,16 @@ impl ContextEngine {
             return Ok(checkpoint);
         }
 
-        if !force {
-            let pending_values = pending
-                .iter()
-                .map(|message| message.message.clone())
-                .collect::<Vec<_>>();
-            if estimate_messages_tokens(&pending_values)
-                < self.config.context.min_checkpoint_tokens
-            {
-                return Ok(checkpoint);
-            }
-        }
-
-        let chunks = chunk_messages(
+        for chunk in chunk_messages(
             &pending,
             self.config.context.summary_input_tokens.max(512),
-        );
-        for chunk in chunks {
+        ) {
             let values = chunk
                 .iter()
                 .map(|message| message.message.clone())
                 .collect::<Vec<_>>();
             let previous_summary = checkpoint.as_ref().map(|existing| existing.summary.as_str());
-            let summary = self
+            let (summary, route_id) = self
                 .summarize(
                     requested_model,
                     detail.sticky_route.as_deref(),
@@ -285,7 +265,12 @@ impl ContextEngine {
                 .last()
                 .map(|message| message.ordinal)
                 .unwrap_or(previous_through);
-            let source_tokens = estimate_messages_tokens(&values) as i64;
+            let segment_tokens = estimate_messages_tokens(&values) as i64;
+            let cumulative_source_tokens = checkpoint
+                .as_ref()
+                .map(|existing| existing.source_tokens)
+                .unwrap_or(0)
+                .saturating_add(segment_tokens);
             let summary_tokens = estimate_text_tokens(&summary) as i64;
             let summary_model = self
                 .config
@@ -294,18 +279,18 @@ impl ContextEngine {
                 .as_deref()
                 .unwrap_or(requested_model)
                 .to_string();
-            let saved = self
-                .save_checkpoint(
+            checkpoint = Some(
+                self.save_checkpoint(
                     &detail.id,
                     through_ordinal,
                     &summary,
                     &summary_model,
-                    None,
-                    source_tokens,
+                    Some(&route_id),
+                    cumulative_source_tokens,
                     summary_tokens,
                 )
-                .await?;
-            checkpoint = Some(saved);
+                .await?,
+            );
         }
         Ok(checkpoint)
     }
@@ -316,7 +301,7 @@ impl ContextEngine {
         sticky_route: Option<&str>,
         previous_summary: Option<&str>,
         messages: &[Value],
-    ) -> Result<String, ContextError> {
+    ) -> Result<(String, String), ContextError> {
         let summary_model = self
             .config
             .context
@@ -359,8 +344,7 @@ impl ContextEngine {
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .ok_or(ContextError::EmptySummary)?;
-        let _ = route_id;
-        Ok(text.to_string())
+        Ok((text.to_string(), route_id))
     }
 
     fn can_compact(
@@ -383,8 +367,8 @@ impl ContextEngine {
         detail: &ThreadDetail,
         checkpoint: Option<&ContextCheckpoint>,
     ) -> Vec<Value> {
-        let mut messages = Vec::new();
         let through = checkpoint.map(|value| value.through_ordinal).unwrap_or(0);
+        let mut messages = Vec::new();
         if let Some(checkpoint) = checkpoint {
             messages.push(json!({
                 "role":"system",
@@ -411,14 +395,15 @@ impl ContextEngine {
             Ok(models) => models,
             Err(_) => return configured,
         };
-        let matched = models.iter().find(|model| {
-            model.id == requested_model || model.external_id == requested_model
-        });
-        let Some(window) = matched.and_then(|model| model.context_window) else {
+        let context_window = models
+            .iter()
+            .find(|model| model.id == requested_model || model.external_id == requested_model)
+            .and_then(|model| model.context_window);
+        let Some(context_window) = context_window else {
             return configured;
         };
-        let window = usize::try_from(window).unwrap_or(configured);
-        configured.min(window.saturating_sub(reserve).max(1024))
+        let context_window = usize::try_from(context_window).unwrap_or(configured);
+        configured.min(context_window.saturating_sub(reserve).max(1024))
     }
 
     fn trigger_tokens(&self, budget: usize) -> usize {
@@ -493,7 +478,7 @@ impl ContextEngine {
     }
 }
 
-fn checkpoint_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ContextCheckpoint, ContextError> {
+fn checkpoint_from_row(row: SqliteRow) -> Result<ContextCheckpoint, ContextError> {
     Ok(ContextCheckpoint {
         id: row.try_get("id")?,
         thread_id: row.try_get("thread_id")?,
@@ -508,15 +493,15 @@ fn checkpoint_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ContextCheckpoint
 }
 
 fn chunk_messages<'a>(
-    messages: &[&'a crate::conversation::StoredMessage],
+    messages: &[&'a StoredMessage],
     max_tokens: usize,
-) -> Vec<Vec<&'a crate::conversation::StoredMessage>> {
+) -> Vec<Vec<&'a StoredMessage>> {
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut current_tokens = 0usize;
     for message in messages {
         let tokens = estimate_message_tokens(&message.message).max(1);
-        if !current.is_empty() && current_tokens + tokens > max_tokens {
+        if !current.is_empty() && current_tokens.saturating_add(tokens) > max_tokens {
             chunks.push(current);
             current = Vec::new();
             current_tokens = 0;
@@ -528,6 +513,14 @@ fn chunk_messages<'a>(
         chunks.push(current);
     }
     chunks
+}
+
+fn estimate_stored_tokens(messages: &[StoredMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| estimate_message_tokens(&message.message))
+        .sum::<usize>()
+        .saturating_add(messages.len() * 4)
 }
 
 pub fn estimate_messages_tokens(messages: &[Value]) -> usize {
@@ -543,14 +536,14 @@ pub fn estimate_message_tokens(message: &Value) -> usize {
 }
 
 pub fn estimate_text_tokens(text: &str) -> usize {
-    let chars = text.chars().count();
-    chars.div_ceil(4).max(1)
+    text.chars().count().div_ceil(4).max(1)
 }
 
 fn fit_messages_to_budget(messages: Vec<Value>, budget: usize) -> Vec<Value> {
     if estimate_messages_tokens(&messages) <= budget {
         return messages;
     }
+
     let mut prefix = Vec::new();
     let mut start = 0usize;
     if messages
@@ -562,17 +555,20 @@ fn fit_messages_to_budget(messages: Vec<Value>, budget: usize) -> Vec<Value> {
         prefix.push(messages[0].clone());
         start = 1;
     }
+
     let mut selected = Vec::new();
     let mut used = estimate_messages_tokens(&prefix);
     for message in messages[start..].iter().rev() {
         let tokens = estimate_message_tokens(message).saturating_add(4);
-        if used + tokens > budget && !selected.is_empty() {
-            break;
-        }
-        if used + tokens <= budget {
+        if used.saturating_add(tokens) <= budget {
             selected.push(message.clone());
-            used += tokens;
+            used = used.saturating_add(tokens);
+            continue;
         }
+        if selected.is_empty() {
+            selected.push(message.clone());
+        }
+        break;
     }
     selected.reverse();
     prefix.extend(selected);
@@ -618,7 +614,19 @@ mod tests {
             json!({"role":"user","content":"latest"}),
         ];
         let fitted = fit_messages_to_budget(messages, 30);
-        assert_eq!(fitted.first().and_then(|m| m.get("role")).and_then(|v| v.as_str()), Some("system"));
-        assert_eq!(fitted.last().and_then(|m| m.get("content")).and_then(|v| v.as_str()), Some("latest"));
+        assert_eq!(
+            fitted
+                .first()
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str),
+            Some("system")
+        );
+        assert_eq!(
+            fitted
+                .last()
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_str),
+            Some("latest")
+        );
     }
 }
