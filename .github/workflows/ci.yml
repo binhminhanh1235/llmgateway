@@ -25,4 +25,5 @@ jobs:
       - run: bash scripts/smoke-quota.sh
       - run: bash scripts/smoke-browser-session.sh
       - run: bash scripts/smoke-chromium-driver.sh
+      - run: bash scripts/smoke-browser-provider.sh
       - run: docker build -t llmgateway:ci .
