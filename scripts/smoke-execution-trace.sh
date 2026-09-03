@@ -96,6 +96,19 @@ for _ in {1..60}; do
   sleep 0.2
 done
 
+# v0.22 embeds a trace console wired directly to the v0.21 execution APIs.
+UI_HTML=$(curl -fsS http://127.0.0.1:7331/)
+TRACE_JS=$(curl -fsS http://127.0.0.1:7331/ui/trace-console.js)
+TRACE_CSS=$(curl -fsS http://127.0.0.1:7331/ui/trace-console.css)
+grep -q 'data-view="traces"' <<<"$UI_HTML"
+grep -q 'id="tracesView"' <<<"$UI_HTML"
+grep -q '/ui/trace-console.js' <<<"$UI_HTML"
+grep -q '/ui/trace-console.css' <<<"$UI_HTML"
+grep -q '/_llmgateway/executions?limit=100' <<<"$TRACE_JS"
+grep -q '/_llmgateway/executions/' <<<"$TRACE_JS"
+grep -q 'trace-console-shell' <<<"$TRACE_CSS"
+grep -q 'trace-timeline' <<<"$TRACE_CSS"
+
 curl -fsS -D /tmp/execution.headers -o /tmp/execution.json \
   -X POST http://127.0.0.1:7331/v1/chat/completions \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
@@ -178,4 +191,4 @@ assert x["final_error"], x
 assert x["attempts"] == [], x
 '
 
-echo "llmgateway execution trace smoke test passed"
+echo "llmgateway execution trace + trace console smoke test passed"
