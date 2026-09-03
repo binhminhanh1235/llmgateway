@@ -3,6 +3,9 @@ use crate::{
     config::AppConfig,
     conversation::{ConversationError, ConversationStore, StoredMessage, ThreadDetail},
     gateway::{Gateway, GatewayError},
+    structured_memory::{
+        parse_model_memory, StructuredMemory, StructuredMemorySnapshot, MEMORY_SCHEMA_VERSION,
+    },
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -71,6 +74,7 @@ pub struct ContextStatus {
     pub budget_tokens: usize,
     pub trigger_tokens: usize,
     pub checkpoint: Option<ContextCheckpoint>,
+    pub memory: Option<StructuredMemorySnapshot>,
 }
 
 impl ContextEngine {
@@ -120,6 +124,20 @@ impl ContextEngine {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_context_checkpoints_thread
              ON context_checkpoints(thread_id, through_ordinal DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS thread_memories (
+                thread_id TEXT PRIMARY KEY,
+                through_ordinal INTEGER NOT NULL,
+                schema_version INTEGER NOT NULL,
+                memory_json TEXT NOT NULL,
+                model TEXT NOT NULL,
+                route_id TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            )",
         )
         .execute(&self.pool)
         .await?;
@@ -173,6 +191,7 @@ impl ContextEngine {
         let budget = self.budget_for_model(model).await;
         let trigger = self.trigger_tokens(budget);
         let checkpoint = self.latest_checkpoint(thread_id).await?;
+        let memory = self.memory_snapshot(thread_id).await?;
         let source_tokens = estimate_stored_tokens(&detail.messages);
         let prepared = fit_messages_to_budget(
             self.messages_from_checkpoint(&detail, checkpoint.as_ref()),
@@ -195,6 +214,7 @@ impl ContextEngine {
             budget_tokens: budget,
             trigger_tokens: trigger,
             checkpoint,
+            memory,
         })
     }
 
@@ -208,6 +228,21 @@ impl ContextEngine {
         let checkpoint = self.latest_checkpoint(thread_id).await?;
         let _ = self.compact_detail(&detail, model, checkpoint).await?;
         self.status(thread_id, Some(model)).await
+    }
+
+    pub async fn memory_snapshot(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<StructuredMemorySnapshot>, ContextError> {
+        let row = sqlx::query(
+            "SELECT thread_id, through_ordinal, schema_version, memory_json, model, route_id, updated_at
+             FROM thread_memories
+             WHERE thread_id = ?",
+        )
+        .bind(thread_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(memory_from_row).transpose()
     }
 
     async fn compact_detail(
@@ -243,6 +278,7 @@ impl ContextEngine {
             return Ok(checkpoint);
         }
 
+        let mut memory = self.memory_snapshot(&detail.id).await?;
         for chunk in chunk_messages_atomic(
             &pending,
             self.config.context.summary_input_tokens.max(512),
@@ -252,11 +288,13 @@ impl ContextEngine {
                 .map(|message| message.message.clone())
                 .collect::<Vec<_>>();
             let previous_summary = checkpoint.as_ref().map(|existing| existing.summary.as_str());
-            let (summary, route_id) = self
-                .summarize(
+            let previous_memory = memory.as_ref().map(|snapshot| &snapshot.memory);
+            let (updated_memory, route_id) = self
+                .summarize_structured(
                     requested_model,
                     detail.sticky_route.as_deref(),
                     previous_summary,
+                    previous_memory,
                     &values,
                 )
                 .await?;
@@ -270,6 +308,7 @@ impl ContextEngine {
                 .map(|existing| existing.source_tokens)
                 .unwrap_or(0)
                 .saturating_add(segment_tokens);
+            let summary = updated_memory.render_for_prompt();
             let summary_tokens = estimate_text_tokens(&summary) as i64;
             let summary_model = self
                 .config
@@ -278,6 +317,17 @@ impl ContextEngine {
                 .as_deref()
                 .unwrap_or(requested_model)
                 .to_string();
+
+            memory = Some(
+                self.save_memory(
+                    &detail.id,
+                    through_ordinal,
+                    &updated_memory,
+                    &summary_model,
+                    Some(&route_id),
+                )
+                .await?,
+            );
             checkpoint = Some(
                 self.save_checkpoint(
                     &detail.id,
@@ -294,13 +344,14 @@ impl ContextEngine {
         Ok(checkpoint)
     }
 
-    async fn summarize(
+    async fn summarize_structured(
         &self,
         requested_model: &str,
         sticky_route: Option<&str>,
         previous_summary: Option<&str>,
+        previous_memory: Option<&StructuredMemory>,
         messages: &[Value],
-    ) -> Result<(String, String), ContextError> {
+    ) -> Result<(StructuredMemory, String), ContextError> {
         let summary_model = self
             .config
             .context
@@ -309,9 +360,37 @@ impl ContextEngine {
             .unwrap_or(requested_model);
         let transcript = serde_json::to_string_pretty(messages)
             .map_err(|error| ContextError::InvalidJson(error.to_string()))?;
-        let previous = previous_summary.unwrap_or("(none yet)");
+        let previous_memory_json = match previous_memory {
+            Some(memory) => serde_json::to_string_pretty(memory),
+            None => serde_json::to_string_pretty(&StructuredMemory::default()),
+        }
+        .map_err(|error| ContextError::InvalidJson(error.to_string()))?;
+        let legacy = previous_summary.unwrap_or("(none)");
+        let schema = r#"{
+  "facts": ["atomic durable fact"],
+  "decisions": ["decision plus important rationale when known"],
+  "constraints": ["hard requirement, limit, invariant, or policy"],
+  "user_preferences": ["stable preference relevant to future turns"],
+  "entities": ["important project, service, model, repository, file, or named concept"],
+  "code_context": ["API, symbol, architecture, implementation state, or technical detail"],
+  "open_questions": ["unresolved question, risk, follow-up, or pending work"],
+  "rolling_summary": "short narrative state of the conversation"
+}"#;
         let prompt = format!(
-            "Update the durable conversation memory below. Preserve concrete facts, decisions, constraints, user preferences, code/API names, unresolved questions, and important reasoning outcomes. Remove repetition and conversational filler. Do not invent details. Keep it concise and useful to a different model continuing the same conversation.\n\nPREVIOUS MEMORY:\n{previous}\n\nNEW TRANSCRIPT SEGMENT:\n{transcript}\n\nReturn only the updated memory in plain text with short sections when useful."
+            "Update llmgateway's structured durable memory for this conversation.\n\n\
+Rules:\n\
+- Return exactly one JSON object and no markdown fences.\n\
+- Preserve still-valid prior memory unless the new transcript corrects or supersedes it.\n\
+- Keep items atomic, specific, concise, and deduplicated.\n\
+- Never invent facts.\n\
+- Remove resolved items from open_questions.\n\
+- Prefer durable knowledge over conversational filler.\n\
+- Keep exact code/API/model/file names when they matter.\n\
+- A recent explicit statement overrides older conflicting memory.\n\n\
+Required JSON shape:\n{schema}\n\n\
+PREVIOUS STRUCTURED MEMORY:\n{previous_memory_json}\n\n\
+LEGACY CHECKPOINT TEXT (may be empty or redundant):\n{legacy}\n\n\
+NEW TRANSCRIPT SEGMENT:\n{transcript}\n"
         );
         let request = json!({
             "model": summary_model,
@@ -319,7 +398,7 @@ impl ContextEngine {
             "temperature": 0.1,
             "max_tokens": self.config.context.summary_max_tokens,
             "messages": [
-                {"role":"system","content":"You are llmgateway's loss-aware conversation memory compressor."},
+                {"role":"system","content":"You are llmgateway's structured memory compiler. Produce faithful durable JSON memory, not prose."},
                 {"role":"user","content":prompt}
             ]
         });
@@ -343,7 +422,16 @@ impl ContextEngine {
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .ok_or(ContextError::EmptySummary)?;
-        Ok((text.to_string(), route_id))
+
+        let memory = match parse_model_memory(text) {
+            Ok(memory) if !memory.is_empty() => memory,
+            _ => {
+                let mut fallback = previous_memory.cloned().unwrap_or_default();
+                fallback.rolling_summary = text.to_string();
+                fallback.normalize()
+            }
+        };
+        Ok((memory, route_id))
     }
 
     fn can_compact(
@@ -372,7 +460,7 @@ impl ContextEngine {
             messages.push(json!({
                 "role":"system",
                 "content": format!(
-                    "llmgateway conversation memory checkpoint. Treat this as compressed context from earlier turns. If a recent message conflicts with it, prefer the recent message.\n\n{}",
+                    "llmgateway durable conversation memory. Treat this as compressed context from earlier turns. If a recent message conflicts with it, prefer the recent message.\n\n{}",
                     checkpoint.summary
                 )
             }));
@@ -427,6 +515,42 @@ impl ContextEngine {
         .fetch_optional(&self.pool)
         .await?;
         row.map(checkpoint_from_row).transpose()
+    }
+
+    async fn save_memory(
+        &self,
+        thread_id: &str,
+        through_ordinal: i64,
+        memory: &StructuredMemory,
+        model: &str,
+        route_id: Option<&str>,
+    ) -> Result<StructuredMemorySnapshot, ContextError> {
+        let memory_json = serde_json::to_string(memory)
+            .map_err(|error| ContextError::InvalidJson(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO thread_memories
+             (thread_id, through_ordinal, schema_version, memory_json, model, route_id)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(thread_id) DO UPDATE SET
+                through_ordinal = excluded.through_ordinal,
+                schema_version = excluded.schema_version,
+                memory_json = excluded.memory_json,
+                model = excluded.model,
+                route_id = excluded.route_id,
+                updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(thread_id)
+        .bind(through_ordinal)
+        .bind(MEMORY_SCHEMA_VERSION)
+        .bind(memory_json)
+        .bind(model)
+        .bind(route_id)
+        .execute(&self.pool)
+        .await?;
+
+        self.memory_snapshot(thread_id)
+            .await?
+            .ok_or_else(|| ContextError::InvalidJson("saved memory could not be reloaded".into()))
     }
 
     async fn save_checkpoint(
@@ -488,6 +612,22 @@ fn checkpoint_from_row(row: SqliteRow) -> Result<ContextCheckpoint, ContextError
         source_tokens: row.try_get("source_tokens")?,
         summary_tokens: row.try_get("summary_tokens")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+fn memory_from_row(row: SqliteRow) -> Result<StructuredMemorySnapshot, ContextError> {
+    let memory_json: String = row.try_get("memory_json")?;
+    let memory = serde_json::from_str::<StructuredMemory>(&memory_json)
+        .map_err(|error| ContextError::InvalidJson(error.to_string()))?
+        .normalize();
+    Ok(StructuredMemorySnapshot {
+        thread_id: row.try_get("thread_id")?,
+        through_ordinal: row.try_get("through_ordinal")?,
+        schema_version: row.try_get("schema_version")?,
+        memory,
+        model: row.try_get("model")?,
+        route_id: row.try_get("route_id")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
