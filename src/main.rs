@@ -11,6 +11,7 @@ mod conversation_api;
 mod gateway;
 mod response_state;
 mod routing;
+mod structured_memory;
 mod ui;
 
 use admin_api::set_account_model;
