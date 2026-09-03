@@ -18,6 +18,7 @@ use tokio::sync::oneshot;
 pub struct CreateThreadRequest {
     pub title: Option<String>,
     pub model: Option<String>,
+    pub messages: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,11 +41,28 @@ pub async fn create_thread(
         .model
         .as_deref()
         .unwrap_or(&state.gateway.config.api.default_model);
-    match state
+    let created = match state
         .conversations
         .create_thread(body.title.as_deref(), model)
         .await
     {
+        Ok(thread) => thread,
+        Err(error) => return conversation_error(error),
+    };
+
+    if let Some(messages) = body.messages {
+        for message in messages {
+            if let Err(error) = state
+                .conversations
+                .append_message(&created.id, &message, Some(model), None)
+                .await
+            {
+                return conversation_error(error);
+            }
+        }
+    }
+
+    match state.conversations.thread(&created.id).await {
         Ok(thread) => json_response(StatusCode::CREATED, json!(thread), None),
         Err(error) => conversation_error(error),
     }
