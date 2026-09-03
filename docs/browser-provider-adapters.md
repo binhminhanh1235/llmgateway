@@ -1,8 +1,8 @@
 # Browser provider adapters
 
-llmgateway v0.15 adds the execution seam that lets a browser-backed account participate in the same router used by API accounts.
+llmgateway lets browser-backed accounts participate in the same router used by API accounts.
 
-The important ownership rule remains unchanged: browser cookies, local storage, refresh state, CAPTCHA, and 2FA stay inside the isolated Chromium profile. The gateway does not export raw browser credentials through its API or provider adapter contract.
+The ownership rule is simple: browser cookies, local storage, refresh state, CAPTCHA, and 2FA stay inside the isolated Chromium profile. The gateway does not export raw browser credentials through its API or provider adapter contract.
 
 ## Route lifecycle
 
@@ -41,40 +41,63 @@ session = "gemini-web-primary"
 
 The route is eligible only when that browser session is enabled and has lifecycle status `ready`.
 
-## Adapter contract
+## First-class browser accounts (v0.17)
 
-`BrowserProviderAdapter` receives an OpenAI-shaped chat request plus the selected provider, account, route, and opaque browser session ID. It returns a normal upstream HTTP response, so the existing compatibility, streaming, quota, retry, and failover layers remain shared with API providers.
-
-The first registered implementation is `browser-http`. It forwards the normalized chat request to an adapter bridge and adds only these metadata headers:
-
-```text
-x-llmgateway-browser-session
-x-llmgateway-browser-account
-x-llmgateway-route
-```
-
-It does **not** send cookies, profile directories, DevTools endpoints, credentials, or login tokens.
-
-Example bridge provider:
+Browser accounts no longer need fake API credentials or an explicit model-discovery switch. The provider kind defines the transport boundary.
 
 ```toml
 [[providers]]
-id = "gemini-web-bridge"
-kind = "browser-http"
-base_url = "http://127.0.0.1:7441/v1"
-models_path = "models"
+id = "gemini-web"
+kind = "browser-cdp"
 
 [[accounts]]
 id = "gemini-web-account"
-provider = "gemini-web-bridge"
-# The generic v0.15 account schema still requires this field. browser-http does not read it.
-api_key_env = "BROWSER_ACCOUNT_UNUSED"
-auth_style = "bearer"
+provider = "gemini-web"
 enabled = true
-discover_models = false
+```
+
+For `browser-*` providers, llmgateway automatically:
+
+- treats the account transport as browser-backed;
+- does not require `api_key_env`;
+- disables API model discovery;
+- prevents the account from being used as a hybrid-retrieval embedding backend.
+
+API accounts are unchanged and still default to model discovery enabled:
+
+```toml
+[[accounts]]
+id = "openrouter-main"
+provider = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+enabled = true
+```
+
+## Adapter contract
+
+`BrowserProviderAdapter` receives an OpenAI-shaped chat request plus the selected provider, account, route, and opaque browser session ID. It returns a normal upstream HTTP response, so compatibility, quota, retry, and failover behavior stay shared with API providers.
+
+Two execution lanes are available:
+
+- `browser-http`: a narrow local bridge/test contract that forwards opaque session/account/route IDs but never cookies or profile secrets.
+- `browser-cdp`: executes a trusted local provider adapter inside an already-authenticated Chromium page over loopback CDP.
+
+Example CDP provider:
+
+```toml
+[[providers]]
+id = "gemini-web"
+kind = "browser-cdp"
+
+[[accounts]]
+id = "gemini-web-account"
+provider = "gemini-web"
+enabled = true
 
 [browser.bindings.gemini-web-account]
 session = "gemini-web-primary"
+target_url_prefix = "https://gemini.google.com/app"
+adapter_script = "adapters/gemini.js"
 
 [[routes]]
 id = "gemini-web-route"
@@ -85,7 +108,7 @@ enabled = true
 capabilities = ["chat"]
 ```
 
-`browser-http` is deliberately a narrow contract/test bridge, not a claim that Gemini or Qwen expose a supported private web API. Provider-specific transports belong behind new adapter kinds such as `browser-gemini` or `browser-qwen` and must respect each service's terms and normal authentication challenges.
+Provider-specific adapter scripts remain experimental integration code. They must respect service terms and normal authentication, anti-abuse, and quota controls. llmgateway does not automate CAPTCHA/2FA or expose raw browser session secrets.
 
 ## Authentication expiry
 
@@ -100,8 +123,4 @@ This makes an expired browser login visible in the Accounts UI instead of creati
 
 ## Why the router is shared
 
-There is intentionally no second "browser router". Browser-backed models are another execution lane behind the same route planner. That preserves one place for priority, health, quota pressure, cooldown, affinity, and future task-aware scoring.
-
-## Next adapter milestone
-
-The next step is a provider-specific adapter that can use the already-running isolated Chromium profile without exporting session secrets. Gemini/Qwen implementations should remain separate modules so web UI changes cannot destabilize the gateway core.
+There is intentionally no second browser router. Browser-backed models are another execution lane behind the same route planner. That preserves one place for priority, health, quota pressure, cooldown, affinity, and future task-aware scoring.
