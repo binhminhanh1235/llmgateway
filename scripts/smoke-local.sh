@@ -24,6 +24,20 @@ curl -fsS http://127.0.0.1:7331/ui/app.js | grep -q "llmgateway.threads.v1"
 curl -fsS http://127.0.0.1:7331/v1/models \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" | grep -q "llmgateway-auto"
 
+THREAD_JSON=$(curl -fsS -X POST \
+  http://127.0.0.1:7331/v1/threads \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"CI thread","model":"llmgateway-auto"}')
+THREAD_ID=$(printf '%s' "$THREAD_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+curl -fsS http://127.0.0.1:7331/v1/threads \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" | grep -q "$THREAD_ID"
+curl -fsS "http://127.0.0.1:7331/v1/threads/${THREAD_ID}" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" | grep -q '"title":"CI thread"'
+curl -fsS -X DELETE "http://127.0.0.1:7331/v1/threads/${THREAD_ID}" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" | grep -q '"deleted":true'
+
 curl -fsS -X PATCH \
   http://127.0.0.1:7331/_llmgateway/accounts/gemini-primary/models \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
