@@ -26,7 +26,6 @@ target_tokens = 1024
 reserve_output_tokens = 128
 recent_messages = 2
 compaction_trigger_ratio = 0.5
-min_checkpoint_tokens = 1
 summary_input_tokens = 512
 summary_max_tokens = 128
 summary_model = "llmgateway-auto"
