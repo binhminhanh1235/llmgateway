@@ -54,46 +54,63 @@
       }
 
       const state = classify(account);
+      const readiness = account.readiness || {};
       const session = account.browser_session;
       const credential = account.transport === "api"
         ? account.credential_configured === true ? "Key configured" : "Key missing"
         : session?.label || session?.id || "Browser session";
-      const routeCount = (account.route_ids || []).length;
+      const routeCount = Number(readiness.route_count ?? (account.route_ids || []).length);
+      const healthyRoutes = Number(readiness.healthy_route_count ?? routeCount);
+      const routeText = routeCount ? `${healthyRoutes}/${routeCount} routes healthy` : "dynamic routes";
 
       strip.innerHTML = `
         <span class="account-intel-chip transport-${escapeAttr(account.transport)}">${account.transport === "browser" ? "Browser" : "API"}</span>
         <span class="account-intel-chip state-${escapeAttr(state.level)}"><span class="account-intel-dot"></span>${escapeHtml(state.label)}</span>
         <span class="account-intel-detail">${escapeHtml(credential)}</span>
-        <span class="account-intel-detail">${routeCount} route${routeCount === 1 ? "" : "s"}</span>`;
+        <span class="account-intel-detail">${escapeHtml(routeText)}</span>`;
 
-      const message = session?.last_error || state.note;
+      const reasons = Array.isArray(readiness.reasons) ? readiness.reasons.join(", ") : "";
+      const message = session?.last_error || state.note || reasons;
       strip.title = message || "";
     }
   }
 
   function classify(account) {
-    if (!account.enabled || account.routing_state === "disabled") {
+    const readiness = account.readiness || {};
+    const status = readiness.effective_status || account.routing_state || "unavailable";
+    const reasons = new Set(readiness.reasons || []);
+
+    if (reasons.has("account_disabled") || !account.enabled) {
       return { level: "muted", label: "Disabled", note: "This account is disabled" };
     }
-    switch (account.routing_state) {
-      case "ready":
-        return { level: "healthy", label: account.transport === "browser" ? "Connected" : "Ready", note: "Available for routing" };
-      case "login_in_progress":
-        return { level: "working", label: "Signing in", note: "Waiting for browser login verification" };
-      case "requires_login":
-        return { level: "warning", label: "Login required", note: "Open the browser session and sign in" };
-      case "requires_attention":
-        return { level: "danger", label: "Needs attention", note: account.browser_session?.last_error || "Browser session needs attention" };
-      case "credential_missing":
-        return { level: "danger", label: "Key missing", note: "Configured API credential environment variable is missing" };
-      case "unbound":
-        return { level: "danger", label: "No session", note: "Browser account has no browser.bindings entry" };
-      case "session_unavailable":
-      case "browser_runtime_unavailable":
-        return { level: "danger", label: "Unavailable", note: "Browser runtime/session is unavailable" };
-      default:
-        return { level: "warning", label: account.routing_state || "Unknown", note: "Account state is not ready" };
+    if (status === "ready") {
+      return { level: "healthy", label: account.transport === "browser" ? "Connected" : "Ready", note: "Available for routing" };
     }
+    if (status === "degraded") {
+      if (reasons.has("quota_pressure")) return { level: "warning", label: "Quota pressure", note: "Still routable, but quota pressure is elevated" };
+      if (reasons.has("route_cooldown")) return { level: "warning", label: "Degraded", note: "One or more routes are cooling down" };
+      return { level: "warning", label: "Degraded", note: [...reasons].join(", ") || "Available with reduced confidence" };
+    }
+
+    if (reasons.has("credential_missing")) {
+      return { level: "danger", label: "Key missing", note: "Configured API credential environment variable is missing" };
+    }
+    if (reasons.has("quota_blocked")) {
+      return { level: "danger", label: "Quota blocked", note: "Router is excluding this account until quota state recovers" };
+    }
+    if (reasons.has("browser_session_not_ready")) {
+      switch (account.browser_session?.status) {
+        case "login_in_progress":
+          return { level: "working", label: "Signing in", note: "Waiting for browser login verification" };
+        case "requires_login":
+          return { level: "warning", label: "Login required", note: "Open the browser session and sign in" };
+        case "requires_attention":
+          return { level: "danger", label: "Needs attention", note: account.browser_session?.last_error || "Browser session needs attention" };
+        default:
+          return { level: "danger", label: "Browser unavailable", note: "Browser account is not currently ready for routing" };
+      }
+    }
+    return { level: "danger", label: "Unavailable", note: [...reasons].join(", ") || "Account is not eligible for routing" };
   }
 
   function escapeHtml(value) {
