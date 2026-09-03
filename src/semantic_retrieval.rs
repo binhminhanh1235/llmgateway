@@ -1,6 +1,6 @@
 use crate::conversation::StoredMessage;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,7 +97,10 @@ pub fn retrieve_relevant_history(
     let mut rendered_sections = Vec::new();
     let mut used_tokens = 0usize;
 
-    for (candidate, score) in scored.into_iter().take(max_chunks.saturating_mul(3).max(max_chunks)) {
+    for (candidate, score) in scored
+        .into_iter()
+        .take(max_chunks.saturating_mul(3).max(max_chunks))
+    {
         let section = format!(
             "Earlier transcript ordinals {}-{}:\n{}",
             candidate.start_ordinal, candidate.end_ordinal, candidate.text
@@ -132,11 +135,44 @@ pub fn retrieve_relevant_history(
     }
 }
 
+pub fn augment_messages_with_retrieval(messages: &mut Vec<Value>, retrieval: &RetrievalResult) {
+    if retrieval.chunks.is_empty() || retrieval.rendered.trim().is_empty() {
+        return;
+    }
+    let block = format!(
+        "Retrieved earlier transcript excerpts that are specifically relevant to the current request. Use them as supporting historical evidence. Durable memory and recent verbatim messages remain higher priority if there is a conflict.\n\n{}",
+        retrieval.rendered
+    );
+
+    if let Some(first) = messages.first_mut() {
+        if first.get("role").and_then(Value::as_str) == Some("system") {
+            if let Some(content) = first.get_mut("content") {
+                if let Some(text) = content.as_str() {
+                    *content = Value::String(format!("{text}\n\n{block}"));
+                    return;
+                }
+            }
+        }
+    }
+    messages.insert(0, json!({"role":"system","content":block}));
+}
+
+pub fn estimate_json_messages_tokens(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .map(|message| estimate_text_tokens(&message.to_string()).saturating_add(4))
+        .sum::<usize>()
+        .saturating_add(messages.len() * 4)
+}
+
 fn conversation_chunks(messages: &[StoredMessage], through_ordinal: i64) -> Vec<CandidateChunk> {
     let mut chunks = Vec::new();
     let mut current: Vec<&StoredMessage> = Vec::new();
 
-    for message in messages.iter().filter(|message| message.ordinal <= through_ordinal) {
+    for message in messages
+        .iter()
+        .filter(|message| message.ordinal <= through_ordinal)
+    {
         let role = message
             .message
             .get("role")
@@ -262,7 +298,9 @@ fn tokenize(text: &str) -> Vec<String> {
     ];
     let stop = STOP_WORDS.iter().copied().collect::<HashSet<_>>();
     text.to_lowercase()
-        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-' && ch != '.' && ch != '/')
+        .split(|ch: char| {
+            !ch.is_alphanumeric() && ch != '_' && ch != '-' && ch != '.' && ch != '/'
+        })
         .map(|term| term.trim_matches(|ch: char| ch == '.' || ch == '/' || ch == '-'))
         .filter(|term| term.chars().count() >= 2 && !stop.contains(*term))
         .map(ToString::to_string)
@@ -297,7 +335,10 @@ fn truncate_to_token_budget(text: &str, max_tokens: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let mut truncated = text.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut truncated = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     truncated.push('…');
     truncated
 }
@@ -307,14 +348,20 @@ fn preview(text: &str, max_chars: usize) -> String {
     if compact.chars().count() <= max_chars {
         return compact;
     }
-    let mut result = compact.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut result = compact
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     result.push('…');
     result
 }
 
 #[cfg(test)]
 mod tests {
-    use super::retrieve_relevant_history;
+    use super::{
+        augment_messages_with_retrieval, estimate_json_messages_tokens,
+        retrieve_relevant_history,
+    };
     use crate::conversation::StoredMessage;
     use serde_json::{json, Value};
 
@@ -333,10 +380,22 @@ mod tests {
     #[test]
     fn retrieves_relevant_old_turn_and_ignores_recent_region() {
         let messages = vec![
-            stored(1, "user", "We use optimistic locking with a version column for invoice updates"),
-            stored(2, "assistant", "Conflicts return HTTP 409 and the caller retries"),
+            stored(
+                1,
+                "user",
+                "We use optimistic locking with a version column for invoice updates",
+            ),
+            stored(
+                2,
+                "assistant",
+                "Conflicts return HTTP 409 and the caller retries",
+            ),
             stored(3, "user", "Kafka uses zero copy with sendfile"),
-            stored(4, "assistant", "That reduces copies between kernel and user space"),
+            stored(
+                4,
+                "assistant",
+                "That reduces copies between kernel and user space",
+            ),
             stored(5, "user", "Recent unrelated turn"),
             stored(6, "assistant", "Recent response"),
         ];
@@ -356,5 +415,23 @@ mod tests {
         let result = retrieve_relevant_history(&messages, 1, &query, 3, 300, 0.2);
         assert!(result.chunks.is_empty());
         assert!(result.rendered.is_empty());
+    }
+
+    #[test]
+    fn augmentation_merges_into_existing_memory_system_message() {
+        let history = vec![stored(1, "user", "invoice optimistic locking HTTP 409")];
+        let query = json!({"role":"user","content":"invoice locking conflict"});
+        let retrieval = retrieve_relevant_history(&history, 1, &query, 1, 200, 0.1);
+        let mut messages = vec![
+            json!({"role":"system","content":"durable memory"}),
+            query,
+        ];
+        let before = estimate_json_messages_tokens(&messages);
+        augment_messages_with_retrieval(&mut messages, &retrieval);
+        assert_eq!(messages.len(), 2);
+        let content = messages[0].get("content").and_then(Value::as_str).unwrap();
+        assert!(content.contains("durable memory"));
+        assert!(content.contains("Retrieved earlier transcript"));
+        assert!(estimate_json_messages_tokens(&messages) > before);
     }
 }
