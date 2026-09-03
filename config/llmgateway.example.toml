@@ -9,6 +9,26 @@ default_model = "llmgateway-auto"
 [storage]
 database_url = "sqlite://data/llmgateway.db"
 
+# Browser sessions are opt-in. Each session receives an isolated Chromium profile directory.
+# llmgateway never returns raw cookies through its API. Login challenges, CAPTCHA, and 2FA
+# must be completed normally by the user in the browser.
+[browser]
+enabled = false
+profile_root = "data/browser-profiles"
+
+# Enable the browser section and one or more sessions when you are ready to use the web adapter.
+# [browser.sessions.gemini-web-primary]
+# provider = "gemini"
+# label = "Gemini web primary"
+# login_url = "https://gemini.google.com/app"
+# enabled = true
+#
+# [browser.sessions.qwen-web-primary]
+# provider = "qwen"
+# label = "Qwen web primary"
+# login_url = "https://chat.qwen.ai/"
+# enabled = true
+
 # Account-level usage/quota state is persisted in the same SQLite database.
 # 429 cooldown applies to the whole account, not only the route that failed.
 [usage]
