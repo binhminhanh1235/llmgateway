@@ -4,6 +4,9 @@ use crate::{
     context_runtime,
     conversation::{openai_stream_with_capture, ConversationError},
     gateway::GatewayError,
+    semantic_retrieval::{
+        augment_messages_with_retrieval, estimate_json_messages_tokens, retrieve_relevant_history,
+    },
 };
 use axum::{
     body::Body,
@@ -196,13 +199,53 @@ pub async fn send_thread_message(
     };
 
     let user_message = json!({"role":"user","content":body.content});
-    let prepared = match engine
+    let mut prepared = match engine
         .prepare_turn(&thread_id, &requested_model, &user_message)
         .await
     {
         Ok(prepared) => prepared,
         Err(error) => return context_error(error),
     };
+
+    let mut retrieved_chunks = 0usize;
+    if state.gateway.config.context.retrieval_enabled {
+        if let Some(checkpoint) = prepared.checkpoint.as_ref() {
+            let spare_tokens = prepared
+                .budget_tokens
+                .saturating_sub(prepared.estimated_prepared_tokens);
+            let retrieval_budget = state
+                .gateway
+                .config
+                .context
+                .retrieval_max_tokens
+                .min(spare_tokens.saturating_sub(32));
+            if retrieval_budget >= 128 {
+                let detail = match state.conversations.thread(&thread_id).await {
+                    Ok(detail) => detail,
+                    Err(error) => return conversation_error(error),
+                };
+                let retrieval = retrieve_relevant_history(
+                    &detail.messages,
+                    checkpoint.through_ordinal,
+                    &user_message,
+                    state.gateway.config.context.retrieval_max_chunks,
+                    retrieval_budget,
+                    state.gateway.config.context.retrieval_min_score,
+                );
+                if !retrieval.chunks.is_empty() {
+                    let mut augmented = prepared.messages.clone();
+                    augment_messages_with_retrieval(&mut augmented, &retrieval);
+                    let augmented_tokens = estimate_json_messages_tokens(&augmented);
+                    if augmented_tokens <= prepared.budget_tokens {
+                        retrieved_chunks = retrieval.chunks.len();
+                        prepared.messages = augmented;
+                        prepared.estimated_prepared_tokens = augmented_tokens;
+                    }
+                }
+            }
+        }
+    }
+
     let request = json!({
         "model":requested_model,
         "messages":prepared.messages,
@@ -263,7 +306,7 @@ pub async fn send_thread_message(
             Body::from_stream(stream),
             &route_id,
         );
-        return with_context_headers(response, &prepared);
+        return with_context_headers(response, &prepared, retrieved_chunks);
     }
 
     match routed.response.json::<Value>().await {
@@ -289,14 +332,22 @@ pub async fn send_thread_message(
                 }
             }
             let response = json_response(StatusCode::OK, openai, Some(&route_id));
-            with_context_headers(response, &prepared)
+            with_context_headers(response, &prepared, retrieved_chunks)
         }
         Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
     }
 }
 
-fn with_context_headers(mut response: Response<Body>, prepared: &PreparedContext) -> Response<Body> {
-    let state = if prepared.compressed { "compressed" } else { "full" };
+fn with_context_headers(
+    mut response: Response<Body>,
+    prepared: &PreparedContext,
+    retrieved_chunks: usize,
+) -> Response<Body> {
+    let state = if prepared.compressed {
+        "compressed"
+    } else {
+        "full"
+    };
     if let Ok(value) = HeaderValue::from_str(state) {
         response.headers_mut().insert("x-llmgateway-context", value);
     }
@@ -314,6 +365,11 @@ fn with_context_headers(mut response: Response<Body>, prepared: &PreparedContext
         response
             .headers_mut()
             .insert("x-llmgateway-context-budget", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&retrieved_chunks.to_string()) {
+        response
+            .headers_mut()
+            .insert("x-llmgateway-retrieved-chunks", value);
     }
     if let Some(checkpoint) = &prepared.checkpoint {
         if let Ok(value) = HeaderValue::from_str(&checkpoint.id) {
@@ -357,9 +413,11 @@ fn conversation_error(error: ConversationError) -> Response<Body> {
         ConversationError::ThreadNotFound(message) | ConversationError::ResponseNotFound(message) => {
             json_error(StatusCode::NOT_FOUND, "not_found_error", &message)
         }
-        ConversationError::InvalidJson(message) => {
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "conversation_json_error", &message)
-        }
+        ConversationError::InvalidJson(message) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "conversation_json_error",
+            &message,
+        ),
         ConversationError::Database(error) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "conversation_database_error",
