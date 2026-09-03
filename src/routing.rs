@@ -1,10 +1,13 @@
+mod account_readiness;
+
+pub use account_readiness::AccountReadiness;
+
 use crate::{
-    browser_provider::BrowserProviderRegistry,
-    browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AppConfig, RouteConfig},
     quota_usage_runtime,
 };
+use account_readiness::evaluate_base;
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use std::{
@@ -64,7 +67,7 @@ impl Router {
             });
         }
 
-        candidates = self.filter_runtime_available(candidates).await;
+        candidates = self.filter_account_ready(candidates).await;
 
         if let Some(usage) = quota_usage_runtime::get() {
             let mut scored = Vec::with_capacity(candidates.len());
@@ -92,33 +95,61 @@ impl Router {
         candidates
     }
 
-    async fn filter_runtime_available(&self, candidates: Vec<RouteConfig>) -> Vec<RouteConfig> {
+    async fn filter_account_ready(&self, candidates: Vec<RouteConfig>) -> Vec<RouteConfig> {
+        let mut readiness_by_account = HashMap::new();
         let mut available = Vec::with_capacity(candidates.len());
         for route in candidates {
-            let Some(account) = self.config.account(&route.account) else {
-                continue;
+            let readiness = if let Some(readiness) = readiness_by_account.get(&route.account) {
+                readiness.clone()
+            } else {
+                let readiness = self.account_readiness(&route.account).await;
+                readiness_by_account.insert(route.account.clone(), readiness.clone());
+                readiness
             };
-            let Some(provider) = self.config.provider(&account.provider) else {
-                continue;
-            };
-            if BrowserProviderRegistry::is_browser_kind(&provider.kind) {
-                let Some(registry) = browser_provider_runtime::get() else {
-                    tracing::debug!(route = %route.id, "browser provider runtime unavailable; skipping route");
-                    continue;
-                };
-                if !registry.route_available(&provider.kind, &account.id).await {
-                    tracing::debug!(
-                        route = %route.id,
-                        account = %account.id,
-                        provider = %provider.id,
-                        "browser route skipped because its session is not ready"
-                    );
-                    continue;
-                }
+            if readiness.routable {
+                available.push(route);
+            } else {
+                tracing::debug!(
+                    route = %route.id,
+                    account = %route.account,
+                    status = %readiness.effective_status,
+                    reasons = ?readiness.reasons,
+                    "route skipped by unified account readiness"
+                );
             }
-            available.push(route);
         }
         available
+    }
+
+    pub async fn account_readiness(&self, account_id: &str) -> AccountReadiness {
+        let mut readiness = evaluate_base(self.config.as_ref(), account_id).await;
+        let routes = self
+            .config
+            .routes
+            .iter()
+            .filter(|route| route.enabled && route.account == account_id)
+            .collect::<Vec<_>>();
+        readiness.route_count = routes.len();
+
+        let now = Utc::now();
+        let health = self.health.read().await;
+        for route in routes {
+            let cooling = health
+                .get(&route.id)
+                .and_then(|state| state.cooldown_until.as_ref())
+                .is_some_and(|until| until > &now);
+            if cooling {
+                readiness.cooling_route_count += 1;
+            } else {
+                readiness.healthy_route_count += 1;
+            }
+        }
+        drop(health);
+
+        if readiness.cooling_route_count > 0 {
+            readiness.add_soft_reason("route_cooldown");
+        }
+        readiness
     }
 
     async fn routes_for_physical_model(&self, requested: &str) -> Vec<RouteConfig> {
