@@ -1,10 +1,14 @@
+mod admin;
+mod admin_api;
 mod api;
 mod catalog;
 mod compat;
 mod config;
 mod gateway;
 mod routing;
+mod ui;
 
+use admin_api::set_account_model;
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
     anthropic_messages, health, models, openai_chat, openai_responses, AppState,
@@ -20,6 +24,7 @@ use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use ui::{app_css, app_js, index as ui_index};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,6 +51,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let app = Router::new()
+        .route("/", get(ui_index))
+        .route("/ui", get(ui_index))
+        .route("/ui/app.css", get(app_css))
+        .route("/ui/app.js", get(app_js))
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/responses", post(openai_responses))
         .route("/v1/messages", post(anthropic_messages))
@@ -55,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_llmgateway/accounts", get(admin_accounts))
         .route(
             "/_llmgateway/accounts/{account_id}/models",
-            get(admin_account_models),
+            get(admin_account_models).patch(set_account_model),
         )
         .route(
             "/_llmgateway/accounts/{account_id}/models/refresh",
