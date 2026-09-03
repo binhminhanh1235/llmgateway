@@ -216,11 +216,9 @@ impl ContextEngine {
         mut checkpoint: Option<ContextCheckpoint>,
     ) -> Result<Option<ContextCheckpoint>, ContextError> {
         let keep_recent = self.config.context.recent_messages.max(1);
-        if detail.messages.len() <= keep_recent {
+        let Some(cutoff_index) = safe_compaction_cutoff(&detail.messages, keep_recent) else {
             return Ok(checkpoint);
-        }
-
-        let cutoff_index = detail.messages.len() - keep_recent;
+        };
         let cutoff_ordinal = detail.messages[cutoff_index - 1].ordinal;
         if checkpoint
             .as_ref()
@@ -244,7 +242,7 @@ impl ContextEngine {
             return Ok(checkpoint);
         }
 
-        for chunk in chunk_messages(
+        for chunk in chunk_messages_atomic(
             &pending,
             self.config.context.summary_input_tokens.max(512),
         ) {
@@ -353,10 +351,10 @@ impl ContextEngine {
         checkpoint: Option<&ContextCheckpoint>,
     ) -> bool {
         let keep_recent = self.config.context.recent_messages.max(1);
-        if detail.messages.len() <= keep_recent {
+        let Some(cutoff_index) = safe_compaction_cutoff(&detail.messages, keep_recent) else {
             return false;
-        }
-        let cutoff_ordinal = detail.messages[detail.messages.len() - keep_recent - 1].ordinal;
+        };
+        let cutoff_ordinal = detail.messages[cutoff_index - 1].ordinal;
         checkpoint
             .map(|existing| existing.through_ordinal < cutoff_ordinal)
             .unwrap_or(true)
@@ -492,27 +490,94 @@ fn checkpoint_from_row(row: SqliteRow) -> Result<ContextCheckpoint, ContextError
     })
 }
 
-fn chunk_messages<'a>(
+fn safe_compaction_cutoff(messages: &[StoredMessage], keep_recent: usize) -> Option<usize> {
+    if messages.len() <= keep_recent {
+        return None;
+    }
+    let mut cutoff = messages.len() - keep_recent;
+    while cutoff > 0 && is_tool_result(&messages[cutoff].message) {
+        cutoff -= 1;
+    }
+    (cutoff > 0).then_some(cutoff)
+}
+
+fn chunk_messages_atomic<'a>(
     messages: &[&'a StoredMessage],
     max_tokens: usize,
 ) -> Vec<Vec<&'a StoredMessage>> {
+    let groups = stored_atomic_groups(messages);
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut current_tokens = 0usize;
-    for message in messages {
-        let tokens = estimate_message_tokens(&message.message).max(1);
-        if !current.is_empty() && current_tokens.saturating_add(tokens) > max_tokens {
+
+    for group in groups {
+        let group_values = group
+            .iter()
+            .map(|message| message.message.clone())
+            .collect::<Vec<_>>();
+        let group_tokens = estimate_messages_tokens(&group_values);
+        if !current.is_empty() && current_tokens.saturating_add(group_tokens) > max_tokens {
             chunks.push(current);
             current = Vec::new();
             current_tokens = 0;
         }
-        current.push(*message);
-        current_tokens = current_tokens.saturating_add(tokens);
+        current.extend(group);
+        current_tokens = current_tokens.saturating_add(group_tokens);
     }
     if !current.is_empty() {
         chunks.push(current);
     }
     chunks
+}
+
+fn stored_atomic_groups<'a>(messages: &[&'a StoredMessage]) -> Vec<Vec<&'a StoredMessage>> {
+    let mut groups = Vec::new();
+    let mut index = 0usize;
+    while index < messages.len() {
+        let mut group = vec![messages[index]];
+        if has_tool_calls(&messages[index].message) {
+            index += 1;
+            while index < messages.len() && is_tool_result(&messages[index].message) {
+                group.push(messages[index]);
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+        groups.push(group);
+    }
+    groups
+}
+
+fn atomic_message_groups(messages: &[Value]) -> Vec<Vec<Value>> {
+    let mut groups = Vec::new();
+    let mut index = 0usize;
+    while index < messages.len() {
+        let mut group = vec![messages[index].clone()];
+        if has_tool_calls(&messages[index]) {
+            index += 1;
+            while index < messages.len() && is_tool_result(&messages[index]) {
+                group.push(messages[index].clone());
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+        groups.push(group);
+    }
+    groups
+}
+
+fn has_tool_calls(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("assistant")
+        && message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty())
+}
+
+fn is_tool_result(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("tool")
 }
 
 fn estimate_stored_tokens(messages: &[StoredMessage]) -> usize {
@@ -556,22 +621,26 @@ fn fit_messages_to_budget(messages: Vec<Value>, budget: usize) -> Vec<Value> {
         start = 1;
     }
 
-    let mut selected = Vec::new();
+    let groups = atomic_message_groups(&messages[start..]);
+    let mut selected_groups: Vec<Vec<Value>> = Vec::new();
     let mut used = estimate_messages_tokens(&prefix);
-    for message in messages[start..].iter().rev() {
-        let tokens = estimate_message_tokens(message).saturating_add(4);
+    for group in groups.iter().rev() {
+        let tokens = estimate_messages_tokens(group);
         if used.saturating_add(tokens) <= budget {
-            selected.push(message.clone());
+            selected_groups.push(group.clone());
             used = used.saturating_add(tokens);
             continue;
         }
-        if selected.is_empty() {
-            selected.push(message.clone());
+        if selected_groups.is_empty() {
+            selected_groups.push(group.clone());
         }
         break;
     }
-    selected.reverse();
-    prefix.extend(selected);
+
+    selected_groups.reverse();
+    for group in selected_groups {
+        prefix.extend(group);
+    }
     prefix
 }
 
@@ -595,8 +664,28 @@ fn ensure_sqlite_parent(database_url: &str) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{estimate_text_tokens, fit_messages_to_budget};
-    use serde_json::json;
+    use super::{
+        atomic_message_groups, estimate_text_tokens, fit_messages_to_budget,
+        safe_compaction_cutoff,
+    };
+    use crate::conversation::StoredMessage;
+    use serde_json::{json, Value};
+
+    fn stored(ordinal: i64, message: Value) -> StoredMessage {
+        StoredMessage {
+            id: format!("msg_{ordinal}"),
+            role: message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("assistant")
+                .to_string(),
+            message,
+            model: None,
+            route_id: None,
+            ordinal,
+            created_at: "2026-09-03 00:00:00".to_string(),
+        }
+    }
 
     #[test]
     fn token_estimator_is_stable_and_non_zero() {
@@ -628,5 +717,76 @@ mod tests {
                 .and_then(Value::as_str),
             Some("latest")
         );
+    }
+
+    #[test]
+    fn atomic_groups_keep_tool_call_with_results() {
+        let messages = vec![
+            json!({"role":"user","content":"inspect"}),
+            json!({
+                "role":"assistant",
+                "content":null,
+                "tool_calls":[{
+                    "id":"call_1",
+                    "type":"function",
+                    "function":{"name":"read_file","arguments":"{}"}
+                }]
+            }),
+            json!({"role":"tool","tool_call_id":"call_1","content":"file body"}),
+            json!({"role":"assistant","content":"done"}),
+        ];
+        let groups = atomic_message_groups(&messages);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[1].len(), 2);
+        assert_eq!(groups[1][0].get("role").and_then(Value::as_str), Some("assistant"));
+        assert_eq!(groups[1][1].get("role").and_then(Value::as_str), Some("tool"));
+    }
+
+    #[test]
+    fn budget_never_returns_orphan_tool_result() {
+        let messages = vec![
+            json!({"role":"system","content":"memory"}),
+            json!({"role":"user","content":"old".repeat(100)}),
+            json!({
+                "role":"assistant",
+                "content":null,
+                "tool_calls":[{
+                    "id":"call_1",
+                    "type":"function",
+                    "function":{"name":"read_file","arguments":"{}"}
+                }]
+            }),
+            json!({"role":"tool","tool_call_id":"call_1","content":"result"}),
+        ];
+        let fitted = fit_messages_to_budget(messages, 70);
+        let roles = fitted
+            .iter()
+            .filter_map(|message| message.get("role").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        if roles.contains(&"tool") {
+            assert!(roles.contains(&"assistant"));
+        }
+    }
+
+    #[test]
+    fn compaction_boundary_moves_before_tool_exchange() {
+        let messages = vec![
+            stored(1, json!({"role":"user","content":"first"})),
+            stored(
+                2,
+                json!({
+                    "role":"assistant",
+                    "content":null,
+                    "tool_calls":[{
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"read_file","arguments":"{}"}
+                    }]
+                }),
+            ),
+            stored(3, json!({"role":"tool","tool_call_id":"call_1","content":"result"})),
+            stored(4, json!({"role":"assistant","content":"after tool"})),
+        ];
+        assert_eq!(safe_compaction_cutoff(&messages, 2), Some(1));
     }
 }
