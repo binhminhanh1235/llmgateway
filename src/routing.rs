@@ -24,6 +24,45 @@ pub struct RouteHealth {
     pub last_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct RouteCandidateDecision {
+    pub route_id: String,
+    pub account: String,
+    pub model: String,
+    pub base_priority: i32,
+    pub eligible: bool,
+    pub exclusion_reasons: Vec<String>,
+    pub warnings: Vec<String>,
+    pub readiness: AccountReadiness,
+    pub route_health: RouteHealth,
+    pub quota_penalty: Option<i32>,
+    pub final_score: Option<i32>,
+    pub rank: Option<usize>,
+    pub selected: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RouteDecisionTrace {
+    pub requested_model: String,
+    pub resolved_model: String,
+    pub selected_route: Option<String>,
+    pub candidates: Vec<RouteCandidateDecision>,
+}
+
+#[derive(Clone)]
+struct EvaluatedRoute {
+    route: RouteConfig,
+    decision: RouteCandidateDecision,
+    original_index: usize,
+}
+
+#[derive(Clone)]
+enum QuotaEvaluation {
+    Included(i32),
+    Excluded,
+    Unavailable(String),
+}
+
 #[derive(Clone)]
 pub struct Router {
     config: Arc<AppConfig>,
@@ -41,64 +80,45 @@ impl Router {
     }
 
     pub async fn plan(&self, requested_model: &str) -> Vec<RouteConfig> {
-        let resolved = self.config.resolve_model_alias(requested_model);
-        let mut candidates = if let Some(vm) = self.config.virtual_models.get(resolved) {
-            vm.routes
-                .iter()
-                .filter_map(|id| self.config.route(id).cloned())
-                .collect::<Vec<_>>()
-        } else if let Some(route) = self.config.route(resolved) {
-            vec![route.clone()]
-        } else {
-            self.routes_for_physical_model(resolved).await
-        };
-
-        candidates.retain(|route| route.enabled);
-
-        let now = Utc::now();
-        {
-            let health = self.health.read().await;
-            candidates.retain(|route| {
-                health
-                    .get(&route.id)
-                    .and_then(|state| state.cooldown_until.as_ref())
-                    .map(|until| until <= &now)
-                    .unwrap_or(true)
-            });
-        }
-
-        candidates = self.filter_account_ready(candidates).await;
-
-        if let Some(usage) = quota_usage_runtime::get() {
-            let mut scored = Vec::with_capacity(candidates.len());
-            for route in candidates {
-                match usage.route_penalty(&route.account).await {
-                    Ok(Some(penalty)) => scored.push((route, penalty)),
-                    Ok(None) => {
-                        tracing::debug!(
-                            account = %route.account,
-                            route = %route.id,
-                            "quota engine excluded route"
-                        );
-                    }
-                    Err(error) => {
-                        warn!(%error, account = %route.account, "quota scoring failed; keeping route");
-                        scored.push((route, 0));
-                    }
-                }
-            }
-            scored.sort_by_key(|(route, penalty)| route.priority.saturating_add(*penalty));
-            return scored.into_iter().map(|(route, _)| route).collect();
-        }
-
-        candidates.sort_by_key(|route| route.priority);
-        candidates
+        let evaluation = self.evaluate(requested_model).await;
+        let mut eligible = evaluation
+            .candidates
+            .into_iter()
+            .filter(|candidate| candidate.decision.eligible)
+            .collect::<Vec<_>>();
+        eligible.sort_by_key(|candidate| candidate.decision.rank.unwrap_or(usize::MAX));
+        eligible.into_iter().map(|candidate| candidate.route).collect()
     }
 
-    async fn filter_account_ready(&self, candidates: Vec<RouteConfig>) -> Vec<RouteConfig> {
+    pub async fn explain(&self, requested_model: &str) -> RouteDecisionTrace {
+        let evaluation = self.evaluate(requested_model).await;
+        let selected_route = evaluation
+            .candidates
+            .iter()
+            .find(|candidate| candidate.decision.selected)
+            .map(|candidate| candidate.route.id.clone());
+        RouteDecisionTrace {
+            requested_model: requested_model.to_string(),
+            resolved_model: evaluation.resolved_model,
+            selected_route,
+            candidates: evaluation
+                .candidates
+                .into_iter()
+                .map(|candidate| candidate.decision)
+                .collect(),
+        }
+    }
+
+    async fn evaluate(&self, requested_model: &str) -> RouteEvaluation {
+        let resolved_model = self.config.resolve_model_alias(requested_model).to_string();
+        let candidates = self.candidate_routes(&resolved_model).await;
+        let now = Utc::now();
+        let health_snapshot = self.health.read().await.clone();
         let mut readiness_by_account: HashMap<String, AccountReadiness> = HashMap::new();
-        let mut available = Vec::with_capacity(candidates.len());
-        for route in candidates {
+        let mut quota_by_account: HashMap<String, QuotaEvaluation> = HashMap::new();
+        let mut evaluated = Vec::with_capacity(candidates.len());
+
+        for (original_index, route) in candidates.into_iter().enumerate() {
             let readiness = if let Some(readiness) = readiness_by_account.get(&route.account) {
                 readiness.clone()
             } else {
@@ -106,19 +126,126 @@ impl Router {
                 readiness_by_account.insert(route.account.clone(), readiness.clone());
                 readiness
             };
-            if readiness.routable {
-                available.push(route);
-            } else {
-                tracing::debug!(
-                    route = %route.id,
-                    account = %route.account,
-                    status = %readiness.effective_status,
-                    reasons = ?readiness.reasons,
-                    "route skipped by unified account readiness"
-                );
+            let route_health = health_snapshot.get(&route.id).cloned().unwrap_or_default();
+            let mut exclusion_reasons = Vec::new();
+            let mut warnings = Vec::new();
+
+            if !route.enabled {
+                push_unique(&mut exclusion_reasons, "route_disabled");
             }
+            if route_health
+                .cooldown_until
+                .as_ref()
+                .is_some_and(|until| until > &now)
+            {
+                push_unique(&mut exclusion_reasons, "route_cooldown");
+            }
+
+            if readiness.routable {
+                for reason in &readiness.reasons {
+                    push_unique(&mut warnings, reason);
+                }
+            } else if readiness.reasons.is_empty() {
+                push_unique(&mut exclusion_reasons, "account_unavailable");
+            } else {
+                for reason in &readiness.reasons {
+                    push_unique(&mut exclusion_reasons, reason);
+                }
+            }
+
+            let mut quota_penalty = None;
+            let mut final_score = None;
+            if exclusion_reasons.is_empty() {
+                let quota = if let Some(cached) = quota_by_account.get(&route.account) {
+                    cached.clone()
+                } else {
+                    let evaluated = match quota_usage_runtime::get() {
+                        Some(usage) => match usage.route_penalty(&route.account).await {
+                            Ok(Some(penalty)) => QuotaEvaluation::Included(penalty),
+                            Ok(None) => QuotaEvaluation::Excluded,
+                            Err(error) => QuotaEvaluation::Unavailable(error.to_string()),
+                        },
+                        None => QuotaEvaluation::Included(0),
+                    };
+                    quota_by_account.insert(route.account.clone(), evaluated.clone());
+                    evaluated
+                };
+
+                match quota {
+                    QuotaEvaluation::Included(penalty) => {
+                        quota_penalty = Some(penalty);
+                        final_score = Some(route.priority.saturating_add(penalty));
+                    }
+                    QuotaEvaluation::Excluded => {
+                        push_unique(&mut exclusion_reasons, "quota_blocked");
+                    }
+                    QuotaEvaluation::Unavailable(error) => {
+                        warn!(%error, account = %route.account, "quota scoring failed; keeping route");
+                        push_unique(&mut warnings, "quota_scoring_unavailable");
+                        quota_penalty = Some(0);
+                        final_score = Some(route.priority);
+                    }
+                }
+            }
+
+            let eligible = exclusion_reasons.is_empty() && final_score.is_some();
+            evaluated.push(EvaluatedRoute {
+                decision: RouteCandidateDecision {
+                    route_id: route.id.clone(),
+                    account: route.account.clone(),
+                    model: route.model.clone(),
+                    base_priority: route.priority,
+                    eligible,
+                    exclusion_reasons,
+                    warnings,
+                    readiness,
+                    route_health,
+                    quota_penalty,
+                    final_score,
+                    rank: None,
+                    selected: false,
+                },
+                route,
+                original_index,
+            });
         }
-        available
+
+        let mut ranked_indices = evaluated
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.decision.eligible)
+            .map(|(index, candidate)| {
+                (
+                    index,
+                    candidate.decision.final_score.unwrap_or(i32::MAX),
+                    candidate.original_index,
+                )
+            })
+            .collect::<Vec<_>>();
+        ranked_indices.sort_by_key(|(_, score, original_index)| (*score, *original_index));
+        for (rank_index, (candidate_index, _, _)) in ranked_indices.into_iter().enumerate() {
+            let candidate = &mut evaluated[candidate_index];
+            candidate.decision.rank = Some(rank_index + 1);
+            candidate.decision.selected = rank_index == 0;
+        }
+
+        RouteEvaluation {
+            resolved_model,
+            candidates: evaluated,
+        }
+    }
+
+    async fn candidate_routes(&self, resolved: &str) -> Vec<RouteConfig> {
+        if let Some(vm) = self.config.virtual_models.get(resolved) {
+            vm.routes
+                .iter()
+                .filter_map(|id| self.config.route(id).cloned())
+                .collect()
+        } else if let Some(route) = self.config.route(resolved) {
+            vec![route.clone()]
+        } else {
+            self.routes_for_physical_model(resolved).await
+        }
     }
 
     pub async fn account_readiness(&self, account_id: &str) -> AccountReadiness {
@@ -257,5 +384,29 @@ impl Router {
 
     pub async fn snapshot(&self) -> HashMap<String, RouteHealth> {
         self.health.read().await.clone()
+    }
+}
+
+struct RouteEvaluation {
+    resolved_model: String,
+    candidates: Vec<EvaluatedRoute>,
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|item| item == value) {
+        values.push(value.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::push_unique;
+
+    #[test]
+    fn push_unique_deduplicates_trace_reasons() {
+        let mut values = vec!["route_cooldown".to_string()];
+        push_unique(&mut values, "route_cooldown");
+        push_unique(&mut values, "quota_pressure");
+        assert_eq!(values, vec!["route_cooldown", "quota_pressure"]);
     }
 }
