@@ -115,6 +115,7 @@ LAUNCH=$(curl -fsS -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/chatgpt-affinity/driver/launch \
   "${AUTH[@]}")
 BROWSER_PID=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["pid"] or "")')
+DEBUGGER_PORT=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["debugger_port"])')
 PROFILE_DIR=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["profile_dir"])')
 export PROFILE_DIR
 
@@ -147,6 +148,36 @@ curl -fsS -D /tmp/chatgpt-affinity-2.headers -o /tmp/chatgpt-affinity-2.sse \
 grep -qi '^x-llmgateway-route: chatgpt-affinity-route' /tmp/chatgpt-affinity-2.headers
 grep -q 'data: \[DONE\]' /tmp/chatgpt-affinity-2.sse
 
+FIRST_TARGET=$(python3 - <<'PY'
+import json
+import os
+with open(os.path.join(os.environ["PROFILE_DIR"], "browser-requests.jsonl"), encoding="utf-8") as f:
+    requests = [json.loads(line) for line in f if line.strip()]
+print(requests[-1]["target_id"])
+PY
+)
+
+curl -fsS "http://127.0.0.1:$DEBUGGER_PORT/json/close/$FIRST_TARGET" >/dev/null
+
+curl -fsS -D /tmp/chatgpt-affinity-3.headers -o /tmp/chatgpt-affinity-3.sse \
+  -X POST "http://127.0.0.1:7331/v1/threads/$THREAD/messages" \
+  "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"content":"chatgpt-three-after-close","stream":true}'
+grep -qi '^x-llmgateway-route: chatgpt-affinity-route' /tmp/chatgpt-affinity-3.headers
+grep -q 'data: \[DONE\]' /tmp/chatgpt-affinity-3.sse
+
+THREAD_B=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads \
+  "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"title":"ChatGPT affinity B","model":"llmgateway-auto"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+curl -fsS -D /tmp/chatgpt-affinity-b1.headers -o /tmp/chatgpt-affinity-b1.sse \
+  -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_B/messages" \
+  "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"content":"chatgpt-new-thread","stream":true}'
+grep -qi '^x-llmgateway-route: chatgpt-affinity-route' /tmp/chatgpt-affinity-b1.headers
+grep -q 'data: \[DONE\]' /tmp/chatgpt-affinity-b1.sse
+
 python3 <<'PY'
 import json
 import os
@@ -156,29 +187,41 @@ profile = os.environ["PROFILE_DIR"]
 
 with open(os.path.join(profile, "opened-targets.log"), encoding="utf-8") as f:
     opened = [line.strip() for line in f if line.strip()]
-assert opened == ["https://chatgpt.com/"], opened
+assert opened == [
+    "https://chatgpt.com/",
+    "https://chatgpt.com/c/ci-thread-1",
+    "https://chatgpt.com/",
+], opened
 
 with open(os.path.join(profile, "browser-requests.jsonl"), encoding="utf-8") as f:
     requests = [json.loads(line) for line in f if line.strip()]
-recent = requests[-2:]
-assert len(recent) == 2, recent
+recent = requests[-4:]
+assert len(recent) == 4, recent
 assert any(m.get("content") == "chatgpt-one" for m in recent[0]["messages"]), recent[0]
 assert recent[1]["messages"] == [{"role": "user", "content": "chatgpt-two"}], recent[1]
+assert recent[2]["messages"] == [{"role": "user", "content": "chatgpt-three-after-close"}], recent[2]
+assert recent[3]["messages"] == [{"role": "user", "content": "chatgpt-new-thread"}], recent[3]
 assert recent[0]["target_id"] == recent[1]["target_id"], recent
+assert recent[2]["target_id"] != recent[1]["target_id"], recent
+assert recent[3]["target_id"] != recent[2]["target_id"], recent
 
 db = sqlite3.connect("data/llmgateway.db")
 rows = db.execute(
     """SELECT provider, account_id, conversation_url, last_synced_ordinal
        FROM provider_conversations
-       WHERE account_id = 'chatgpt-affinity'"""
+       WHERE account_id = 'chatgpt-affinity'
+       ORDER BY conversation_url"""
 ).fetchall()
-assert len(rows) == 1, rows
-provider, account, url, cursor = rows[0]
-assert provider == "chatgpt-web", rows
-assert account == "chatgpt-affinity", rows
-assert url == "https://chatgpt.com/c/ci-thread-1", rows
-assert cursor > 0, rows
+assert len(rows) == 2, rows
+assert all(row[0] == "chatgpt-web" for row in rows), rows
+assert all(row[1] == "chatgpt-affinity" for row in rows), rows
+urls = {row[2] for row in rows}
+assert urls == {
+    "https://chatgpt.com/c/ci-thread-1",
+    "https://chatgpt.com/c/ci-thread-2",
+}, rows
+assert all(row[3] > 0 for row in rows), rows
 db.close()
 PY
 
-echo "ChatGPT browser adapter + native conversation affinity smoke passed"
+echo "ChatGPT browser adapter + native affinity + close-tab recovery smoke passed"
