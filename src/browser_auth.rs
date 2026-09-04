@@ -79,6 +79,48 @@ impl BrowserAuthMaterial {
             .collect::<Vec<_>>()
             .join("; ")
     }
+
+    pub fn cookie_header_for_host(&self, host: &str) -> String {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        self.cookies
+            .iter()
+            .filter(|cookie| {
+                if cookie.name.trim().is_empty() {
+                    return false;
+                }
+                let domain = cookie
+                    .domain
+                    .trim()
+                    .trim_start_matches('.')
+                    .trim_end_matches('.')
+                    .to_ascii_lowercase();
+                !domain.is_empty()
+                    && (host == domain || host.ends_with(&format!(".{domain}")))
+            })
+            .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    pub fn cookie_value_for_host(&self, host: &str, name: &str) -> Option<&str> {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        self.cookies.iter().find_map(|cookie| {
+            let domain = cookie
+                .domain
+                .trim()
+                .trim_start_matches('.')
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            if cookie.name == name
+                && !domain.is_empty()
+                && (host == domain || host.ends_with(&format!(".{domain}")))
+            {
+                Some(cookie.value.as_str())
+            } else {
+                None
+            }
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -332,6 +374,12 @@ mod tests {
         let restored = vault.load("gemini-web-one").unwrap();
         assert_eq!(restored, material);
         assert_eq!(restored.cookie_header(), "SID=secret");
+        assert_eq!(restored.cookie_header_for_host("gemini.google.com"), "SID=secret");
+        assert_eq!(
+            restored.cookie_value_for_host("gemini.google.com", "SID"),
+            Some("secret")
+        );
+        assert!(restored.cookie_header_for_host("chatgpt.com").is_empty());
 
         let raw = fs::read_to_string(root.join("gemini-web-one.auth")).unwrap();
         assert!(!raw.contains("secret"));
