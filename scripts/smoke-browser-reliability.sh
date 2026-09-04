@@ -262,6 +262,8 @@ curl -fsS -D /tmp/browser-reliability-ready.headers -o /tmp/browser-reliability-
   "${AUTH[@]}" "${JSON[@]}" \
   -d '{"model":"llmgateway-auto","messages":[{"role":"user","content":"browser first"}]}'
 grep -qi '^x-llmgateway-route: browser-route' /tmp/browser-reliability-ready.headers
+INITIAL_READY_AT=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web "${AUTH[@]}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["last_ready_at"])')
 
 # Restart llmgateway but leave Chromium alive. Startup reconciliation must reconnect to the live profile.
 stop_gateway
@@ -274,6 +276,8 @@ x=json.load(sys.stdin)
 assert x["status"] == "ready", x
 assert x["routable"] is True, x
 '
+RECONNECTED_READY_AT=$(printf '%s' "$SESSION" | python3 -c 'import json,sys; print(json.load(sys.stdin)["last_ready_at"])')
+test "$RECONNECTED_READY_AT" = "$INITIAL_READY_AT"
 
 STATUS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/status "${AUTH[@]}")
 printf '%s' "$STATUS" | python3 -c '
@@ -306,6 +310,8 @@ ok=session["status"] == "ready" and session["routable"] is True and status["runn
 raise SystemExit(0 if ok else 1)
 '; then
     BROWSER_PID=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"] or "")')
+    RECOVERED_READY_AT=$(printf '%s' "$SESSION" | python3 -c 'import json,sys; print(json.load(sys.stdin)["last_ready_at"])')
+    test "$RECOVERED_READY_AT" != "$INITIAL_READY_AT"
     RECOVERED=1
     break
   fi
