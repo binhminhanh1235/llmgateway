@@ -29,6 +29,7 @@ retrieval_enabled = false
 adaptive_enabled = true
 adaptive_min_samples = 2
 adaptive_history_samples = 10
+adaptive_stale_after_seconds = 1
 adaptive_ewma_alpha = 1.0
 adaptive_latency_target_ms = 50
 adaptive_max_penalty = 30
@@ -143,4 +144,27 @@ assert fast["adaptive_penalty"] == 0, fast
 THIRD=$(request)
 test "$THIRD" = "fast-route"
 
-echo "llmgateway persistent adaptive routing smoke test passed"
+# Once telemetry becomes stale, the penalty must become neutral so the original
+# priority order gets a deterministic recovery probe.
+sleep 2
+RECOVERY_EXPLAIN=$(curl -fsS \
+  -X POST http://127.0.0.1:7331/_llmgateway/routes/explain \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llmgateway-auto"}')
+printf '%s' "$RECOVERY_EXPLAIN" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] == "slow-route", x
+by_id={c["route_id"]: c for c in x["candidates"]}
+slow=by_id["slow-route"]
+assert slow["adaptive"]["sample_count"] == 2, slow
+assert slow["adaptive"]["stale"] is True, slow
+assert slow["adaptive"]["active"] is False, slow
+assert slow["adaptive_penalty"] == 0, slow
+'
+
+FOURTH=$(request)
+test "$FOURTH" = "slow-route"
+
+echo "llmgateway adaptive recovery smoke test passed"
