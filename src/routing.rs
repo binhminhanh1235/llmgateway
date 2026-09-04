@@ -83,16 +83,18 @@ enum QuotaEvaluation {
 
 #[derive(Clone)]
 pub struct Router {
-    config: LiveConfig,
+    config: Arc<AppConfig>,
+    live_config: LiveConfig,
     catalog: Arc<ModelCatalog>,
     health: Arc<RwLock<HashMap<String, RouteHealth>>>,
     adaptive: Arc<RwLock<HashMap<String, AdaptiveRouteState>>>,
 }
 
 impl Router {
-    pub fn new(config: LiveConfig, catalog: Arc<ModelCatalog>) -> Self {
+    pub fn new(config: Arc<AppConfig>, live_config: LiveConfig, catalog: Arc<ModelCatalog>) -> Self {
         Self {
             config,
+            live_config,
             catalog,
             health: Arc::new(RwLock::new(HashMap::new())),
             adaptive: Arc::new(RwLock::new(HashMap::new())),
