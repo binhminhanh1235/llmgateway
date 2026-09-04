@@ -12,7 +12,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::Duration,
 };
 use thiserror::Error;
@@ -168,7 +168,7 @@ struct ManagedProcess {
 
 #[derive(Clone)]
 pub struct ChromiumDriver {
-    config: Arc<ChromiumConfig>,
+    config: Arc<RwLock<ChromiumConfig>>,
     sessions: Arc<BrowserSessionStore>,
     client: Client,
     processes: Arc<Mutex<HashMap<String, ManagedProcess>>>,
@@ -209,7 +209,7 @@ impl ChromiumDriver {
             .build()
             .map_err(ChromiumDriverError::DevToolsTransport)?;
         Ok(Self {
-            config: Arc::new(config),
+            config: Arc::new(RwLock::new(config)),
             sessions,
             client,
             processes: Arc::new(Mutex::new(HashMap::new())),
@@ -217,15 +217,32 @@ impl ChromiumDriver {
     }
 
     pub fn enabled(&self) -> bool {
-        self.config.enabled
+        self.config_snapshot().enabled
     }
 
     pub fn reconcile_interval_seconds(&self) -> u64 {
-        self.config.reconcile_interval_seconds
+        self.config_snapshot().reconcile_interval_seconds
+    }
+
+    pub fn reload(&self, config: ChromiumConfig) -> Result<(), ChromiumDriverError> {
+        validate_chromium_config(&config)?;
+        let mut guard = self
+            .config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = config;
+        Ok(())
+    }
+
+    fn config_snapshot(&self) -> ChromiumConfig {
+        self.config
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub async fn launch(&self, session_id: &str) -> Result<ChromiumLaunchView, ChromiumDriverError> {
-        let driver_session = self.driver_session(session_id)?.clone();
+        let driver_session = self.driver_session(session_id)?;
         if !driver_session.enabled {
             return Err(ChromiumDriverError::SessionDisabled(session_id.to_string()));
         }
@@ -240,7 +257,8 @@ impl ChromiumDriver {
             return Err(ChromiumDriverError::AlreadyRunning(session_id.to_string()));
         }
 
-        let executable = resolve_executable(self.config.executable.as_deref())?;
+        let runtime_config = self.config_snapshot();
+        let executable = resolve_executable(runtime_config.executable.as_deref())?;
         let profile_dir = PathBuf::from(&session.profile_dir);
         let devtools_file = profile_dir.join("DevToolsActivePort");
         if existing.debugger_port.is_some() && !existing.debugger_reachable {
@@ -255,7 +273,7 @@ impl ChromiumDriver {
             .arg("--remote-debugging-port=0")
             .arg("--no-first-run")
             .arg("--no-default-browser-check");
-        for arg in &self.config.extra_args {
+        for arg in &runtime_config.extra_args {
             command.arg(arg);
         }
         command
@@ -292,7 +310,7 @@ impl ChromiumDriver {
 
         let debugger_port = match wait_for_debugger_port(
             &devtools_file,
-            Duration::from_secs(self.config.startup_timeout_seconds),
+            Duration::from_secs(runtime_config.startup_timeout_seconds),
         )
         .await
         {
@@ -443,7 +461,7 @@ impl ChromiumDriver {
             };
         }
 
-        let session_ids = self.config.sessions.keys().cloned().collect::<Vec<_>>();
+        let session_ids = self.config_snapshot().sessions.keys().cloned().collect::<Vec<_>>();
         let mut results = Vec::with_capacity(session_ids.len());
         for session_id in session_ids {
             results.push(self.reconcile_session(&session_id).await);
@@ -515,7 +533,7 @@ impl ChromiumDriver {
             && !status.debugger_reachable
             && matches!(session.status.as_str(), STATUS_READY | STATUS_DEGRADED)
         {
-            if !self.config.auto_recover {
+            if !self.config_snapshot().auto_recover {
                 let current = self
                     .sessions
                     .mark_degraded(session_id, "Chromium process is running but CDP is unreachable")
@@ -642,7 +660,7 @@ impl ChromiumDriver {
             };
         }
 
-        if !self.config.auto_recover {
+        if !self.config_snapshot().auto_recover {
             let current = self
                 .sessions
                 .mark_degraded(session_id, "Chromium runtime is not reachable")
@@ -688,7 +706,12 @@ impl ChromiumDriver {
             };
         }
 
-        let wait = Duration::from_secs(self.config.startup_timeout_seconds.min(5).max(1));
+        let wait = Duration::from_secs(
+            self.config_snapshot()
+                .startup_timeout_seconds
+                .min(5)
+                .max(1),
+        );
         let deadline = Instant::now() + wait;
         loop {
             match self.verify(session_id).await {
@@ -745,13 +768,18 @@ impl ChromiumDriver {
         }
     }
 
-    fn driver_session(&self, session_id: &str) -> Result<&ChromiumSessionConfig, ChromiumDriverError> {
-        if !self.enabled() {
+    fn driver_session(
+        &self,
+        session_id: &str,
+    ) -> Result<ChromiumSessionConfig, ChromiumDriverError> {
+        let config = self.config_snapshot();
+        if !config.enabled {
             return Err(ChromiumDriverError::Disabled);
         }
-        self.config
+        config
             .sessions
             .get(session_id)
+            .cloned()
             .ok_or_else(|| ChromiumDriverError::SessionNotConfigured(session_id.to_string()))
     }
 
