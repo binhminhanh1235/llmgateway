@@ -36,6 +36,8 @@ pub struct RouteCandidateDecision {
     pub route_id: String,
     pub account: String,
     pub model: String,
+    pub transport: String,
+    pub transport_preference: i32,
     pub base_priority: i32,
     pub eligible: bool,
     pub exclusion_reasons: Vec<String>,
@@ -56,6 +58,8 @@ pub struct RouteCandidateDecision {
 pub struct RouteDecisionTrace {
     pub requested_model: String,
     pub resolved_model: String,
+    pub execution_preference: String,
+    pub api_fallback: bool,
     pub task: TaskProfile,
     pub selected_route: Option<String>,
     pub candidates: Vec<RouteCandidateDecision>,
@@ -122,6 +126,9 @@ impl Router {
         preferred: &RouteConfig,
         best: &RouteConfig,
     ) -> bool {
+        if self.transport_preference_rank(preferred) != self.transport_preference_rank(best) {
+            return false;
+        }
         if !self.config.routing.task_aware_enabled {
             return true;
         }
@@ -146,6 +153,8 @@ impl Router {
         RouteDecisionTrace {
             requested_model: requested_model.to_string(),
             resolved_model: evaluation.resolved_model,
+            execution_preference: self.config.routing.execution_preference.clone(),
+            api_fallback: self.config.routing.api_fallback,
             task: evaluation.task,
             selected_route,
             candidates: evaluation
@@ -160,6 +169,7 @@ impl Router {
         let resolved_model = self.config.resolve_model_alias(requested_model).to_string();
         let task = classify_task(body, &self.config.routing);
         let candidates = self.candidate_routes(&resolved_model).await;
+        let apply_execution_policy = self.config.virtual_models.contains_key(&resolved_model);
         let now = Utc::now();
         let health_snapshot = self.health.read().await.clone();
         let adaptive_snapshot = self.adaptive.read().await.clone();
@@ -175,6 +185,12 @@ impl Router {
                 readiness_by_account.insert(route.account.clone(), readiness.clone());
                 readiness
             };
+            let transport = self.route_transport(&route);
+            let transport_preference = if apply_execution_policy {
+                self.transport_preference_rank(&route)
+            } else {
+                0
+            };
             let route_health = health_snapshot.get(&route.id).cloned().unwrap_or_default();
             let adaptive = adaptive_snapshot
                 .get(&route.id)
@@ -189,6 +205,13 @@ impl Router {
 
             if !route.enabled {
                 push_unique(&mut exclusion_reasons, "route_disabled");
+            }
+            if apply_execution_policy
+                && self.config.routing.execution_preference == "browser-first"
+                && !self.config.routing.api_fallback
+                && transport == "api"
+            {
+                push_unique(&mut exclusion_reasons, "api_fallback_disabled");
             }
             if let Some(reason) = task_fit.exclusion_reason {
                 push_unique(&mut exclusion_reasons, reason);
@@ -249,6 +272,23 @@ impl Router {
                         } else if task_adjustment > 0 {
                             push_unique(&mut warnings, "task_mismatch");
                         }
+                        if apply_execution_policy {
+                            match self.config.routing.execution_preference.as_str() {
+                                "browser-first" if transport == "browser" => {
+                                    push_unique(&mut warnings, "browser_preferred");
+                                }
+                                "browser-first" if transport == "api" => {
+                                    push_unique(&mut warnings, "api_fallback");
+                                }
+                                "api-first" if transport == "api" => {
+                                    push_unique(&mut warnings, "api_preferred");
+                                }
+                                "api-first" if transport == "browser" => {
+                                    push_unique(&mut warnings, "browser_fallback");
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     QuotaEvaluation::Excluded => {
                         push_unique(&mut exclusion_reasons, "quota_blocked");
@@ -271,6 +311,23 @@ impl Router {
                         } else if task_adjustment > 0 {
                             push_unique(&mut warnings, "task_mismatch");
                         }
+                        if apply_execution_policy {
+                            match self.config.routing.execution_preference.as_str() {
+                                "browser-first" if transport == "browser" => {
+                                    push_unique(&mut warnings, "browser_preferred");
+                                }
+                                "browser-first" if transport == "api" => {
+                                    push_unique(&mut warnings, "api_fallback");
+                                }
+                                "api-first" if transport == "api" => {
+                                    push_unique(&mut warnings, "api_preferred");
+                                }
+                                "api-first" if transport == "browser" => {
+                                    push_unique(&mut warnings, "browser_fallback");
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
@@ -281,6 +338,8 @@ impl Router {
                     route_id: route.id.clone(),
                     account: route.account.clone(),
                     model: route.model.clone(),
+                    transport: transport.to_string(),
+                    transport_preference,
                     base_priority: route.priority,
                     eligible,
                     exclusion_reasons,
@@ -308,13 +367,16 @@ impl Router {
             .map(|(index, candidate)| {
                 (
                     index,
+                    candidate.decision.transport_preference,
                     candidate.decision.final_score.unwrap_or(i32::MAX),
                     candidate.original_index,
                 )
             })
             .collect::<Vec<_>>();
-        ranked_indices.sort_by_key(|(_, score, original_index)| (*score, *original_index));
-        for (rank_index, (candidate_index, _, _)) in ranked_indices.into_iter().enumerate() {
+        ranked_indices.sort_by_key(|(_, transport_preference, score, original_index)| {
+            (*transport_preference, *score, *original_index)
+        });
+        for (rank_index, (candidate_index, _, _, _)) in ranked_indices.into_iter().enumerate() {
             let candidate = &mut evaluated[candidate_index];
             candidate.decision.rank = Some(rank_index + 1);
             candidate.decision.selected = rank_index == 0;
@@ -324,6 +386,22 @@ impl Router {
             resolved_model,
             task,
             candidates: evaluated,
+        }
+    }
+
+    fn route_transport(&self, route: &RouteConfig) -> &'static str {
+        self.config
+            .account(&route.account)
+            .and_then(|account| self.config.provider(&account.provider))
+            .map(|provider| provider.transport())
+            .unwrap_or("unknown")
+    }
+
+    fn transport_preference_rank(&self, route: &RouteConfig) -> i32 {
+        match (self.config.routing.execution_preference.as_str(), self.route_transport(route)) {
+            ("browser-first", "browser") | ("api-first", "api") => 0,
+            ("browser-first", _) | ("api-first", _) => 1,
+            _ => 0,
         }
     }
 
