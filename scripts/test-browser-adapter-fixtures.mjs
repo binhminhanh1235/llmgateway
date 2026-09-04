@@ -15,6 +15,10 @@ class FakeElement {
   dispatchEvent() { return true; }
   getAttribute() { return null; }
   closest() { return this; }
+  matches(selector) {
+    const selectors = String(selector || "").split(",").map((value) => value.trim());
+    return selectors.some((value) => this.__selectors?.has(value));
+  }
 }
 
 class FakeTextAreaElement extends FakeElement {}
@@ -33,6 +37,14 @@ globalThis.KeyboardEvent = class {
 };
 
 function installPage({ host, nodes = {} }) {
+  for (const [selector, value] of Object.entries(nodes)) {
+    const elements = Array.isArray(value) ? value : [value];
+    for (const element of elements) {
+      if (!element || typeof element !== "object") continue;
+      element.__selectors ||= new Set();
+      element.__selectors.add(selector);
+    }
+  }
   globalThis.location = { hostname: host, pathname: "/" };
   globalThis.document = {
     querySelector(selector) {
