@@ -111,6 +111,17 @@ assert x["model_id"] == "chatgpt-web-default", x
 assert x["restart_required"] is False, x
 '
 
+MODELS=$(curl -fsS http://127.0.0.1:7331/v1/models "${AUTH[@]}")
+printf '%s' "$MODELS" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+models={item["id"]: item for item in x["data"]}
+model=models["chatgpt-web/chatgpt-web-default"]
+assert model["llmgateway"]["kind"] == "physical", model
+assert model["llmgateway"]["provider"] == "chatgpt-web", model
+assert model["llmgateway"]["available_accounts"] == 1, model
+'
+
 LAUNCH=$(curl -fsS -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/chatgpt-affinity/driver/launch \
   "${AUTH[@]}")
