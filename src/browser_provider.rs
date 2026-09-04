@@ -2104,13 +2104,32 @@ fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
     false
 }
 
+fn native_conversation_id(raw: &str) -> Option<String> {
+    let url = Url::parse(raw).ok()?;
+    let segments = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if let Some(index) = segments.iter().position(|segment| *segment == "app") {
+        return segments.get(index + 1).map(|value| (*value).to_string());
+    }
+    if let Some(index) = segments.iter().position(|segment| *segment == "gem") {
+        return segments.get(index + 2).map(|value| (*value).to_string());
+    }
+    None
+}
+
 fn same_conversation_url(left: &str, right: &str) -> bool {
-    let (Ok(left), Ok(right)) = (Url::parse(left), Url::parse(right)) else {
+    let (Ok(left_url), Ok(right_url)) = (Url::parse(left), Url::parse(right)) else {
         return left == right;
     };
-    left.scheme() == right.scheme()
-        && left.host_str() == right.host_str()
-        && left.path().trim_end_matches('/') == right.path().trim_end_matches('/')
+    if left_url.scheme() != right_url.scheme() || left_url.host_str() != right_url.host_str() {
+        return false;
+    }
+    match (native_conversation_id(left), native_conversation_id(right)) {
+        (Some(left_id), Some(right_id)) => left_id == right_id,
+        _ => left_url.path().trim_end_matches('/') == right_url.path().trim_end_matches('/'),
+    }
 }
 
 fn diagnostic_target_location(raw: &str) -> String {
@@ -2702,10 +2721,14 @@ mod tests {
     }
 
     #[test]
-    fn conversation_url_comparison_ignores_query_and_fragment() {
+    fn conversation_url_comparison_uses_native_chat_identity() {
         assert!(same_conversation_url(
             "https://gemini.google.com/u/1/app/abc123?foo=bar",
-            "https://gemini.google.com/u/1/app/abc123#answer"
+            "https://gemini.google.com/app/abc123#answer"
+        ));
+        assert!(same_conversation_url(
+            "https://gemini.google.com/gem/gem123/abc123",
+            "https://gemini.google.com/u/1/app/abc123"
         ));
         assert!(!same_conversation_url(
             "https://gemini.google.com/u/1/app/abc123",
