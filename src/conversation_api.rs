@@ -351,7 +351,7 @@ pub async fn send_thread_message(
             .and_then(|account| {
                 config
                     .provider(&account.provider)
-                    .filter(|provider| provider.kind == "browser-gemini")
+                    .filter(|provider| supports_native_conversation_affinity(&provider.kind))
                     .map(|provider| (provider.id.clone(), account.id.clone()))
             })
     };
@@ -474,6 +474,10 @@ pub async fn send_thread_message(
     }
 }
 
+fn supports_native_conversation_affinity(provider_kind: &str) -> bool {
+    matches!(provider_kind, "browser-gemini" | "browser-chatgpt")
+}
+
 fn with_context_headers(
     mut response: Response<Body>,
     prepared: &PreparedContext,
@@ -587,5 +591,20 @@ fn conversation_error(error: ConversationError) -> Response<Body> {
             "conversation_storage_error",
             &error.to_string(),
         ),
+    }
+}
+
+
+#[cfg(test)]
+mod native_affinity_tests {
+    use super::supports_native_conversation_affinity;
+
+    #[test]
+    fn native_affinity_includes_gemini_and_chatgpt_only() {
+        assert!(supports_native_conversation_affinity("browser-gemini"));
+        assert!(supports_native_conversation_affinity("browser-chatgpt"));
+        assert!(!supports_native_conversation_affinity("browser-qwen"));
+        assert!(!supports_native_conversation_affinity("browser-cdp"));
+        assert!(!supports_native_conversation_affinity("openai-compatible"));
     }
 }
