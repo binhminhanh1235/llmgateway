@@ -29,6 +29,7 @@ const CDP_EXECUTION_TIMEOUT_SECONDS: u64 = 600;
 pub const BROWSER_ADAPTER_CONTRACT_VERSION: u32 = 1;
 const ADAPTER_HEALTH_TTL_SECONDS: u64 = 30;
 const GEMINI_WEB_ADAPTER: &str = include_str!("../adapters/gemini-web.js");
+const CHATGPT_WEB_ADAPTER: &str = include_str!("../adapters/chatgpt-web.js");
 const QWEN_WEB_ADAPTER: &str = include_str!("../adapters/qwen-web.js");
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -307,11 +308,13 @@ impl BrowserProviderRegistry {
         let http = Arc::new(HttpBrowserAdapter::new()?);
         let cdp = Arc::new(CdpBrowserAdapter::custom()?);
         let gemini = Arc::new(CdpBrowserAdapter::gemini()?);
+        let chatgpt = Arc::new(CdpBrowserAdapter::chatgpt()?);
         let qwen = Arc::new(CdpBrowserAdapter::qwen()?);
         let mut adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> = BTreeMap::new();
         adapters.insert(http.kind().to_string(), http);
         adapters.insert(cdp.kind().to_string(), cdp);
         adapters.insert(gemini.kind().to_string(), gemini);
+        adapters.insert(chatgpt.kind().to_string(), chatgpt);
         adapters.insert(qwen.kind().to_string(), qwen);
         Ok(Self {
             config: Arc::new(StdRwLock::new(config)),
@@ -993,6 +996,18 @@ impl CdpBrowserAdapter {
         })
     }
 
+    fn chatgpt() -> Result<Self, BrowserProviderError> {
+        Self::new(CdpAdapterSpec {
+            kind: "browser-chatgpt",
+            adapter_id: "chatgpt-web",
+            provider: "chatgpt",
+            builtin_script: Some(CHATGPT_WEB_ADAPTER),
+            default_target_url_prefix: Some("https://chatgpt.com/"),
+            new_chat_url: Some("https://chatgpt.com/"),
+            ephemeral_default: true,
+        })
+    }
+
     fn qwen() -> Result<Self, BrowserProviderError> {
         Self::new(CdpAdapterSpec {
             kind: "browser-qwen",
@@ -1133,7 +1148,7 @@ impl CdpBrowserAdapter {
     }
 
     fn supports_native_conversation_affinity(&self) -> bool {
-        self.spec.kind == "browser-gemini"
+        matches!(self.spec.kind, "browser-gemini" | "browser-chatgpt")
     }
 
     async fn discover_native_conversation_url(
@@ -1246,7 +1261,7 @@ impl CdpBrowserAdapter {
             thread_id,
             account = %request.account.id,
             url = %diagnostic_target_location(&conversation_url),
-            "observed Gemini native conversation URL"
+            "observed browser provider native conversation URL"
         );
         match store
             .upsert_provider_conversation(
@@ -1261,7 +1276,7 @@ impl CdpBrowserAdapter {
                 warn!(
                     thread_id,
                     account = %request.account.id,
-                    "persisted Gemini native conversation affinity"
+                    "persisted browser provider native conversation affinity"
                 );
                 true
             },
@@ -1270,7 +1285,7 @@ impl CdpBrowserAdapter {
                     %error,
                     thread_id,
                     account = %request.account.id,
-                    "failed to persist Gemini native conversation affinity"
+                    "failed to persist browser provider native conversation affinity"
                 );
                 false
             }
@@ -1749,7 +1764,7 @@ impl CdpBrowserAdapter {
                             warn!(
                                 thread_id = native_request.thread_id.as_deref().unwrap_or("<unknown>"),
                                 account = %native_request.account.id,
-                                "Gemini native conversation URL was still unavailable when the stream completed"
+                                "browser provider native conversation URL was still unavailable when the stream completed"
                             );
                         }
                     }
@@ -2187,6 +2202,14 @@ fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
         .map(|segments| segments.filter(|segment| !segment.is_empty()).collect::<Vec<_>>())
         .unwrap_or_default();
 
+    if base.host_str() == Some("chatgpt.com") {
+        return segments
+            .iter()
+            .position(|segment| *segment == "c")
+            .and_then(|index| segments.get(index + 1))
+            .is_some_and(|value| !value.is_empty());
+    }
+
     let app_index = segments.iter().position(|segment| *segment == "app");
     if let Some(index) = app_index {
         return segments.get(index + 1).is_some_and(|value| !value.is_empty());
@@ -2201,10 +2224,18 @@ fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
 
 fn native_conversation_id(raw: &str) -> Option<String> {
     let url = Url::parse(raw).ok()?;
+    let host = url.host_str().map(str::to_string);
     let segments = url
         .path_segments()?
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
+    if host.as_deref() == Some("chatgpt.com") {
+        return segments
+            .iter()
+            .position(|segment| *segment == "c")
+            .and_then(|index| segments.get(index + 1))
+            .map(|value| (*value).to_string());
+    }
     if let Some(index) = segments.iter().position(|segment| *segment == "app") {
         return segments.get(index + 1).map(|value| (*value).to_string());
     }
@@ -2252,6 +2283,7 @@ fn effective_target_url_prefix(
         .clone()
         .or_else(|| match provider_kind {
             "browser-gemini" => Some("https://gemini.google.com/app".into()),
+            "browser-chatgpt" => Some("https://chatgpt.com/".into()),
             "browser-qwen" => Some("https://chat.qwen.ai/".into()),
             _ => None,
         })
@@ -2750,6 +2782,7 @@ mod tests {
         assert!(BrowserProviderRegistry::is_browser_kind("browser-http"));
         assert!(BrowserProviderRegistry::is_browser_kind("browser-cdp"));
         assert!(BrowserProviderRegistry::is_browser_kind("browser-gemini"));
+        assert!(BrowserProviderRegistry::is_browser_kind("browser-chatgpt"));
         assert!(BrowserProviderRegistry::is_browser_kind("browser-qwen"));
         assert!(!BrowserProviderRegistry::is_browser_kind("openai-compatible"));
     }
@@ -2793,6 +2826,7 @@ mod tests {
     #[test]
     fn built_in_provider_defaults_are_first_class() {
         let gemini = CdpBrowserAdapter::gemini().unwrap();
+        let chatgpt = CdpBrowserAdapter::chatgpt().unwrap();
         let qwen = CdpBrowserAdapter::qwen().unwrap();
         assert_eq!(gemini.kind(), "browser-gemini");
         assert_eq!(gemini.adapter_id(), "gemini-web");
@@ -2801,6 +2835,14 @@ mod tests {
             gemini.spec.default_target_url_prefix,
             Some("https://gemini.google.com/app")
         );
+        assert_eq!(chatgpt.kind(), "browser-chatgpt");
+        assert_eq!(chatgpt.adapter_id(), "chatgpt-web");
+        assert!(chatgpt.spec.ephemeral_default);
+        assert_eq!(
+            chatgpt.spec.default_target_url_prefix,
+            Some("https://chatgpt.com/")
+        );
+        assert_eq!(chatgpt.spec.new_chat_url, Some("https://chatgpt.com/"));
         assert_eq!(qwen.kind(), "browser-qwen");
         assert_eq!(qwen.adapter_id(), "qwen-web");
         assert!(qwen.spec.ephemeral_default);
@@ -2818,6 +2860,17 @@ mod tests {
         assert!(GEMINI_WEB_ADAPTER.contains("div.markdown.markdown-main-panel"));
         assert!(GEMINI_WEB_ADAPTER.contains("model-response message-content"));
         assert!(GEMINI_WEB_ADAPTER.contains("reuse_native_conversation"));
+    }
+
+    #[test]
+    fn chatgpt_adapter_can_force_a_fresh_conversation() {
+        assert!(CHATGPT_WEB_ADAPTER.contains("start_new_conversation"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("ChatGPT New chat control was not found"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("responseLeaves"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("ChatGPT conversation history did not stabilize"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("newResponseText(before, responses)"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("#prompt-textarea"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("reuse_native_conversation"));
     }
 
     #[test]
@@ -2857,6 +2910,42 @@ mod tests {
         assert!(!is_native_conversation_url(
             "https://gemini.google.com/app",
             "https://example.test/app/abc123"
+        ));
+    }
+
+    #[test]
+    fn chatgpt_native_conversation_url_is_distinct_from_new_chat() {
+        assert!(!is_native_conversation_url(
+            "https://chatgpt.com/",
+            "https://chatgpt.com/"
+        ));
+        assert!(is_native_conversation_url(
+            "https://chatgpt.com/",
+            "https://chatgpt.com/c/abc123"
+        ));
+        assert!(is_native_conversation_url(
+            "https://chatgpt.com/",
+            "https://chatgpt.com/g/gpt-id/c/abc123"
+        ));
+        assert!(!is_native_conversation_url(
+            "https://chatgpt.com/",
+            "https://chatgpt.com/g/gpt-id"
+        ));
+        assert!(!is_native_conversation_url(
+            "https://chatgpt.com/",
+            "https://example.test/c/abc123"
+        ));
+    }
+
+    #[test]
+    fn chatgpt_conversation_url_comparison_uses_c_identity() {
+        assert!(same_conversation_url(
+            "https://chatgpt.com/c/abc123?foo=bar",
+            "https://chatgpt.com/g/gpt-id/c/abc123#answer"
+        ));
+        assert!(!same_conversation_url(
+            "https://chatgpt.com/c/abc123",
+            "https://chatgpt.com/c/other"
         ));
     }
 
