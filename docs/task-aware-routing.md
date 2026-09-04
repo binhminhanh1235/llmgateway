@@ -111,7 +111,9 @@ task_long_context_threshold_tokens = 12000
 task_simple_max_input_tokens = 800
 ```
 
-The task adjustment is bounded. It cannot grow without limit and it does not bypass readiness, quota, or cooldown controls.
+The task adjustment is bounded. It cannot grow without limit and it does not bypass readiness, quota, cooldown, or known context-window controls.
+
+Sticky conversation affinity is task-aware too. A previous route is kept only when its task adjustment is equal to the current best route. This preserves stable affinity when routes are equally suitable while allowing a coding, reasoning, long-context, or cheap/simple workload to move to a materially better-fit model.
 
 ## Explicit task hint
 
