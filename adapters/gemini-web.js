@@ -286,7 +286,15 @@
     return desired;
   };
 
-  const responseLeaves = (context) => queryAll(context, "response").filter(isVisible);
+  const responseLeaves = (context) => {
+    for (const selector of selectors(context, "response")) {
+      try {
+        const leaves = [...document.querySelectorAll(selector)].filter(isVisible);
+        if (leaves.length) return leaves;
+      } catch (_) {}
+    }
+    return [];
+  };
   const responseSnapshotKey = (leaves) =>
     leaves.map((node, index) => index + ":" + text(node)).join("\u241e");
 
@@ -349,9 +357,12 @@
       throw new Error("ADAPTER_INCOMPATIBLE: Gemini New chat control was not found");
     }
     newChat.click();
-    const reset = await waitFor(freshChatLocation, 8000);
+    const reset = await waitFor(
+      () => freshChatLocation() && responseLeaves(context).length === 0,
+      8000
+    );
     if (!reset) {
-      throw new Error("ADAPTER_INCOMPATIBLE: Gemini did not open a fresh chat");
+      throw new Error("ADAPTER_INCOMPATIBLE: Gemini did not open a clean fresh chat");
     }
     await sleep(250);
   };
