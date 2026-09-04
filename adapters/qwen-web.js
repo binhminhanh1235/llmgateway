@@ -281,12 +281,16 @@
       if (!composer) throw new Error("ADAPTER_INCOMPATIBLE: Qwen prompt composer disappeared");
 
       const before = responseTexts(context);
+      const baselineText = before[before.length - 1] || "";
       const prompt = formatMessages(request);
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
       setComposer(composer, prompt);
 
       const send = await waitFor(() => queryFirst(context, "send"), 5000);
-      if (!send) throw new Error("ADAPTER_INCOMPATIBLE: Qwen send control was not found");
+      if (!send) {
+        if (queryFirst(context, "login")) throw new Error("LOGIN_REQUIRED: Qwen session expired");
+        throw new Error("ADAPTER_INCOMPATIBLE: Qwen send control was not found");
+      }
       send.click();
 
       const startedAt = Date.now();
@@ -294,9 +298,17 @@
       let stableSince = 0;
       let answer = "";
       while (Date.now() - startedAt < Number(context?.response_timeout_ms || 180000)) {
+        if (queryFirst(context, "login")) {
+          throw new Error("LOGIN_REQUIRED: Qwen session expired while waiting for a response");
+        }
         const responses = responseTexts(context);
-        const candidate = responses.length > before.length ? responses[responses.length - 1] : responses[responses.length - 1] || "";
+        const candidate = responses[responses.length - 1] || "";
+        const responseAdvanced = responses.length > before.length || (candidate && candidate !== baselineText);
         const generating = Boolean(queryFirst(context, "completion"));
+        if (!responseAdvanced) {
+          await sleep(180);
+          continue;
+        }
         if (candidate && candidate !== last) {
           last = candidate;
           answer = candidate;
