@@ -71,6 +71,18 @@ def envelope_for(expression):
     }
 
     if 'const __operation = "chat_stream_start"' in expression:
+        request = expression_request(expression)
+        prompt_text = json.dumps(request.get("messages", []), ensure_ascii=False)
+        if "force-browser-stream-fallback" in prompt_text:
+            write_marker("stream-start-failed", "forced")
+            return {
+                "meta": meta,
+                "probe": probe,
+                "error": {
+                    "code": "stream_start_error",
+                    "message": "forced browser stream start failure",
+                },
+            }
         with stream_lock:
             stream_seq += 1
             stream_id = f"ci-stream-{stream_seq}"
