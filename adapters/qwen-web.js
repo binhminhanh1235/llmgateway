@@ -79,20 +79,121 @@
   const text = (node) => String(node?.innerText || node?.textContent || "").replace(/\u00a0/g, " ").trim();
   const normalize = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 
+  const contentText = (content) => {
+    if (Array.isArray(content)) {
+      return content.map((part) => {
+        if (typeof part === "string") return part;
+        if (part?.type === "text" || part?.type === "input_text") return part.text || "";
+        return "";
+      }).filter(Boolean).join("\n");
+    }
+    return String(content || "");
+  };
+
+  const toolProtocol = (request) => {
+    const tools = Array.isArray(request?.tools) ? request.tools : [];
+    if (!tools.length || request?.tool_choice === "none") return "";
+    const definitions = tools.map((tool) => {
+      const fn = tool?.function || {};
+      return {
+        name: String(fn.name || ""),
+        description: String(fn.description || ""),
+        parameters: fn.parameters || { type: "object" }
+      };
+    }).filter((tool) => tool.name);
+
+    let choice = request?.tool_choice || "auto";
+    if (choice && typeof choice === "object") {
+      choice = choice?.function?.name ? "required:" + choice.function.name : "auto";
+    }
+
+    return [
+      "SYSTEM TOOL PROTOCOL:",
+      "You can request llmgateway client tools. Never claim a tool was executed unless you emit a tool call.",
+      "Available tools: " + JSON.stringify(definitions),
+      "Tool choice: " + String(choice),
+      "When a tool is needed, respond ONLY with this exact envelope and no markdown:",
+      "<LLMGATEWAY_TOOL_CALLS>{\"tool_calls\":[{\"name\":\"tool_name\",\"arguments\":{}}]}</LLMGATEWAY_TOOL_CALLS>",
+      "You may return multiple tool_calls. arguments must be a JSON object. If no tool is needed, answer normally."
+    ].join("\n");
+  };
+
   const formatMessages = (request) => {
     const messages = Array.isArray(request?.messages) ? request.messages : [];
-    return messages.map((message) => {
+    const rendered = messages.map((message) => {
       const role = String(message?.role || "user");
-      let content = message?.content;
-      if (Array.isArray(content)) {
-        content = content.map((part) => {
-          if (typeof part === "string") return part;
-          if (part?.type === "text" || part?.type === "input_text") return part.text || "";
-          return "";
-        }).filter(Boolean).join("\n");
+      if (role === "assistant" && Array.isArray(message?.tool_calls) && message.tool_calls.length) {
+        const calls = message.tool_calls.map((call) => ({
+          id: call?.id || "",
+          name: call?.function?.name || "",
+          arguments: call?.function?.arguments || "{}"
+        }));
+        return "ASSISTANT_TOOL_CALLS: " + JSON.stringify(calls);
       }
-      return role.toUpperCase() + ": " + String(content || "");
-    }).join("\n\n");
+      if (role === "tool") {
+        return "TOOL_RESULT"
+          + (message?.tool_call_id ? " [" + message.tool_call_id + "]" : "")
+          + ": " + contentText(message?.content);
+      }
+      return role.toUpperCase() + ": " + contentText(message?.content);
+    });
+    const protocol = toolProtocol(request);
+    return (protocol ? [protocol, ...rendered] : rendered).join("\n\n");
+  };
+
+  const parseToolCalls = (answer, request) => {
+    const tools = Array.isArray(request?.tools) ? request.tools : [];
+    if (!tools.length || request?.tool_choice === "none") return null;
+    const allowed = new Set(tools.map((tool) => tool?.function?.name).filter(Boolean));
+    const match = String(answer || "").match(/<LLMGATEWAY_TOOL_CALLS>\s*([\s\S]*?)\s*<\/LLMGATEWAY_TOOL_CALLS>/i);
+    if (!match) return null;
+    let payload;
+    try {
+      payload = JSON.parse(match[1]);
+    } catch (_) {
+      return null;
+    }
+    const rawCalls = Array.isArray(payload?.tool_calls) ? payload.tool_calls : [];
+    const calls = rawCalls.map((call, index) => {
+      const name = String(call?.name || "");
+      if (!allowed.has(name)) return null;
+      let args = call?.arguments;
+      if (typeof args === "string") {
+        try { args = JSON.parse(args); } catch (_) { args = { _raw: args }; }
+      }
+      if (!args || typeof args !== "object" || Array.isArray(args)) args = {};
+      return {
+        index,
+        id: "call_browser_" + Date.now() + "_" + index,
+        type: "function",
+        function: { name, arguments: JSON.stringify(args) }
+      };
+    }).filter(Boolean);
+    return calls.length ? calls : null;
+  };
+
+  const openAIResult = (request, model, answer, idPrefix) => {
+    const calls = parseToolCalls(answer, request);
+    if (request?.stream) {
+      const delta = calls
+        ? { role: "assistant", tool_calls: calls }
+        : { role: "assistant", content: answer };
+      return {
+        id: idPrefix + Date.now(),
+        object: "chat.completion.chunk",
+        model,
+        choices: [{ index: 0, delta, finish_reason: calls ? "tool_calls" : "stop" }]
+      };
+    }
+    const message = calls
+      ? { role: "assistant", content: null, tool_calls: calls }
+      : { role: "assistant", content: answer };
+    return {
+      id: idPrefix + Date.now(),
+      object: "chat.completion",
+      model,
+      choices: [{ index: 0, message, finish_reason: calls ? "tool_calls" : "stop" }]
+    };
   };
 
   const setComposer = (node, value) => {
@@ -200,14 +301,12 @@
       }
       if (!answer) throw new Error("RESPONSE_TIMEOUT: Qwen did not produce a readable response");
 
-      const body = {
-        id: "chatcmpl_qwen_web_" + Date.now(),
-        object: request?.stream ? "chat.completion.chunk" : "chat.completion",
-        model: request?.model || context?.model_label || "qwen-web",
-        choices: request?.stream
-          ? [{ index: 0, delta: { role: "assistant", content: answer }, finish_reason: "stop" }]
-          : [{ index: 0, message: { role: "assistant", content: answer }, finish_reason: "stop" }]
-      };
+      const body = openAIResult(
+        request,
+        request?.model || context?.model_label || "qwen-web",
+        answer,
+        "chatcmpl_qwen_web_"
+      );
       if (request?.stream) {
         return {
           status: 200,
