@@ -521,6 +521,7 @@ impl AppConfig {
                 | "browser-http"
                 | "browser-cdp"
                 | "browser-gemini"
+                | "browser-chatgpt"
                 | "browser-qwen" => {}
                 other => {
                     return Err(ConfigError::Invalid(format!(
