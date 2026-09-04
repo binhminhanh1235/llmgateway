@@ -294,6 +294,32 @@ assert s["byte_count"] > 0, s
 assert "dropped" in (s["error"] or ""), s
 '
 
+python3 <<'PY'
+import http.client
+import json
+import os
+
+key = os.environ["LLMGATEWAY_API_KEY"]
+body = json.dumps({
+    "model": "llmgateway-auto",
+    "stream": True,
+    "messages": [{"role": "user", "content": "force-browser-stream-fallback"}],
+})
+conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
+conn.request("POST", "/v1/chat/completions", body=body, headers={
+    "Authorization": "Bearer " + key,
+    "Content-Type": "application/json",
+})
+response = conn.getresponse()
+assert response.status == 200, response.status
+assert response.getheader("x-llmgateway-route") == "api-route", dict(response.getheaders())
+payload = response.read().decode()
+assert "fake reply messages=" in payload, payload
+assert "data: [DONE]" in payload, payload
+conn.close()
+PY
+test -f "$PROFILE_DIR/stream-start-failed"
+
 curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/qwen-stream/driver/stop   "${AUTH[@]}" >/dev/null
 BROWSER_PID=""
 
