@@ -1,6 +1,6 @@
 # llmgateway roadmap
 
-This roadmap tracks the path from the current v0.26 feature-rich beta to a stable v1.0.
+This roadmap tracks the path from the current v0.27 browser-first beta to a stable v1.0.
 
 ## Product direction
 
@@ -38,7 +38,7 @@ The security boundary stays unchanged:
 - CAPTCHA/2FA and normal authentication are completed interactively by the user;
 - browser integrations must respect provider terms, anti-abuse controls and quota limits.
 
-## Current baseline: v0.26
+## Current baseline: v0.27
 
 Already implemented:
 
@@ -59,17 +59,25 @@ Already implemented:
 - browser readiness integrated into the same router as API accounts;
 - browser auth failure transitions to `requires_attention`;
 - Accounts UI browser controls;
-- Docker and E2E regression coverage.
+- Docker and E2E regression coverage;
+- startup and periodic browser runtime reconciliation;
+- reconnect to Chromium that survives a gateway restart;
+- stale CDP detection and safe profile relaunch after an unexpected browser crash;
+- explicit browser lifecycle states and browser-specific Account Readiness reasons;
+- browser-first virtual-model routing with configurable API fallback;
+- live CDP readiness checks before browser-CDP routes are selected.
 
-The remaining browser work is therefore mostly **reliability, provider completeness, streaming and product UX**, rather than inventing a second routing architecture.
+The remaining browser work is therefore mostly **provider completeness, setup UX, streaming and deeper multi-browser intelligence**, rather than inventing a second routing architecture.
 
 ---
 
-## v0.27 - Browser Account Reliability
+## v0.27 - Browser Account Reliability ✅
 
-**Priority: P0**
+**Status: shipped**
 
-Goal: browser accounts should survive ordinary local usage and recover predictably without hand-holding.
+Browser accounts now survive ordinary local runtime failures and recover predictably without hand-holding. The implementation includes startup/background reconciliation, browser-first routing, live CDP readiness, crash recovery, stale-port cleanup, deliberate-stop semantics, and restart/recovery E2E coverage.
+
+Original scope and acceptance criteria are retained below as the release contract.
 
 ### Scope
 
