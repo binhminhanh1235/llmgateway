@@ -176,6 +176,49 @@ assert total - first >= 0.6, (first, total)
 with open("/tmp/llmgateway-browser-streaming-chat-request-id", "w", encoding="utf-8") as f:
     f.write(chat_request_id)
 
+# A browser poll failure after partial output must remain a valid SSE/HTTP body.
+# The old behavior surfaced only "error decoding response body" to reqwest clients.
+conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
+failed_body = json.dumps({
+    "model": "llmgateway-auto",
+    "stream": True,
+    "messages": [{"role": "user", "content": "force-browser-stream-poll-error"}],
+})
+conn.request(
+    "POST",
+    "/v1/chat/completions",
+    body=failed_body,
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "Content-Length": str(len(failed_body.encode())),
+    },
+)
+failed_response = conn.getresponse()
+assert failed_response.status == 200, (failed_response.status, failed_response.read())
+assert failed_response.getheader("x-llmgateway-route") == "qwen-stream-route", dict(failed_response.getheaders())
+failed_request_id = failed_response.getheader("x-llmgateway-request-id")
+assert failed_request_id, dict(failed_response.getheaders())
+failed_payload = failed_response.read().decode()
+conn.close()
+
+assert "data: [DONE]" not in failed_payload, failed_payload
+failed_events = []
+for line in failed_payload.splitlines():
+    if not line.startswith("data: "):
+        continue
+    data = line[6:].strip()
+    if not data:
+        continue
+    failed_events.append(json.loads(data))
+errors = [event.get("error") for event in failed_events if isinstance(event.get("error"), dict)]
+assert errors, failed_events
+error_messages = [str(error.get("message", "")) for error in errors]
+assert all("error decoding response body" not in message.lower() for message in error_messages), error_messages
+assert any("forced browser stream poll failure" in message for message in error_messages), error_messages
+with open("/tmp/llmgateway-browser-streaming-failed-request-id", "w", encoding="utf-8") as f:
+    f.write(failed_request_id)
+
 responses, _, _, _ = request_stream(
     "/v1/responses",
     {
@@ -247,6 +290,26 @@ while True:
         raise AssertionError("browser stream ended before first data chunk")
 conn.close()
 PY
+
+FAILED_REQUEST_ID=$(cat /tmp/llmgateway-browser-streaming-failed-request-id)
+for _ in {1..50}; do
+  FAILED_TRACE=$(curl -fsS "http://127.0.0.1:7331/_llmgateway/executions/$FAILED_REQUEST_ID" "${AUTH[@]}")
+  if printf '%s' "$FAILED_TRACE" | python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin)["status"] == "failed" else 1)'; then
+    break
+  fi
+  sleep 0.1
+done
+printf '%s' "$FAILED_TRACE" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["status"] == "failed", x
+s=x["stream"]
+assert s["outcome"] == "failed", s
+assert s["partial_response"] is True, s
+assert s["first_byte_ms"] is not None, s
+assert s["chunk_count"] >= 1, s
+assert s["byte_count"] > 0, s
+'
 
 CHAT_REQUEST_ID=$(cat /tmp/llmgateway-browser-streaming-chat-request-id)
 CHAT_TRACE=$(curl -fsS   "http://127.0.0.1:7331/_llmgateway/executions/$CHAT_REQUEST_ID"   "${AUTH[@]}")
