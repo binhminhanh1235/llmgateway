@@ -633,6 +633,31 @@ impl BrowserProviderAdapter for HttpBrowserAdapter {
         "browser-http"
     }
 
+    fn adapter_id(&self) -> &'static str {
+        "browser-http"
+    }
+
+    async fn diagnose(
+        &self,
+        account_id: &str,
+        _profile_dir: &str,
+        binding: &BrowserAccountBinding,
+    ) -> BrowserAdapterDiagnostics {
+        BrowserAdapterDiagnostics {
+            account_id: account_id.to_string(),
+            provider_kind: self.kind().to_string(),
+            adapter_id: Some(self.adapter_id().to_string()),
+            adapter_version: Some("bridge-v1".into()),
+            contract_version: Some(BROWSER_ADAPTER_CONTRACT_VERSION),
+            expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+            status: "ready".into(),
+            message: "browser-http bridge is configured".into(),
+            page_signature: None,
+            target_url_prefix: binding.target_url_prefix.clone(),
+            configured_models: binding.models.clone(),
+        }
+    }
+
     async fn execute_chat(
         &self,
         request: BrowserAdapterRequest,
