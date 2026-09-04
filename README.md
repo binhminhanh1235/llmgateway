@@ -6,7 +6,7 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 
 > One conversation. Any model. Context intact.
 
-## Current highlights (v0.30)
+## Current highlights (v0.31)
 
 - OpenAI-compatible `POST /v1/chat/completions`
 - OpenAI-compatible `POST /v1/responses`
@@ -26,6 +26,11 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 - Downstream disconnect cancellation with ephemeral-tab cleanup
 - Browser stream first-byte/idle timeouts and partial-response execution traces
 - OpenAI Chat, Responses, Anthropic Messages, and persistent-thread browser streaming
+- Equal-quality browser-account LRU fairness with persistent-thread sticky affinity
+- Browser cooldown recovery scoring and deterministic browser-to-browser failover
+- Explicit `prefer-browser`, `browser-only`, `prefer-api`, and `api-only` routing policies
+- Model-catalog capability/context enrichment for configured browser routes
+- Browser-aware route-explain policy, fairness, and recovery diagnostics
 - Versioned browser adapter contract with page-drift diagnostics
 - Stateless per-request browser chat tabs for built-in providers
 - Sticky route affinity with automatic fallback
@@ -130,6 +135,10 @@ See [Browser Accounts UX](docs/browser-accounts-ux.md) for the managed setup lif
 v0.30 streams built-in Gemini/Qwen responses incrementally from the provider page rather than waiting for the full DOM answer. Browser stream polling is downstream-driven, so a slow client naturally applies backpressure. Disconnecting a client cancels the browser operation and closes the ephemeral provider tab. First-byte/idle timeouts and partial/cancelled stream metadata are visible through Execution Trace and Trace Console.
 
 See [Browser streaming and cancellation](docs/browser-streaming.md) for the stream contract, timeout settings, cleanup guarantees, and compatibility behavior.
+
+v0.31 makes multiple browser accounts behave like a smart local pool. Equal-quality browser routes rotate by least-recent successful account use, persistent threads can keep a healthy browser session sticky, recently failed browser routes re-enter with a bounded recovery penalty, and execution policy can be expressed as `prefer-browser`, `browser-only`, `balanced`, `prefer-api`, or `api-only`. The old `browser-first` / `api-first` names remain accepted aliases.
+
+See [Browser-aware routing intelligence](docs/browser-aware-routing.md) for policy semantics, scoring order, fairness, recovery, context enforcement, and route-explain fields.
 
 Built-in adapters default to fresh provider chat tabs per request while reusing the authenticated Chromium profile. Optional `model_labels` select provider UI models explicitly; without a mapping, the current provider UI model is preserved.
 
@@ -317,9 +326,9 @@ Gemini model
 best eligible route
 ```
 
-When a sticky route fails with a retryable condition, fallback continues through other eligible routes and the successful route becomes the new affinity. Task-aware routing can override an old sticky route when a materially better task fit exists, and v0.27 also prevents an old API affinity from jumping ahead of the configured browser-first transport policy.
+When a sticky route fails with a retryable condition, fallback continues through other eligible routes and the successful route becomes the new affinity. Task-aware routing can override an old sticky route when a materially better task fit exists. v0.31 keeps a healthy browser route sticky for persistent threads by default, while ordinary equal-quality requests rotate across browser accounts.
 
-v0.27 makes virtual-model execution browser-first by default. Eligible browser routes are ranked before API routes; the existing priority, quota, adaptive latency/reliability, and task-fit score still chooses the best route inside each transport tier. Set `routing.execution_preference = "balanced"` to remove the transport preference, or `"api-first"` to invert it. `routing.api_fallback = false` disables API fallback for browser-first virtual models.
+Virtual-model execution remains browser-first by default. The preferred v0.31 policy name is `routing.execution_preference = "prefer-browser"`; `"browser-first"` remains a compatible alias. Use `"browser-only"` to forbid API fallback, `"balanced"` to remove transport preference, `"prefer-api"` to put API routes first, or `"api-only"` to forbid browser routes. Under `prefer-browser`, `routing.api_fallback = false` also excludes API candidates.
 
 Browser sessions are reconciled with the live Chromium/CDP runtime at startup and periodically afterward. A still-running browser is reconnected after a gateway restart. A previously-ready browser that crashes can be relaunched with the same isolated profile and re-verified automatically; a deliberate Stop, login-required state, or attention state is not auto-launched.
 
@@ -330,10 +339,10 @@ v0.26 added task-aware routing on top of readiness, quota, configured priority, 
 The route score remains explainable:
 
 ```text
-final_score = base_priority + quota_penalty + adaptive_penalty + task_adjustment
+final_score = base_priority + quota_penalty + adaptive_penalty + browser_recovery_penalty + task_adjustment
 ```
 
-Lower scores win. See [`docs/task-aware-routing.md`](docs/task-aware-routing.md) for classifier signals, capability tags, explicit task hints, and explain examples.
+Lower scores win. For equal transport preference and equal score, v0.31 applies least-recently-used fairness only between browser peers, then preserves stable configured order. See [`docs/browser-aware-routing.md`](docs/browser-aware-routing.md) for the complete decision order and [`docs/task-aware-routing.md`](docs/task-aware-routing.md) for classifier signals.
 
 ## Claude Code
 
@@ -400,11 +409,12 @@ Current browser milestones:
 - **v0.28 Production-grade Browser Provider Adapters** ✅ - first-class Gemini/Qwen providers, contract v1, adapter health/page-drift diagnostics, model mapping, stateless provider tabs, and deterministic fake-page/CDP fixtures.
 - **v0.29 Browser Accounts UX** ✅ - managed Gemini/Qwen account wizard, safe config persistence, hot activation, lifecycle controls, immutable request snapshots, and deterministic hot-activation E2E coverage.
 - **v0.30 True Browser Streaming and Cancellation** ✅ - incremental CDP streaming, downstream-driven backpressure, disconnect cancellation, first-byte/idle timeouts, stream traces, and Chat/Responses/Anthropic E2E coverage.
+- **v0.31 Browser-aware Routing Intelligence** ✅ - browser-account fairness, session-aware affinity, recovery scoring, explicit transport policies, catalog-enriched task/context routing, and deterministic API fallback.
 
 Next milestones:
 
-1. **v0.31 Browser-aware Routing Intelligence** - multi-account fairness, session-aware affinity, browser-specific recovery, and deterministic browser-to-API fallback.
-2. **v0.32+** - per-client policies, usage/cost intelligence, model/cost intelligence, production hardening, and distribution.
+1. **v0.32 Client Policies and Budgets** - per-client models, browser/API permissions, budgets, and routing strategy.
+2. **v0.33+** - usage/cost intelligence, model/cost intelligence, production hardening, and distribution.
 
 See the detailed [browser-first roadmap](docs/roadmap.md), including release gates for v1.0.
 
