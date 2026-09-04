@@ -314,19 +314,12 @@ impl Router {
                 push_unique(&mut exclusion_reasons, "browser_model_unavailable");
             }
             if apply_execution_policy {
-                match config.routing.execution_policy() {
-                    "browser-only" if transport != "browser" => {
-                        push_unique(&mut exclusion_reasons, "policy_browser_only");
-                    }
-                    "api-only" if transport != "api" => {
-                        push_unique(&mut exclusion_reasons, "policy_api_only");
-                    }
-                    "prefer-browser"
-                        if transport == "api" && !config.routing.api_fallback =>
-                    {
-                        push_unique(&mut exclusion_reasons, "api_fallback_disabled");
-                    }
-                    _ => {}
+                if let Some(reason) = execution_policy_exclusion(
+                    config.routing.execution_policy(),
+                    config.routing.api_fallback,
+                    transport,
+                ) {
+                    push_unique(&mut exclusion_reasons, reason);
                 }
             }
             if let Some(reason) = task_fit.exclusion_reason {
@@ -843,6 +836,19 @@ struct RouteEvaluation {
     candidates: Vec<EvaluatedRoute>,
 }
 
+fn execution_policy_exclusion(
+    policy: &str,
+    api_fallback: bool,
+    transport: &str,
+) -> Option<&'static str> {
+    match (policy, transport) {
+        ("browser-only", value) if value != "browser" => Some("policy_browser_only"),
+        ("api-only", value) if value != "api" => Some("policy_api_only"),
+        ("prefer-browser", "api") if !api_fallback => Some("api_fallback_disabled"),
+        _ => None,
+    }
+}
+
 fn push_unique(values: &mut Vec<String>, value: &str) {
     if !values.iter().any(|item| item == value) {
         values.push(value.to_string());
@@ -851,7 +857,36 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::push_unique;
+    use super::{execution_policy_exclusion, push_unique};
+
+    #[test]
+    fn execution_policy_matrix_enforces_hard_transport_boundaries() {
+        assert_eq!(
+            execution_policy_exclusion("browser-only", true, "api"),
+            Some("policy_browser_only")
+        );
+        assert_eq!(
+            execution_policy_exclusion("browser-only", true, "browser"),
+            None
+        );
+        assert_eq!(
+            execution_policy_exclusion("api-only", true, "browser"),
+            Some("policy_api_only")
+        );
+        assert_eq!(execution_policy_exclusion("api-only", true, "api"), None);
+        assert_eq!(
+            execution_policy_exclusion("prefer-browser", false, "api"),
+            Some("api_fallback_disabled")
+        );
+        assert_eq!(
+            execution_policy_exclusion("prefer-browser", true, "api"),
+            None
+        );
+        assert_eq!(
+            execution_policy_exclusion("prefer-api", true, "browser"),
+            None
+        );
+    }
 
     #[test]
     fn push_unique_deduplicates_trace_reasons() {
