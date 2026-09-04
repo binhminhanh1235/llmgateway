@@ -26,6 +26,7 @@ mod embedding_runtime;
 mod execution_trace;
 mod execution_trace_api;
 mod gateway;
+mod gemini_web_transport;
 mod live_config;
 mod memory_api;
 mod memory_backfill;
