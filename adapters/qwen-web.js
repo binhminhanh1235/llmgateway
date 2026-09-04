@@ -249,11 +249,15 @@
 
     async probe(context) {
       const hostOk = location.hostname === "chat.qwen.ai";
-      const composer = await waitFor(() => queryFirst(context, "input"), Number(context?.probe_timeout_ms || 8000));
-      const loginVisible = Boolean(queryFirst(context, "login"));
       if (!hostOk) {
         return { ok: false, code: "wrong_page", message: "Expected chat.qwen.ai but found " + location.hostname };
       }
+      await waitFor(
+        () => queryFirst(context, "input") || queryFirst(context, "login"),
+        Number(context?.probe_timeout_ms || 8000)
+      );
+      const composer = queryFirst(context, "input");
+      const loginVisible = Boolean(queryFirst(context, "login"));
       if (!composer) {
         return {
           ok: false,
