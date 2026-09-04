@@ -6,7 +6,7 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 
 > One conversation. Any model. Context intact.
 
-## Current highlights (v0.26)
+## Current highlights (v0.27)
 
 - OpenAI-compatible `POST /v1/chat/completions`
 - OpenAI-compatible `POST /v1/responses`
@@ -15,6 +15,8 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 - Persistent server-side threads in SQLite
 - Stateful `previous_response_id` chains
 - Multi-provider and multi-account routing
+- Browser-first virtual-model routing with optional API fallback
+- Browser session startup reconciliation and automatic crash recovery
 - Sticky route affinity with automatic fallback
 - Model catalog and per-account model discovery
 - Canonical physical model IDs plus virtual routing models
@@ -74,7 +76,7 @@ cp .env.example .env
 cargo run --release
 ```
 
-Set `LLMGATEWAY_API_KEY` and at least one upstream credential in `.env`.
+Set `LLMGATEWAY_API_KEY`. API-backed accounts also need their configured upstream credentials; first-class browser accounts do not require dummy API keys.
 
 Default endpoint:
 
@@ -276,9 +278,13 @@ Gemini model
 best eligible route
 ```
 
-When a sticky route fails with a retryable condition, fallback continues through other eligible routes and the successful route becomes the new affinity. v0.26 also lets a materially better task fit override an old sticky route; affinity is preserved when the old route and current best route have equal task adjustment.
+When a sticky route fails with a retryable condition, fallback continues through other eligible routes and the successful route becomes the new affinity. Task-aware routing can override an old sticky route when a materially better task fit exists, and v0.27 also prevents an old API affinity from jumping ahead of the configured browser-first transport policy.
 
-v0.26 adds task-aware routing on top of readiness, quota, configured priority, and adaptive latency/reliability. Requests are classified locally as coding, reasoning, long-context, simple chat, or general. Routes can advertise policy metadata such as `coding`, `reasoning`, `long-context`, `cheap`, and `fast`; unknown metadata remains neutral for backward compatibility. A known `context_window` that cannot fit the request is excluded before ranking.
+v0.27 makes virtual-model execution browser-first by default. Eligible browser routes are ranked before API routes; the existing priority, quota, adaptive latency/reliability, and task-fit score still chooses the best route inside each transport tier. Set `routing.execution_preference = "balanced"` to remove the transport preference, or `"api-first"` to invert it. `routing.api_fallback = false` disables API fallback for browser-first virtual models.
+
+Browser sessions are reconciled with the live Chromium/CDP runtime at startup and periodically afterward. A still-running browser is reconnected after a gateway restart. A previously-ready browser that crashes can be relaunched with the same isolated profile and re-verified automatically; a deliberate Stop, login-required state, or attention state is not auto-launched.
+
+v0.26 added task-aware routing on top of readiness, quota, configured priority, and adaptive latency/reliability. Requests are classified locally as coding, reasoning, long-context, simple chat, or general. Routes can advertise policy metadata such as `coding`, `reasoning`, `long-context`, `cheap`, and `fast`; unknown metadata remains neutral for backward compatibility. A known `context_window` that cannot fit the request is excluded before ranking.
 
 The route score remains explainable:
 
@@ -347,10 +353,13 @@ A future retriever can add local/remote embeddings and reranking behind the same
 
 The roadmap is now **browser-first** because authenticated browser accounts are the primary local execution path. API-key accounts remain supported as optional fallbacks.
 
+Current browser milestone:
+
+- **v0.27 Browser Account Reliability** ✅ - startup reconciliation, reconnect/recovery, explicit lifecycle states, live CDP readiness, browser-first preference, and failover/recovery E2E.
+
 Next milestones:
 
-1. **v0.27 Browser Account Reliability** - startup reconciliation, reconnect/recovery, explicit lifecycle states, browser-first preference, and failover/recovery E2E.
-2. **v0.28 Production-grade Browser Provider Adapters** - harden Gemini Web and Qwen Web adapters with diagnostics and regression fixtures.
+1. **v0.28 Production-grade Browser Provider Adapters** - harden Gemini Web and Qwen Web adapters with diagnostics and regression fixtures.
 3. **v0.29 Browser Accounts UX** - add/login/verify/re-auth/restart/disable accounts from the local UI without hand-authoring several TOML sections.
 4. **v0.30 True Browser Streaming and Cancellation** - incremental CDP streaming, cancellation, backpressure, disconnect handling, and streaming compatibility tests.
 5. **v0.31 Browser-aware Routing Intelligence** - multi-account fairness, session-aware affinity, browser-specific recovery, and deterministic browser-to-API fallback.
