@@ -12,7 +12,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::Path,
-    sync::Arc,
+    sync::{Arc, RwLock as StdRwLock},
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -183,7 +183,7 @@ pub trait BrowserProviderAdapter: Send + Sync {
 }
 
 pub struct BrowserProviderRegistry {
-    config: Arc<BrowserProviderConfig>,
+    config: Arc<StdRwLock<BrowserProviderConfig>>,
     adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>>,
     adapter_health: Arc<RwLock<BTreeMap<String, CachedAdapterDiagnostics>>>,
 }
@@ -285,14 +285,31 @@ impl BrowserProviderRegistry {
         adapters.insert(gemini.kind().to_string(), gemini);
         adapters.insert(qwen.kind().to_string(), qwen);
         Ok(Self {
-            config: Arc::new(config),
+            config: Arc::new(StdRwLock::new(config)),
             adapters,
             adapter_health: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
     pub fn binding_count(&self) -> usize {
-        self.config.bindings.len()
+        self.config_snapshot().bindings.len()
+    }
+
+    pub fn reload(&self, config: BrowserProviderConfig) -> Result<(), BrowserProviderError> {
+        validate_browser_provider_config(&config)?;
+        let mut guard = self
+            .config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = config;
+        Ok(())
+    }
+
+    fn config_snapshot(&self) -> BrowserProviderConfig {
+        self.config
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn is_browser_kind(kind: &str) -> bool {
@@ -303,17 +320,20 @@ impl BrowserProviderRegistry {
         self.adapters.contains_key(kind)
     }
 
-    pub fn session_id_for_account(&self, account_id: &str) -> Option<&str> {
-        self.config
+    pub fn session_id_for_account(&self, account_id: &str) -> Option<String> {
+        self.config_snapshot()
             .bindings
             .get(account_id)
-            .map(|binding| binding.session.as_str())
+            .map(|binding| binding.session.clone())
     }
 
     pub fn model_allowed(&self, account_id: &str, model: &str) -> bool {
-        self.config.bindings.get(account_id).is_none_or(|binding| {
-            binding.models.is_empty() || binding.models.iter().any(|allowed| allowed == model)
-        })
+        self.config_snapshot()
+            .bindings
+            .get(account_id)
+            .is_none_or(|binding| {
+                binding.models.is_empty() || binding.models.iter().any(|allowed| allowed == model)
+            })
     }
 
     pub async fn adapter_diagnostics(
@@ -344,7 +364,8 @@ impl BrowserProviderRegistry {
                 })
                 .await;
         };
-        let Some(binding) = self.config.bindings.get(account_id) else {
+        let config = self.config_snapshot();
+        let Some(binding) = config.bindings.get(account_id).cloned() else {
             return self
                 .cache_diagnostics(BrowserAdapterDiagnostics {
                     account_id: account_id.to_string(),
@@ -367,7 +388,7 @@ impl BrowserProviderRegistry {
                     account_id,
                     provider_kind,
                     adapter.adapter_id(),
-                    binding,
+                    &binding,
                     "browser session runtime is not initialized",
                 ))
                 .await;
@@ -380,7 +401,7 @@ impl BrowserProviderRegistry {
                         account_id,
                         provider_kind,
                         adapter.adapter_id(),
-                        binding,
+                        &binding,
                         &error.to_string(),
                     ))
                     .await;
@@ -392,14 +413,14 @@ impl BrowserProviderRegistry {
                     account_id,
                     provider_kind,
                     adapter.adapter_id(),
-                    binding,
+                    &binding,
                     &format!("browser session is {}", session.status),
                 ))
                 .await;
         }
 
         let diagnostics = adapter
-            .diagnose(account_id, &session.profile_dir, binding)
+            .diagnose(account_id, &session.profile_dir, &binding)
             .await;
         self.cache_diagnostics(diagnostics).await
     }
@@ -426,7 +447,8 @@ impl BrowserProviderRegistry {
         if !Self::is_browser_kind(provider_kind) || !self.supports(provider_kind) {
             return false;
         }
-        let Some(binding) = self.config.bindings.get(account_id) else {
+        let config = self.config_snapshot();
+        let Some(binding) = config.bindings.get(account_id).cloned() else {
             return false;
         };
         if provider_kind == "browser-cdp" && binding.adapter_script.is_none() {
@@ -476,9 +498,10 @@ impl BrowserProviderRegistry {
     ) -> Result<(), BrowserProviderError> {
         self.invalidate_diagnostics(account_id).await;
         let binding = self
-            .config
+            .config_snapshot()
             .bindings
             .get(account_id)
+            .cloned()
             .ok_or_else(|| BrowserProviderError::MissingBinding(account_id.to_string()))?;
         let Some(store) = browser_session_runtime::get() else {
             return Err(BrowserProviderError::SessionUnavailable {
@@ -503,9 +526,10 @@ impl BrowserProviderRegistry {
     ) -> Result<(), BrowserProviderError> {
         self.invalidate_diagnostics(account_id).await;
         let binding = self
-            .config
+            .config_snapshot()
             .bindings
             .get(account_id)
+            .cloned()
             .ok_or_else(|| BrowserProviderError::MissingBinding(account_id.to_string()))?;
         let Some(store) = browser_session_runtime::get() else {
             return Err(BrowserProviderError::SessionUnavailable {
@@ -535,9 +559,10 @@ impl BrowserProviderRegistry {
             .get(&provider.kind)
             .ok_or_else(|| BrowserProviderError::UnsupportedAdapter(provider.kind.clone()))?;
         let binding = self
-            .config
+            .config_snapshot()
             .bindings
             .get(&account.id)
+            .cloned()
             .ok_or_else(|| BrowserProviderError::MissingBinding(account.id.clone()))?;
 
         if !binding.models.is_empty() && !binding.models.iter().any(|model| model == &route.model) {
@@ -605,7 +630,7 @@ impl BrowserProviderRegistry {
                     status: status.into(),
                     message: format!("{code}: {message}"),
                     page_signature: None,
-                    target_url_prefix: effective_target_url_prefix(&provider.kind, binding),
+                    target_url_prefix: effective_target_url_prefix(&provider.kind, &binding),
                     configured_models: binding.models.clone(),
                 })
                 .await;
