@@ -134,6 +134,8 @@ def request_stream(path, payload):
     response = conn.getresponse()
     assert response.status == 200, (response.status, response.read())
     assert response.getheader("x-llmgateway-route") == "qwen-stream-route", dict(response.getheaders())
+    request_id = response.getheader("x-llmgateway-request-id")
+    assert request_id, dict(response.getheaders())
     events = []
     first_data_at = None
     while True:
@@ -152,9 +154,9 @@ def request_stream(path, payload):
         events.append(json.loads(data))
     total = time.monotonic() - started
     conn.close()
-    return events, first_data_at, total
+    return events, first_data_at, total, request_id
 
-chat, first, total = request_stream(
+chat, first, total, chat_request_id = request_stream(
     "/v1/chat/completions",
     {
         "model": "llmgateway-auto",
@@ -171,8 +173,10 @@ assert text == "browser-stream-ok", (text, chat)
 assert first is not None and first < 0.8, (first, total)
 assert total >= 1.0, (first, total)
 assert total - first >= 0.6, (first, total)
+with open("/tmp/llmgateway-browser-streaming-chat-request-id", "w", encoding="utf-8") as f:
+    f.write(chat_request_id)
 
-responses, _, _ = request_stream(
+responses, _, _, _ = request_stream(
     "/v1/responses",
     {
         "model": "llmgateway-auto",
@@ -188,7 +192,7 @@ responses_text = "".join(
 assert responses_text == "browser-stream-ok", (responses_text, responses)
 assert any(event.get("type") == "response.completed" for event in responses), responses
 
-anthropic, _, _ = request_stream(
+anthropic, _, _, _ = request_stream(
     "/v1/messages",
     {
         "model": "llmgateway-auto",
@@ -231,6 +235,10 @@ conn.request(
 )
 response = conn.getresponse()
 assert response.status == 200
+cancel_request_id = response.getheader("x-llmgateway-request-id")
+assert cancel_request_id, dict(response.getheaders())
+with open("/tmp/llmgateway-browser-streaming-cancel-request-id", "w", encoding="utf-8") as f:
+    f.write(cancel_request_id)
 while True:
     line = response.readline()
     if line.startswith(b"data: {"):
@@ -239,6 +247,20 @@ while True:
         raise AssertionError("browser stream ended before first data chunk")
 conn.close()
 PY
+
+CHAT_REQUEST_ID=$(cat /tmp/llmgateway-browser-streaming-chat-request-id)
+CHAT_TRACE=$(curl -fsS   "http://127.0.0.1:7331/_llmgateway/executions/$CHAT_REQUEST_ID"   "${AUTH[@]}")
+printf '%s' "$CHAT_TRACE" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["status"] == "success", x
+s=x["stream"]
+assert s["outcome"] == "completed", s
+assert s["partial_response"] is False, s
+assert s["first_byte_ms"] is not None and s["first_byte_ms"] >= 0, s
+assert s["chunk_count"] >= 3, s
+assert s["byte_count"] > 0, s
+'
 
 for _ in {1..50}; do
   if [ -f "$PROFILE_DIR/stream-cancelled" ] && [ -f "$PROFILE_DIR/target-closed" ]; then
@@ -250,6 +272,27 @@ done
 test -f "$PROFILE_DIR/stream-cancelled"
 test -f "$PROFILE_DIR/target-closed"
 test "$(cat "$PROFILE_DIR/stream-poll-count")" -ge 1
+
+CANCEL_REQUEST_ID=$(cat /tmp/llmgateway-browser-streaming-cancel-request-id)
+for _ in {1..50}; do
+  CANCEL_TRACE=$(curl -fsS     "http://127.0.0.1:7331/_llmgateway/executions/$CANCEL_REQUEST_ID"     "${AUTH[@]}")
+  if printf '%s' "$CANCEL_TRACE" | python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin)["status"] == "cancelled" else 1)'; then
+    break
+  fi
+  sleep 0.1
+done
+printf '%s' "$CANCEL_TRACE" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["status"] == "cancelled", x
+s=x["stream"]
+assert s["outcome"] == "cancelled", s
+assert s["partial_response"] is True, s
+assert s["first_byte_ms"] is not None, s
+assert s["chunk_count"] >= 1, s
+assert s["byte_count"] > 0, s
+assert "dropped" in (s["error"] or ""), s
+'
 
 curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/qwen-stream/driver/stop   "${AUTH[@]}" >/dev/null
 BROWSER_PID=""
