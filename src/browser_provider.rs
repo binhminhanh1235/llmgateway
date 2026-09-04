@@ -2811,9 +2811,12 @@ mod tests {
     fn gemini_adapter_can_force_a_fresh_conversation() {
         assert!(GEMINI_WEB_ADAPTER.contains("start_new_conversation"));
         assert!(GEMINI_WEB_ADAPTER.contains("Gemini New chat control was not found"));
-        assert!(GEMINI_WEB_ADAPTER.contains("queryAll(context, \"response\").filter(isVisible)"));
+        assert!(GEMINI_WEB_ADAPTER.contains("responseLeaves"));
+        assert!(GEMINI_WEB_ADAPTER.contains("document.querySelectorAll(selector)"));
+        assert!(GEMINI_WEB_ADAPTER.contains("Gemini conversation history did not stabilize"));
         assert!(GEMINI_WEB_ADAPTER.contains("newResponseText(before, responses)"));
         assert!(GEMINI_WEB_ADAPTER.contains("div.markdown.markdown-main-panel"));
+        assert!(GEMINI_WEB_ADAPTER.contains("model-response message-content"));
         assert!(GEMINI_WEB_ADAPTER.contains("reuse_native_conversation"));
     }
 

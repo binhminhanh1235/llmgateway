@@ -537,7 +537,7 @@ pub fn openai_stream_with_capture(
             }
         }
         capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
-        if !completed || (text.is_empty() && tools.is_empty()) {
+        if !captured_assistant_is_persistable(completed, &text, &tools) {
             return;
         }
         let mut message = json!({
@@ -559,6 +559,14 @@ pub fn openai_stream_with_capture(
         }
         let _ = completion.send(message);
     }
+}
+
+fn captured_assistant_is_persistable(
+    completed: bool,
+    text: &str,
+    tools: &BTreeMap<usize, CapturedTool>,
+) -> bool {
+    completed && (!text.is_empty() || !tools.is_empty())
 }
 
 #[derive(Default)]
@@ -691,5 +699,24 @@ mod tests {
         capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
 
         assert!(completed);
+    }
+
+    #[test]
+    fn incomplete_or_empty_streams_are_not_persistable() {
+        let empty_tools = BTreeMap::new();
+        assert!(!captured_assistant_is_persistable(false, "partial", &empty_tools));
+        assert!(!captured_assistant_is_persistable(true, "", &empty_tools));
+
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            0,
+            CapturedTool {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        );
+        assert!(captured_assistant_is_persistable(true, "", &tools));
+        assert!(captured_assistant_is_persistable(true, "answer", &empty_tools));
     }
 }
