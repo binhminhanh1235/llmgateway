@@ -278,6 +278,16 @@ best eligible route
 
 When a sticky route fails with a retryable condition, fallback continues through other eligible routes and the successful route becomes the new affinity.
 
+v0.26 adds task-aware routing on top of readiness, quota, configured priority, and adaptive latency/reliability. Requests are classified locally as coding, reasoning, long-context, simple chat, or general. Routes can advertise policy metadata such as `coding`, `reasoning`, `long-context`, `cheap`, and `fast`; unknown metadata remains neutral for backward compatibility. A known `context_window` that cannot fit the request is excluded before ranking.
+
+The route score remains explainable:
+
+```text
+final_score = base_priority + quota_penalty + adaptive_penalty + task_adjustment
+```
+
+Lower scores win. See [`docs/task-aware-routing.md`](docs/task-aware-routing.md) for classifier signals, capability tags, explicit task hints, and explain examples.
+
 ## Claude Code
 
 ```bash
