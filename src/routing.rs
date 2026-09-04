@@ -1,6 +1,8 @@
 mod account_readiness;
+mod adaptive_scoring;
 
 pub use account_readiness::AccountReadiness;
+pub use adaptive_scoring::AdaptiveRouteSnapshot;
 
 use crate::{
     catalog::ModelCatalog,
@@ -8,6 +10,7 @@ use crate::{
     quota_usage_runtime,
 };
 use account_readiness::evaluate_base;
+use adaptive_scoring::AdaptiveRouteState;
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use std::{
@@ -36,6 +39,8 @@ pub struct RouteCandidateDecision {
     pub readiness: AccountReadiness,
     pub route_health: RouteHealth,
     pub quota_penalty: Option<i32>,
+    pub adaptive_penalty: i32,
+    pub adaptive: AdaptiveRouteSnapshot,
     pub final_score: Option<i32>,
     pub rank: Option<usize>,
     pub selected: bool,
@@ -68,6 +73,7 @@ pub struct Router {
     config: Arc<AppConfig>,
     catalog: Arc<ModelCatalog>,
     health: Arc<RwLock<HashMap<String, RouteHealth>>>,
+    adaptive: Arc<RwLock<HashMap<String, AdaptiveRouteState>>>,
 }
 
 impl Router {
@@ -76,6 +82,7 @@ impl Router {
             config,
             catalog,
             health: Arc::new(RwLock::new(HashMap::new())),
+            adaptive: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -114,6 +121,7 @@ impl Router {
         let candidates = self.candidate_routes(&resolved_model).await;
         let now = Utc::now();
         let health_snapshot = self.health.read().await.clone();
+        let adaptive_snapshot = self.adaptive.read().await.clone();
         let mut readiness_by_account: HashMap<String, AccountReadiness> = HashMap::new();
         let mut quota_by_account: HashMap<String, QuotaEvaluation> = HashMap::new();
         let mut evaluated = Vec::with_capacity(candidates.len());
@@ -127,6 +135,12 @@ impl Router {
                 readiness
             };
             let route_health = health_snapshot.get(&route.id).cloned().unwrap_or_default();
+            let adaptive = adaptive_snapshot
+                .get(&route.id)
+                .cloned()
+                .unwrap_or_default()
+                .snapshot(&self.config.routing);
+            let adaptive_penalty = adaptive.penalty;
             let mut exclusion_reasons = Vec::new();
             let mut warnings = Vec::new();
 
@@ -174,7 +188,15 @@ impl Router {
                 match quota {
                     QuotaEvaluation::Included(penalty) => {
                         quota_penalty = Some(penalty);
-                        final_score = Some(route.priority.saturating_add(penalty));
+                        final_score = Some(
+                            route
+                                .priority
+                                .saturating_add(penalty)
+                                .saturating_add(adaptive_penalty),
+                        );
+                        if adaptive.active && adaptive_penalty > 0 {
+                            push_unique(&mut warnings, "adaptive_degraded");
+                        }
                     }
                     QuotaEvaluation::Excluded => {
                         push_unique(&mut exclusion_reasons, "quota_blocked");
@@ -183,7 +205,10 @@ impl Router {
                         warn!(%error, account = %route.account, "quota scoring failed; keeping route");
                         push_unique(&mut warnings, "quota_scoring_unavailable");
                         quota_penalty = Some(0);
-                        final_score = Some(route.priority);
+                        final_score = Some(route.priority.saturating_add(adaptive_penalty));
+                        if adaptive.active && adaptive_penalty > 0 {
+                            push_unique(&mut warnings, "adaptive_degraded");
+                        }
                     }
                 }
             }
@@ -201,6 +226,8 @@ impl Router {
                     readiness,
                     route_health,
                     quota_penalty,
+                    adaptive_penalty,
+                    adaptive,
                     final_score,
                     rank: None,
                     selected: false,
@@ -367,19 +394,45 @@ impl Router {
             .collect()
     }
 
-    pub async fn mark_success(&self, route_id: &str) {
-        self.health
+    pub async fn mark_success(&self, route_id: &str, latency_ms: u64) {
+        {
+            let mut health = self.health.write().await;
+            let entry = health.entry(route_id.to_string()).or_default();
+            entry.consecutive_failures = 0;
+            entry.last_error = None;
+            entry.cooldown_until = None;
+        }
+        self.adaptive
             .write()
             .await
-            .insert(route_id.to_string(), RouteHealth::default());
+            .entry(route_id.to_string())
+            .or_default()
+            .observe_success(latency_ms, &self.config.routing);
     }
 
-    pub async fn mark_failure(&self, route_id: &str, error: String, cooldown_secs: i64) {
-        let mut health = self.health.write().await;
-        let entry = health.entry(route_id.to_string()).or_default();
-        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-        entry.last_error = Some(error);
-        entry.cooldown_until = Some(Utc::now() + Duration::seconds(cooldown_secs));
+    pub async fn mark_failure(
+        &self,
+        route_id: &str,
+        error: String,
+        cooldown_secs: i64,
+        latency_ms: u64,
+        count_for_adaptive: bool,
+    ) {
+        {
+            let mut health = self.health.write().await;
+            let entry = health.entry(route_id.to_string()).or_default();
+            entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+            entry.last_error = Some(error);
+            entry.cooldown_until = Some(Utc::now() + Duration::seconds(cooldown_secs));
+        }
+        if count_for_adaptive {
+            self.adaptive
+                .write()
+                .await
+                .entry(route_id.to_string())
+                .or_default()
+                .observe_failure(latency_ms, &self.config.routing);
+        }
     }
 
     pub async fn snapshot(&self) -> HashMap<String, RouteHealth> {
