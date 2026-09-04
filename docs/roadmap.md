@@ -1,6 +1,6 @@
 # llmgateway roadmap
 
-This roadmap tracks the path from the current v0.30 browser-first beta to a stable v1.0.
+This roadmap tracks the path from the current v0.31 browser-first beta to a stable v1.0.
 
 ## Product direction
 
@@ -38,7 +38,7 @@ The security boundary stays unchanged:
 - CAPTCHA/2FA and normal authentication are completed interactively by the user;
 - browser integrations must respect provider terms, anti-abuse controls and quota limits.
 
-## Current baseline: v0.30
+## Current baseline: v0.31
 
 Already implemented:
 
@@ -86,9 +86,16 @@ Already implemented:
 - client-disconnect cancellation with provider Stop + ephemeral target cleanup;
 - configurable first-byte and idle-stream timeouts;
 - partial/cancelled stream metadata in Execution Trace and Trace Console;
-- deterministic OpenAI Chat, Responses and Anthropic browser-stream compatibility E2E.
+- deterministic OpenAI Chat, Responses and Anthropic browser-stream compatibility E2E;
+- least-recently-used fairness among equal-quality browser accounts;
+- session-aware sticky browser affinity for persistent threads;
+- bounded post-cooldown browser recovery scoring;
+- explicit prefer-browser / browser-only / balanced / prefer-api / api-only policies;
+- Model Catalog enrichment of configured route capability/context metadata;
+- browser-aware route-explain policy, fairness and recovery diagnostics;
+- deterministic multi-browser routing/fallback E2E coverage.
 
-The remaining browser work is therefore mostly **deeper multi-browser intelligence**, rather than setup plumbing or streaming transport.
+The remaining browser work is now mostly **client policy, usage/cost intelligence, and production hardening**, rather than browser execution plumbing.
 
 ---
 
@@ -241,33 +248,45 @@ Claude Code, Codex and OpenCode receive browser-backed streaming with no gateway
 
 ---
 
-## v0.31 - Browser-aware Routing Intelligence
+## v0.31 - Browser-aware Routing Intelligence ✅
+
+**Status: shipped**
 
 **Priority: P1**
 
 Goal: make multiple browser accounts operate like a smart local pool.
 
-### Scope
+v0.31 keeps all existing hard readiness/quota rules, then adds explicit transport policy, cautious browser recovery scoring, and browser-only least-recently-used fairness. Persistent threads preserve healthy browser affinity while non-sticky requests rotate equal-quality accounts.
+
+### Shipped scope
 
 - browser account rotation/fairness within equal-quality routes;
-- session-aware sticky affinity;
-- browser-specific cooldown/recovery scoring;
-- task-aware capability profiles for browser models;
-- known context-window enforcement for browser routes;
-- usage/quota heuristics where providers expose enough information;
-- prefer-browser / browser-only / prefer-API / API-only routing policies;
-- paid API fallback threshold/policy;
-- route explain should state why a browser account won or why API fallback was used.
+- session-aware sticky affinity, configurable with `browser_sticky_affinity`;
+- browser-specific cooldown/recovery scoring with bounded penalties;
+- task-aware capability profiles for browser routes through Model Catalog enrichment;
+- known context-window enforcement using route/catalog metadata;
+- existing account-level usage/quota heuristics retained ahead of fairness;
+- `prefer-browser`, `browser-only`, `balanced`, `prefer-api`, and `api-only` policies;
+- backward-compatible `browser-first` and `api-first` aliases;
+- deterministic paid API fallback control through `api_fallback` and `browser-only`;
+- route explain fields for normalized policy, fairness rank, recovery penalty and fallback reason;
+- deterministic two-browser + API fallback smoke coverage.
 
-Example policy direction:
+Configuration:
 
 ```toml
 [routing]
-execution_preference = "browser-first"
+execution_preference = "prefer-browser"
 api_fallback = true
+browser_fairness_enabled = true
+browser_sticky_affinity = true
+browser_recovery_penalty = 8
+browser_recovery_max_penalty = 40
 ```
 
-The exact configuration shape may change during implementation.
+### Exit criteria
+
+Equal-quality browser accounts share traffic predictably, persistent conversations do not churn sessions unnecessarily, recently unstable browsers recover cautiously, and API fallback is explicit and explainable.
 
 ---
 
