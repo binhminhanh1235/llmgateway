@@ -411,15 +411,16 @@ impl BrowserProviderRegistry {
             }
         };
         if !session.enabled || session.status != "ready" {
-            return self
-                .cache_diagnostics(unavailable_diagnostics(
-                    account_id,
-                    provider_kind,
-                    adapter.adapter_id(),
-                    &binding,
-                    &format!("browser session is {}", session.status),
-                ))
-                .await;
+            // Session lifecycle can transition from login_required -> ready immediately
+            // after interactive verification. Do not cache this transient diagnostic,
+            // otherwise a successful login can remain unroutable for the health TTL.
+            return unavailable_diagnostics(
+                account_id,
+                provider_kind,
+                adapter.adapter_id(),
+                &binding,
+                &format!("browser session is {}", session.status),
+            );
         }
 
         let diagnostics = adapter
