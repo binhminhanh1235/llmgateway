@@ -124,7 +124,10 @@ impl Gateway {
             }
         };
 
-        let mut routes = self.router.plan(requested_model).await;
+        let mut routes = self
+            .router
+            .plan_for_body(requested_model, Some(body))
+            .await;
         if let Some(preferred_route) = preferred_route {
             if let Some(index) = routes.iter().position(|route| route.id == preferred_route) {
                 let preferred = routes.remove(index);
@@ -136,7 +139,8 @@ impl Gateway {
             return Err(self.finish_execution_error(&request_id, error).await);
         }
 
-        let estimated_input_tokens = QuotaUsageStore::estimate_input_tokens(body);
+        let upstream_body = sanitized_upstream_body(body);
+        let estimated_input_tokens = QuotaUsageStore::estimate_input_tokens(&upstream_body);
         let mut last_error: Option<GatewayError> = None;
 
         for (attempt_index, route) in routes.into_iter().enumerate() {
@@ -165,7 +169,10 @@ impl Gateway {
             };
 
             let attempt_started = Instant::now();
-            match self.send_route_chat(provider, account, &route, body).await {
+            match self
+                .send_route_chat(provider, account, &route, &upstream_body)
+                .await
+            {
                 Ok(response) if response.status().is_success() => {
                     let status = response.status();
                     let duration_ms = attempt_started.elapsed().as_millis();
@@ -470,6 +477,14 @@ impl Gateway {
             .await
             .map_err(|error| GatewayError::Transport(error.to_string()))
     }
+}
+
+fn sanitized_upstream_body(body: &Value) -> Value {
+    let mut sanitized = body.clone();
+    if let Some(object) = sanitized.as_object_mut() {
+        object.remove("llmgateway_task");
+    }
+    sanitized
 }
 
 fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
