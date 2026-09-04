@@ -112,7 +112,7 @@
         <div class="browser-empty-icon">◎</div>
         <div>
           <strong>No browser accounts yet</strong>
-          <p>Create a Gemini or Qwen browser account. llmgateway will generate the linked session, provider, route, and isolated profile configuration for you.</p>
+          <p>Create a ChatGPT, Gemini, or Qwen browser account. llmgateway will generate the linked session, provider, route, and isolated profile configuration for you.</p>
           <button type="button" class="browser-primary-action" data-open-browser-wizard>+ Add browser account</button>
         </div>
         <span class="browser-empty-meta">${summary?.profile_root ? `Profiles: ${escapeHtml(summary.profile_root)}` : "Isolated profiles"}</span>
