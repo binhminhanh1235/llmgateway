@@ -9,6 +9,8 @@ use crate::{
     quota_usage_runtime,
     routing::Router,
 };
+use axum::http::Response as HttpResponse;
+use futures_util::StreamExt;
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
     Client, StatusCode,
@@ -37,6 +39,83 @@ pub struct RoutedResponse {
     pub route: RouteConfig,
     pub usage_event_id: Option<String>,
     pub request_id: String,
+    pub started_at: Instant,
+}
+
+struct ExecutionStreamGuard {
+    store: Arc<ExecutionTraceStore>,
+    request_id: String,
+    route_id: String,
+    started_at: Instant,
+    first_byte_ms: Option<u128>,
+    chunk_count: u64,
+    byte_count: u64,
+    finished: bool,
+}
+
+impl ExecutionStreamGuard {
+    fn observe(&mut self, bytes: usize) {
+        if self.first_byte_ms.is_none() {
+            self.first_byte_ms = Some(self.started_at.elapsed().as_millis());
+        }
+        self.chunk_count = self.chunk_count.saturating_add(1);
+        self.byte_count = self.byte_count.saturating_add(bytes as u64);
+    }
+
+    async fn finish(&mut self, outcome: &str, error: Option<&str>) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let partial = outcome != "completed" && self.chunk_count > 0;
+        if let Err(trace_error) = self
+            .store
+            .finish_stream(
+                &self.request_id,
+                &self.route_id,
+                self.first_byte_ms,
+                self.chunk_count,
+                self.byte_count,
+                outcome,
+                partial,
+                error,
+            )
+            .await
+        {
+            warn!(%trace_error, request_id = %self.request_id, "failed to finish execution stream trace");
+        }
+    }
+}
+
+impl Drop for ExecutionStreamGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let store = self.store.clone();
+        let request_id = self.request_id.clone();
+        let route_id = self.route_id.clone();
+        let first_byte_ms = self.first_byte_ms;
+        let chunk_count = self.chunk_count;
+        let byte_count = self.byte_count;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let error = "downstream stream dropped before completion";
+                let _ = store
+                    .finish_stream(
+                        &request_id,
+                        &route_id,
+                        first_byte_ms,
+                        chunk_count,
+                        byte_count,
+                        "cancelled",
+                        chunk_count > 0,
+                        Some(error),
+                    )
+                    .await;
+            });
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -128,6 +207,8 @@ impl Gateway {
         body: &Value,
         preferred_route: Option<&str>,
     ) -> Result<RoutedResponse, GatewayError> {
+        let started_at = Instant::now();
+        let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         let request_id = match self
             .execution_traces
             .start(requested_model, preferred_route)
@@ -238,13 +319,24 @@ impl Gateway {
                         }
                     }
                     self.router.mark_success(&route.id, adaptive_latency_ms).await;
-                    self.complete_execution(&request_id, "success", Some(&route.id), None)
-                        .await;
+                    if is_stream {
+                        if let Err(error) = self
+                            .execution_traces
+                            .start_stream(&request_id, &route.id)
+                            .await
+                        {
+                            warn!(%error, request_id, "failed to mark execution stream as started");
+                        }
+                    } else {
+                        self.complete_execution(&request_id, "success", Some(&route.id), None)
+                            .await;
+                    }
                     return Ok(RoutedResponse {
                         response,
                         route,
                         usage_event_id,
                         request_id,
+                        started_at,
                     });
                 }
                 Ok(response) => {
@@ -393,6 +485,68 @@ impl Gateway {
 
         let error = last_error.unwrap_or_else(|| GatewayError::NoRoute(requested_model.to_string()));
         Err(self.finish_execution_error(&request_id, error).await)
+    }
+
+    pub fn trace_stream_response(
+        &self,
+        response: reqwest::Response,
+        request_id: String,
+        route_id: String,
+        started_at: Instant,
+    ) -> reqwest::Response {
+        let status = response.status();
+        let version = response.version();
+        let headers = response.headers().clone();
+        let mut upstream = response.bytes_stream();
+        let store = self.execution_traces.clone();
+
+        let stream = async_stream::stream! {
+            let mut guard = ExecutionStreamGuard {
+                store,
+                request_id,
+                route_id,
+                started_at,
+                first_byte_ms: None,
+                chunk_count: 0,
+                byte_count: 0,
+                finished: false,
+            };
+
+            let mut sse_tail = Vec::<u8>::new();
+            while let Some(item) = upstream.next().await {
+                match item {
+                    Ok(bytes) => {
+                        guard.observe(bytes.len());
+                        let mut scan = Vec::with_capacity(sse_tail.len() + bytes.len());
+                        scan.extend_from_slice(&sse_tail);
+                        scan.extend_from_slice(&bytes);
+                        if scan.windows(b"data: [DONE]".len()).any(|window| window == b"data: [DONE]") {
+                            guard.finish("completed", None).await;
+                        }
+                        let keep = scan.len().min(32);
+                        sse_tail.clear();
+                        sse_tail.extend_from_slice(&scan[scan.len().saturating_sub(keep)..]);
+                        yield Ok::<_, std::io::Error>(bytes);
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        guard.finish("failed", Some(&message)).await;
+                        yield Err(std::io::Error::other(message));
+                        return;
+                    }
+                }
+            }
+
+            guard.finish("completed", None).await;
+        };
+
+        let mut response = HttpResponse::builder()
+            .status(status)
+            .version(version)
+            .body(reqwest::Body::wrap_stream(stream))
+            .expect("stream response builder uses validated upstream metadata");
+        *response.headers_mut() = headers;
+        reqwest::Response::from(response)
     }
 
     async fn record_execution_attempt(&self, record: AttemptRecord<'_>) {

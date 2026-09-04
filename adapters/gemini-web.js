@@ -253,6 +253,181 @@
 
   const responseTexts = (context) => queryAll(context, "response").map(text).filter(Boolean);
 
+  const streamJobs = globalThis.__LLMGATEWAY_STREAM_JOBS__ || new Map();
+  globalThis.__LLMGATEWAY_STREAM_JOBS__ = streamJobs;
+
+  const classifyStreamError = (error) => {
+    const message = String(error?.message || error || "browser stream failed");
+    let code = "adapter_execution_error";
+    if (/^ADAPTER_INCOMPATIBLE:/i.test(message)) code = "adapter_incompatible";
+    else if (/^(MODEL_NOT_FOUND|MODEL_PICKER_NOT_FOUND):/i.test(message)) code = "model_unavailable";
+    else if (/^LOGIN_REQUIRED:/i.test(message)) code = "login_required";
+    else if (/^RESPONSE_TIMEOUT:/i.test(message)) code = "response_timeout";
+    else if (/^STREAM_CANCELLED:/i.test(message)) code = "cancelled";
+    else if (/^INVALID_REQUEST:/i.test(message)) code = "invalid_request";
+    return { code, message };
+  };
+
+  const streamChunk = (state, delta, finishReason = null) => ({
+    id: state.completionId,
+    object: "chat.completion.chunk",
+    model: state.model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }]
+  });
+
+  const startStreamJob = (request, context) => {
+    const streamId = "gemini_stream_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+    const state = {
+      streamId,
+      completionId: "chatcmpl_gemini_web_" + Date.now(),
+      model: request?.model || context?.model_label || "gemini-web",
+      request,
+      context,
+      answer: "",
+      delivered: "",
+      done: false,
+      finalEmitted: false,
+      roleEmitted: false,
+      cancelled: false,
+      error: null,
+      toolCalls: null
+    };
+    streamJobs.set(streamId, state);
+
+    Promise.resolve().then(async () => {
+      try {
+        await selectModel(context);
+        const composer = await waitFor(() => queryFirst(context, "input"), 15000);
+        if (!composer) throw new Error("ADAPTER_INCOMPATIBLE: Gemini prompt composer disappeared");
+
+        const before = responseTexts(context);
+        const baselineText = before[before.length - 1] || "";
+        const prompt = formatMessages(request);
+        if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
+        setComposer(composer, prompt);
+
+        const send = await waitFor(() => queryFirst(context, "send"), 5000);
+        if (!send) {
+          if (queryFirst(context, "login")) throw new Error("LOGIN_REQUIRED: Gemini session expired");
+          throw new Error("ADAPTER_INCOMPATIBLE: Gemini send control was not found");
+        }
+        send.click();
+
+        const startedAt = Date.now();
+        let last = "";
+        let stableSince = 0;
+        let answer = "";
+        while (Date.now() - startedAt < Number(context?.response_timeout_ms || 180000)) {
+          if (state.cancelled) {
+            const stop = queryFirst(context, "completion");
+            try { stop?.click(); } catch (_) {}
+            throw new Error("STREAM_CANCELLED: client disconnected or cancelled");
+          }
+          if (queryFirst(context, "login")) {
+            throw new Error("LOGIN_REQUIRED: Gemini session expired while waiting for a response");
+          }
+          const responses = responseTexts(context);
+          const candidate = responses[responses.length - 1] || "";
+          const responseAdvanced = responses.length > before.length || (candidate && candidate !== baselineText);
+          const generating = Boolean(queryFirst(context, "completion"));
+          if (!responseAdvanced) {
+            await sleep(120);
+            continue;
+          }
+          if (candidate && candidate !== last) {
+            last = candidate;
+            answer = candidate;
+            state.answer = candidate;
+            stableSince = Date.now();
+          } else if (candidate && !generating && stableSince && Date.now() - stableSince >= 900) {
+            answer = candidate;
+            state.answer = candidate;
+            break;
+          }
+          await sleep(120);
+        }
+        if (!answer) throw new Error("RESPONSE_TIMEOUT: Gemini did not produce a readable response");
+
+        state.answer = answer;
+        state.toolCalls = parseToolCalls(answer, request);
+        state.done = true;
+      } catch (error) {
+        state.error = classifyStreamError(error);
+        state.done = true;
+      } finally {
+        const cleanupTimer = setTimeout(() => {
+          if (streamJobs.get(streamId) === state) streamJobs.delete(streamId);
+        }, 60000);
+        cleanupTimer?.unref?.();
+      }
+    });
+
+    return {
+      stream_id: streamId,
+      status: 200,
+      content_type: "text/event-stream"
+    };
+  };
+
+  const pollStreamJob = (streamId) => {
+    const state = streamJobs.get(String(streamId || ""));
+    if (!state) {
+      return {
+        events: [],
+        done: true,
+        error: { code: "stream_not_found", message: "browser stream no longer exists" }
+      };
+    }
+    if (state.error) {
+      streamJobs.delete(state.streamId);
+      return { events: [], done: true, error: state.error };
+    }
+
+    const events = [];
+    if (!state.toolCalls) {
+      const current = String(state.answer || "");
+      if (current.startsWith(state.delivered)) {
+        const delta = current.slice(state.delivered.length);
+        if (delta) {
+          const payload = state.roleEmitted
+            ? { content: delta }
+            : { role: "assistant", content: delta };
+          state.roleEmitted = true;
+          state.delivered = current;
+          events.push(streamChunk(state, payload));
+        }
+      } else if (state.delivered) {
+        state.error = {
+          code: "stream_rewrite_detected",
+          message: "provider rewrote text that was already emitted"
+        };
+        streamJobs.delete(state.streamId);
+        return { events: [], done: true, error: state.error };
+      }
+    }
+
+    if (state.done && !state.finalEmitted) {
+      if (state.toolCalls) {
+        events.push(streamChunk(state, { role: "assistant", tool_calls: state.toolCalls }, "tool_calls"));
+      } else {
+        events.push(streamChunk(state, {}, "stop"));
+      }
+      state.finalEmitted = true;
+    }
+
+    const done = state.done && state.finalEmitted;
+    if (done) streamJobs.delete(state.streamId);
+    return { events, done, error: null };
+  };
+
+  const cancelStreamJob = (streamId) => {
+    const state = streamJobs.get(String(streamId || ""));
+    if (!state) return { cancelled: false, missing: true };
+    state.cancelled = true;
+    try { queryFirst(state.context, "completion")?.click(); } catch (_) {}
+    return { cancelled: true };
+  };
+
   globalThis.__LLMGATEWAY_ADAPTER__ = {
     meta: {
       contract_version: CONTRACT_VERSION,
@@ -287,6 +462,18 @@
         message: "Gemini composer detected",
         page_signature: "gemini-composer-v1"
       };
+    },
+
+    async streamStart(request, context) {
+      return startStreamJob(request, context);
+    },
+
+    async streamPoll(request) {
+      return pollStreamJob(request?.stream_id);
+    },
+
+    async streamCancel(request) {
+      return cancelStreamJob(request?.stream_id);
     },
 
     async chat(request, context) {

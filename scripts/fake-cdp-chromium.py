@@ -3,9 +3,12 @@ import base64
 import hashlib
 import json
 import os
+import re
 import socketserver
 import struct
 import sys
+import threading
+import time
 from urllib.parse import urlparse
 
 profile = ""
@@ -26,18 +29,39 @@ page_url = (
     else "https://chat.qwen.ai/"
 )
 
+stream_lock = threading.Lock()
+stream_seq = 0
+streams = {}
+
+def expression_request(expression):
+    match = re.search(r"const __request = (.*?);\n", expression, re.S)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(1))
+    except Exception:
+        return {}
+
+def write_marker(name, value="1"):
+    try:
+        with open(os.path.join(profile, name), "w", encoding="utf-8") as f:
+            f.write(str(value))
+    except Exception:
+        pass
+
 def adapter_identity(expression):
     if "gemini-web" in expression or '"provider":"gemini"' in expression:
         return "gemini-web", "gemini", "gemini-web-default"
     return "qwen-web", "qwen", "qwen-web-default"
 
 def envelope_for(expression):
+    global stream_seq
     adapter_id, provider, model = adapter_identity(expression)
     meta = {
         "contract_version": 1,
         "id": adapter_id,
         "provider": provider,
-        "adapter_version": "ci-fake-cdp-v1",
+        "adapter_version": "ci-fake-cdp-v2-stream",
     }
     probe = {
         "ok": True,
@@ -45,6 +69,112 @@ def envelope_for(expression):
         "message": "fake authenticated page ready",
         "page_signature": f"ci-{provider}-authenticated",
     }
+
+    if 'const __operation = "chat_stream_start"' in expression:
+        request = expression_request(expression)
+        prompt_text = json.dumps(request.get("messages", []), ensure_ascii=False)
+        if "force-browser-stream-fallback" in prompt_text:
+            write_marker("stream-start-failed", "forced")
+            return {
+                "meta": meta,
+                "probe": probe,
+                "error": {
+                    "code": "stream_start_error",
+                    "message": "forced browser stream start failure",
+                },
+            }
+        with stream_lock:
+            stream_seq += 1
+            stream_id = f"ci-stream-{stream_seq}"
+            streams[stream_id] = {"poll": 0, "cancelled": False, "model": model}
+        write_marker("stream-started", stream_id)
+        return {
+            "meta": meta,
+            "probe": probe,
+            "stream": {
+                "stream_id": stream_id,
+                "status": 200,
+                "content_type": "text/event-stream",
+            },
+        }
+
+    if 'const __operation = "chat_stream_poll"' in expression:
+        request = expression_request(expression)
+        stream_id = str(request.get("stream_id", ""))
+        with stream_lock:
+            state = streams.get(stream_id)
+            if state is None:
+                return {
+                    "meta": meta,
+                    "stream": {
+                        "events": [],
+                        "done": True,
+                        "error": {"code": "stream_not_found", "message": "fake stream not found"},
+                    },
+                }
+            if state["cancelled"]:
+                return {
+                    "meta": meta,
+                    "stream": {
+                        "events": [],
+                        "done": True,
+                        "error": {"code": "cancelled", "message": "fake stream cancelled"},
+                    },
+                }
+            state["poll"] += 1
+            poll = state["poll"]
+            model = state["model"]
+
+        write_marker("stream-poll-count", poll)
+        completion_id = "chatcmpl_browser_stream"
+        if poll == 1:
+            events = [{
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": "browser-"}, "finish_reason": None}],
+            }]
+            return {"meta": meta, "stream": {"events": events, "done": False, "error": None}}
+        if poll == 2:
+            time.sleep(0.15)
+            events = [{
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": "stream-"}, "finish_reason": None}],
+            }]
+            return {"meta": meta, "stream": {"events": events, "done": False, "error": None}}
+
+        time.sleep(1.0)
+        events = [
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}],
+            },
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+        with stream_lock:
+            streams.pop(stream_id, None)
+        write_marker("stream-completed", stream_id)
+        return {"meta": meta, "stream": {"events": events, "done": True, "error": None}}
+
+    if 'const __operation = "chat_stream_cancel"' in expression:
+        request = expression_request(expression)
+        stream_id = str(request.get("stream_id", ""))
+        with stream_lock:
+            state = streams.get(stream_id)
+            if state is not None:
+                state["cancelled"] = True
+        write_marker("stream-cancelled", stream_id or "missing")
+        return {"meta": meta, "stream": {"cancelled": state is not None}}
+
     if 'const __operation = "chat"' in expression:
         return {
             "meta": meta,
@@ -184,6 +314,7 @@ class Handler(socketserver.StreamRequestHandler):
             body = json.dumps(target(port, "fake-ephemeral")).encode()
             self.http_response(200, body, "application/json")
         elif method == "GET" and parsed.path.startswith("/json/close/"):
+            write_marker("target-closed", parsed.path.rsplit("/", 1)[-1])
             self.http_response(200, b"Target is closing", "text/plain")
         else:
             self.http_response(404, b"", "text/plain")

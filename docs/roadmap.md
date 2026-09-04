@@ -1,6 +1,6 @@
 # llmgateway roadmap
 
-This roadmap tracks the path from the current v0.29 browser-first beta to a stable v1.0.
+This roadmap tracks the path from the current v0.30 browser-first beta to a stable v1.0.
 
 ## Product direction
 
@@ -38,7 +38,7 @@ The security boundary stays unchanged:
 - CAPTCHA/2FA and normal authentication are completed interactively by the user;
 - browser integrations must respect provider terms, anti-abuse controls and quota limits.
 
-## Current baseline: v0.29
+## Current baseline: v0.30
 
 Already implemented:
 
@@ -80,9 +80,15 @@ Already implemented:
 - hot activation of browser sessions, Chromium sessions, provider bindings, accounts, routes, and catalog models;
 - immutable request-level config snapshots across routing/execution during hot reload;
 - browser account disable/re-enable, re-authentication, restart, stop, and recovery controls;
-- deterministic browser-account hot-activation E2E coverage.
+- deterministic browser-account hot-activation E2E coverage;
+- true incremental CDP streaming for built-in Gemini/Qwen providers;
+- downstream-driven browser stream polling and bounded in-page stream state;
+- client-disconnect cancellation with provider Stop + ephemeral target cleanup;
+- configurable first-byte and idle-stream timeouts;
+- partial/cancelled stream metadata in Execution Trace and Trace Console;
+- deterministic OpenAI Chat, Responses and Anthropic browser-stream compatibility E2E.
 
-The remaining browser work is therefore mostly **true streaming and deeper multi-browser intelligence**, rather than setup plumbing or a second routing architecture.
+The remaining browser work is therefore mostly **deeper multi-browser intelligence**, rather than setup plumbing or streaming transport.
 
 ---
 
@@ -207,13 +213,15 @@ A new user can add multiple Gemini/Qwen browser accounts from the UI and start r
 
 ---
 
-## v0.30 - True Browser Streaming and Cancellation
+## v0.30 - True Browser Streaming and Cancellation ✅
+
+**Status: shipped**
 
 **Priority: P0**
 
 Goal: browser-backed requests should feel like native streaming LLM APIs.
 
-Current CDP adapters can return SSE, but the payload is buffered before forwarding. v0.30 removes that limitation.
+v0.30 removes the old full-answer buffering boundary for built-in Gemini/Qwen adapters. The page exposes additive stream start/poll/cancel primitives; Rust converts those events to an upstream SSE body lazily, so downstream reads control CDP polling and disconnects trigger cancellation/cleanup.
 
 ### Scope
 

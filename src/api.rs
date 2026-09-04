@@ -53,7 +53,13 @@ pub async fn openai_chat(
             let route_id = routed.route.id.clone();
             let request_id = routed.request_id.clone();
             if is_stream {
-                let stream = routed.response.bytes_stream().map_err(std::io::Error::other);
+                let response = state.gateway.trace_stream_response(
+                    routed.response,
+                    request_id.clone(),
+                    route_id.clone(),
+                    routed.started_at,
+                );
+                let stream = response.bytes_stream().map_err(std::io::Error::other);
                 response_with_route_and_request(
                     StatusCode::OK,
                     "text/event-stream",
@@ -145,8 +151,14 @@ pub async fn openai_responses(
             let route_id = routed.route.id.clone();
             let request_id = routed.request_id.clone();
             if is_stream {
-                let stream = responses::openai_stream_to_responses(
+                let response = state.gateway.trace_stream_response(
                     routed.response,
+                    request_id.clone(),
+                    route_id.clone(),
+                    routed.started_at,
+                );
+                let stream = responses::openai_stream_to_responses(
+                    response,
                     requested_model.clone(),
                 );
                 let (tx, rx) = oneshot::channel();
@@ -250,8 +262,14 @@ pub async fn anthropic_messages(
             let route_id = routed.route.id.clone();
             let request_id = routed.request_id.clone();
             if is_stream {
+                let response = state.gateway.trace_stream_response(
+                    routed.response,
+                    request_id.clone(),
+                    route_id.clone(),
+                    routed.started_at,
+                );
                 let stream =
-                    anthropic::openai_stream_to_anthropic(routed.response, requested_model);
+                    anthropic::openai_stream_to_anthropic(response, requested_model);
                 response_with_route_and_request(
                     StatusCode::OK,
                     "text/event-stream",

@@ -205,6 +205,94 @@ async function testQwenToolBridgeStream() {
 }
 
 
+
+async function testQwenIncrementalStream() {
+  const input = new FakeTextAreaElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  send.onClick = () => {
+    response.innerText = "Hello";
+    response.textContent = response.innerText;
+    setTimeout(() => {
+      response.innerText = "Hello world";
+      response.textContent = response.innerText;
+    }, 180);
+  };
+  installPage({
+    host: "chat.qwen.ai",
+    nodes: {
+      "textarea.message-input-textarea": input,
+      "button.send-button": send,
+      "div.response-message-content.phase-answer": response
+    }
+  });
+  const adapter = loadAdapter("adapters/qwen-web.js");
+  const started = await adapter.streamStart({
+    model: "qwen-web-test",
+    stream: true,
+    messages: [{ role: "user", content: "Say hello" }]
+  }, { response_timeout_ms: 4000 });
+
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  const first = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(first.error, null);
+  assert.equal(first.done, false);
+  assert.equal(first.events.length, 1, JSON.stringify(first));
+  assert.equal(first.events[0].choices[0].delta.content, "Hello");
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const second = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(second.error, null);
+  assert.equal(second.done, false);
+  assert.equal(second.events.length, 1, JSON.stringify(second));
+  assert.equal(second.events[0].choices[0].delta.content, " world");
+
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const final = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(final.error, null);
+  assert.equal(final.done, true);
+  assert.equal(final.events.at(-1).choices[0].finish_reason, "stop");
+}
+
+async function testGeminiStreamCancellation() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const stop = new FakeElement("Stop");
+  const send = new FakeElement("Send");
+  let stopped = false;
+  stop.onClick = () => { stopped = true; };
+  send.onClick = () => {
+    response.innerText = "Partial";
+    response.textContent = response.innerText;
+  };
+  installPage({
+    host: "gemini.google.com",
+    nodes: {
+      "div[aria-label='Enter a prompt for Gemini']": input,
+      "button[aria-label='Send message']": send,
+      "button[aria-label='Stop response']": stop,
+      "div.markdown.markdown-main-panel": response
+    }
+  });
+  const adapter = loadAdapter("adapters/gemini-web.js");
+  const started = await adapter.streamStart({
+    model: "gemini-web-test",
+    stream: true,
+    messages: [{ role: "user", content: "Keep talking" }]
+  }, { response_timeout_ms: 4000 });
+
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  const cancelled = await adapter.streamCancel({ stream_id: started.stream_id });
+  assert.equal(cancelled.cancelled, true);
+  assert.equal(stopped, true);
+
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  const polled = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(polled.done, true);
+  assert.equal(polled.error.code, "cancelled");
+}
+
+
 async function testMidRequestLoginExpiry() {
   const input = new FakeElement();
   const nodes = {
@@ -231,5 +319,7 @@ await testGemini();
 await testQwen();
 await testGeminiToolBridge();
 await testQwenToolBridgeStream();
+await testQwenIncrementalStream();
+await testGeminiStreamCancellation();
 await testMidRequestLoginExpiry();
 console.log("built-in Gemini/Qwen fake-page adapter fixtures passed");

@@ -6,7 +6,7 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 
 > One conversation. Any model. Context intact.
 
-## Current highlights (v0.29)
+## Current highlights (v0.30)
 
 - OpenAI-compatible `POST /v1/chat/completions`
 - OpenAI-compatible `POST /v1/responses`
@@ -22,6 +22,10 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 - Hot activation of new browser accounts, routes, sessions, and catalog entries without gateway restart
 - Browser account disable/re-enable, re-authenticate, restart, stop, and recovery controls
 - Request-pinned immutable config snapshots during hot reload
+- True incremental Gemini/Qwen browser streaming through CDP
+- Downstream disconnect cancellation with ephemeral-tab cleanup
+- Browser stream first-byte/idle timeouts and partial-response execution traces
+- OpenAI Chat, Responses, Anthropic Messages, and persistent-thread browser streaming
 - Versioned browser adapter contract with page-drift diagnostics
 - Stateless per-request browser chat tabs for built-in providers
 - Sticky route affinity with automatic fallback
@@ -122,6 +126,10 @@ Bind each account to an isolated browser session, enable the corresponding Chrom
 In v0.29, the normal setup path is the **Accounts** UI: choose **Add browser account**, select Gemini Web or Qwen Web, and llmgateway safely writes the linked session/binding/Chromium/provider/account/route configuration and hot-activates it. The gateway process does not need to restart. From the same account card you can disable/re-enable routing, re-authenticate, restart Chromium, stop the browser, and inspect lifecycle/adapter state. Isolated Chromium profiles are preserved when an account is disabled or stopped.
 
 See [Browser Accounts UX](docs/browser-accounts-ux.md) for the managed setup lifecycle and admin endpoints.
+
+v0.30 streams built-in Gemini/Qwen responses incrementally from the provider page rather than waiting for the full DOM answer. Browser stream polling is downstream-driven, so a slow client naturally applies backpressure. Disconnecting a client cancels the browser operation and closes the ephemeral provider tab. First-byte/idle timeouts and partial/cancelled stream metadata are visible through Execution Trace and Trace Console.
+
+See [Browser streaming and cancellation](docs/browser-streaming.md) for the stream contract, timeout settings, cleanup guarantees, and compatibility behavior.
 
 Built-in adapters default to fresh provider chat tabs per request while reusing the authenticated Chromium profile. Optional `model_labels` select provider UI models explicitly; without a mapping, the current provider UI model is preserved.
 
@@ -391,12 +399,12 @@ Current browser milestones:
 - **v0.27 Browser Account Reliability** ✅ - startup reconciliation, reconnect/recovery, explicit lifecycle states, live CDP readiness, browser-first preference, and failover/recovery E2E.
 - **v0.28 Production-grade Browser Provider Adapters** ✅ - first-class Gemini/Qwen providers, contract v1, adapter health/page-drift diagnostics, model mapping, stateless provider tabs, and deterministic fake-page/CDP fixtures.
 - **v0.29 Browser Accounts UX** ✅ - managed Gemini/Qwen account wizard, safe config persistence, hot activation, lifecycle controls, immutable request snapshots, and deterministic hot-activation E2E coverage.
+- **v0.30 True Browser Streaming and Cancellation** ✅ - incremental CDP streaming, downstream-driven backpressure, disconnect cancellation, first-byte/idle timeouts, stream traces, and Chat/Responses/Anthropic E2E coverage.
 
 Next milestones:
 
-1. **v0.30 True Browser Streaming and Cancellation** - incremental CDP streaming, cancellation, backpressure, disconnect handling, and streaming compatibility tests.
-2. **v0.31 Browser-aware Routing Intelligence** - multi-account fairness, session-aware affinity, browser-specific recovery, and deterministic browser-to-API fallback.
-3. **v0.32+** - per-client policies, usage/cost intelligence, model/cost intelligence, production hardening, and distribution.
+1. **v0.31 Browser-aware Routing Intelligence** - multi-account fairness, session-aware affinity, browser-specific recovery, and deterministic browser-to-API fallback.
+2. **v0.32+** - per-client policies, usage/cost intelligence, model/cost intelligence, production hardening, and distribution.
 
 See the detailed [browser-first roadmap](docs/roadmap.md), including release gates for v1.0.
 

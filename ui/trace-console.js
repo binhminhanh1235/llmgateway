@@ -139,7 +139,14 @@
     const attempts = Array.isArray(trace.attempts) ? trace.attempts : [];
     const totalDuration = attempts.reduce((sum, attempt) => sum + Number(attempt.duration_ms || 0), 0);
     const selectedRoute = trace.selected_route || "None";
-    const terminal = trace.status === "success" ? "Completed" : "Failed";
+    const stream = trace.stream || null;
+    const terminal = trace.status === "success"
+      ? "Completed"
+      : trace.status === "cancelled"
+        ? "Cancelled"
+        : trace.status === "streaming"
+          ? "Streaming"
+          : "Failed";
     return `
       <div class="trace-detail-header">
         <div>
@@ -157,7 +164,13 @@
         ${summaryCell("Upstream time", `${totalDuration.toLocaleString()} ms`)}
         ${summaryCell("Started", formatTime(trace.started_at, true))}
         ${summaryCell("Result", terminal)}
+        ${stream ? summaryCell("First byte", stream.first_byte_ms == null ? "pending" : `${Number(stream.first_byte_ms).toLocaleString()} ms`) : ""}
+        ${stream ? summaryCell("Stream chunks", Number(stream.chunk_count || 0).toLocaleString()) : ""}
+        ${stream ? summaryCell("Stream bytes", Number(stream.byte_count || 0).toLocaleString()) : ""}
+        ${stream ? summaryCell("Stream outcome", stream.outcome || "unknown") : ""}
       </div>
+
+      ${stream ? `<div class="trace-context-note"><strong>Streaming:</strong> ${escapeHtml(stream.outcome || "unknown")} · ${stream.partial_response ? "partial response" : "complete response"}${stream.error ? ` · ${escapeHtml(stream.error)}` : ""}</div>` : ""}
 
       ${trace.preferred_route ? `<div class="trace-context-note"><strong>Preferred route:</strong> ${escapeHtml(trace.preferred_route)}</div>` : ""}
 
@@ -221,7 +234,8 @@
   function statusTone(status) {
     if (status === "success") return "success";
     if (status === "failed") return "danger";
-    if (status === "running") return "working";
+    if (status === "cancelled") return "warning";
+    if (status === "running" || status === "streaming") return "working";
     return "muted";
   }
 

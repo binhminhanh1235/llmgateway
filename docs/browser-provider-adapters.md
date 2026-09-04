@@ -262,9 +262,9 @@ When the normalized request contains `tools`, the adapter:
 5. converts it into OpenAI-compatible `tool_calls`;
 6. lets the existing Anthropic/Responses compatibility layer translate it for Claude Code or Codex.
 
-Both non-streaming and the current buffered-SSE browser path emit standard OpenAI tool-call shapes.
+Both non-streaming and v0.30 incremental browser streaming emit standard OpenAI tool-call shapes. Tool-call envelopes remain buffered until the adapter can validate and normalize the complete tool-call payload, while ordinary text is emitted incrementally.
 
-This is a compatibility bridge, not provider-native function calling. Model compliance with the prompt protocol is therefore best-effort. True incremental browser streaming remains the v0.30 milestone.
+This is a compatibility bridge, not provider-native function calling. Model compliance with the prompt protocol is therefore best-effort. v0.30 adds incremental text streaming and cancellation without changing that tool-bridge limitation.
 
 ## Failure semantics
 
