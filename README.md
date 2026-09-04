@@ -6,7 +6,7 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 
 > One conversation. Any model. Context intact.
 
-## Current highlights (v0.27)
+## Current highlights (v0.28)
 
 - OpenAI-compatible `POST /v1/chat/completions`
 - OpenAI-compatible `POST /v1/responses`
@@ -17,6 +17,9 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 - Multi-provider and multi-account routing
 - Browser-first virtual-model routing with optional API fallback
 - Browser session startup reconciliation and automatic crash recovery
+- First-class `browser-gemini` and `browser-qwen` providers
+- Versioned browser adapter contract with page-drift diagnostics
+- Stateless per-request browser chat tabs for built-in providers
 - Sticky route affinity with automatic fallback
 - Model catalog and per-account model discovery
 - Canonical physical model IDs plus virtual routing models
@@ -284,6 +287,8 @@ v0.27 makes virtual-model execution browser-first by default. Eligible browser r
 
 Browser sessions are reconciled with the live Chromium/CDP runtime at startup and periodically afterward. A still-running browser is reconnected after a gateway restart. A previously-ready browser that crashes can be relaunched with the same isolated profile and re-verified automatically; a deliberate Stop, login-required state, or attention state is not auto-launched.
 
+v0.28 adds built-in Gemini Web and Qwen Web adapters behind a versioned contract. Each adapter is probed before it becomes routable. Missing/changed provider UI controls are surfaced as `browser_adapter_incompatible` rather than generic transport failures. Built-in requests default to a fresh provider chat tab inside the same authenticated profile, so provider-native conversation history does not silently compete with llmgateway's own persistent context. Optional `model_labels` map logical route models to provider UI model names, while selector overrides provide a local escape hatch when a provider changes DOM details.
+
 v0.26 added task-aware routing on top of readiness, quota, configured priority, and adaptive latency/reliability. Requests are classified locally as coding, reasoning, long-context, simple chat, or general. Routes can advertise policy metadata such as `coding`, `reasoning`, `long-context`, `cheap`, and `fast`; unknown metadata remains neutral for backward compatibility. A known `context_window` that cannot fit the request is excluded before ranking.
 
 The route score remains explainable:
@@ -353,17 +358,17 @@ A future retriever can add local/remote embeddings and reranking behind the same
 
 The roadmap is now **browser-first** because authenticated browser accounts are the primary local execution path. API-key accounts remain supported as optional fallbacks.
 
-Current browser milestone:
+Current browser milestones:
 
 - **v0.27 Browser Account Reliability** ✅ - startup reconciliation, reconnect/recovery, explicit lifecycle states, live CDP readiness, browser-first preference, and failover/recovery E2E.
+- **v0.28 Production-grade Browser Provider Adapters** ✅ - first-class Gemini/Qwen providers, contract v1, adapter health/page-drift diagnostics, model mapping, stateless provider tabs, and deterministic fake-page/CDP fixtures.
 
 Next milestones:
 
-1. **v0.28 Production-grade Browser Provider Adapters** - harden Gemini Web and Qwen Web adapters with diagnostics and regression fixtures.
-3. **v0.29 Browser Accounts UX** - add/login/verify/re-auth/restart/disable accounts from the local UI without hand-authoring several TOML sections.
-4. **v0.30 True Browser Streaming and Cancellation** - incremental CDP streaming, cancellation, backpressure, disconnect handling, and streaming compatibility tests.
-5. **v0.31 Browser-aware Routing Intelligence** - multi-account fairness, session-aware affinity, browser-specific recovery, and deterministic browser-to-API fallback.
-6. **v0.32+** - per-client policies, usage/cost intelligence, model/cost intelligence, production hardening, and distribution.
+1. **v0.29 Browser Accounts UX** - add/login/verify/re-auth/restart/disable accounts from the local UI without hand-authoring several TOML sections.
+2. **v0.30 True Browser Streaming and Cancellation** - incremental CDP streaming, cancellation, backpressure, disconnect handling, and streaming compatibility tests.
+3. **v0.31 Browser-aware Routing Intelligence** - multi-account fairness, session-aware affinity, browser-specific recovery, and deterministic browser-to-API fallback.
+4. **v0.32+** - per-client policies, usage/cost intelligence, model/cost intelligence, production hardening, and distribution.
 
 See the detailed [browser-first roadmap](docs/roadmap.md), including release gates for v1.0.
 
