@@ -1,12 +1,15 @@
 use crate::{
-    browser_session_runtime, chromium_driver_runtime, conversation_runtime,
+    browser_auth_runtime, browser_session_runtime, chromium_driver_runtime, conversation_runtime,
     config::{AccountConfig, ProviderConfig, RouteConfig},
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use reqwest::{header::CONTENT_TYPE, Client, Url};
+use reqwest::{
+    header::{CONTENT_TYPE, COOKIE, USER_AGENT},
+    Client, Url,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -371,6 +374,11 @@ impl BrowserProviderRegistry {
             })
     }
 
+    fn auth_material_available(&self, session_id: &str) -> bool {
+        browser_auth_runtime::get()
+            .is_some_and(|vault| vault.contains(session_id))
+    }
+
     pub async fn adapter_diagnostics(
         &self,
         provider_kind: &str,
@@ -446,11 +454,13 @@ impl BrowserProviderRegistry {
                 "browser session is disabled",
             );
         }
+        let auth_snapshot_ready =
+            provider_kind == "browser-http" && self.auth_material_available(&binding.session);
         if session.status != "ready" {
             let can_reprobe = adapter.is_cdp()
                 && cdp_session_status_probeable(&session.status)
                 && self.cdp_session_live(&binding.session).await;
-            if !can_reprobe {
+            if !auth_snapshot_ready && !can_reprobe {
                 // Session lifecycle can transition immediately during login/re-auth.
                 // Drop any prior ready probe so a later verified generation must be
                 // diagnosed again rather than borrowing stale adapter health.
@@ -486,7 +496,10 @@ impl BrowserProviderRegistry {
             .diagnose(account_id, &session.profile_dir, &binding)
             .await;
 
-        if diagnostics.status == "ready" && session.status != "ready" {
+        if diagnostics.status == "ready"
+            && session.status != "ready"
+            && !auth_snapshot_ready
+        {
             if let Ok(recovered) = store.mark_ready(&binding.session).await {
                 session_marker = recovered.updated_at;
             }
@@ -557,6 +570,10 @@ impl BrowserProviderRegistry {
         };
         if !session.enabled {
             return false;
+        }
+
+        if provider_kind == "browser-http" && self.auth_material_available(&binding.session) {
+            return true;
         }
 
         let adapter = match self.adapters.get(provider_kind) {
@@ -709,7 +726,9 @@ impl BrowserProviderRegistry {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
             })?;
-        if !session.enabled || session.status != "ready" {
+        let auth_snapshot_ready =
+            provider.kind == "browser-http" && self.auth_material_available(&binding.session);
+        if !session.enabled || (session.status != "ready" && !auth_snapshot_ready) {
             return Err(BrowserProviderError::SessionUnavailable {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
@@ -839,12 +858,27 @@ impl BrowserProviderAdapter for HttpBrowserAdapter {
             "{}/chat/completions",
             request.provider.base_url.trim_end_matches('/')
         );
-        self.client
+        let mut upstream = self
+            .client
             .post(url)
             .header(CONTENT_TYPE, "application/json")
-            .header("x-llmgateway-browser-session", request.session_id)
-            .header("x-llmgateway-browser-account", request.account.id)
-            .header("x-llmgateway-route", request.route.id)
+            .header("x-llmgateway-browser-session", &request.session_id)
+            .header("x-llmgateway-browser-account", &request.account.id)
+            .header("x-llmgateway-route", &request.route.id);
+
+        if let Some(vault) = browser_auth_runtime::get() {
+            if let Ok(material) = vault.load(&request.session_id) {
+                let cookie_header = material.cookie_header();
+                if !cookie_header.is_empty() {
+                    upstream = upstream.header(COOKIE, cookie_header);
+                }
+                if !material.user_agent.trim().is_empty() {
+                    upstream = upstream.header(USER_AGENT, material.user_agent);
+                }
+            }
+        }
+
+        upstream
             .json(&upstream_body)
             .send()
             .await
