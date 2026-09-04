@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EMBED_LOG = os.environ.get("FAKE_EMBED_LOG", "/tmp/llmgateway-fake-embeddings.log")
@@ -52,6 +53,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         auth = self.headers.get("authorization", "")
+        if "slow200" in auth:
+            time.sleep(0.15)
         if "quota429" in auth:
             payload = json.dumps({
                 "error": {
