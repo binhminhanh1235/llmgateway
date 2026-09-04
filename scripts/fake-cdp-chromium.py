@@ -26,6 +26,8 @@ os.makedirs(profile, exist_ok=True)
 page_url = (
     "https://gemini.google.com/app"
     if "gemini.google.com" in login_url
+    else "https://chatgpt.com/"
+    if "chatgpt.com" in login_url
     else "https://chat.qwen.ai/"
 )
 
