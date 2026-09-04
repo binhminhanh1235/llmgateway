@@ -3,19 +3,22 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04.3";
+  const ADAPTER_VERSION = "2026.09.04.1";
 
   const defaults = {
     input: [
       "#prompt-textarea",
       "[data-testid='composer-input']",
       "textarea[data-testid='composer-input']",
+      "textarea[name='prompt-textarea']",
       "textarea[placeholder*='Message' i]",
+      "textarea[placeholder*='Ask anything' i]",
       "div#prompt-textarea[contenteditable='true']",
       "[contenteditable='true'][data-testid='composer-input']",
       "[contenteditable='true'][role='textbox']"
     ],
     send: [
+      "#composer-submit-button",
       "button[data-testid='send-button']",
       "button[aria-label='Send prompt']",
       "button[aria-label='Send message']",
@@ -26,10 +29,13 @@
       "button[data-testid='create-new-chat-button']",
       "a[aria-label='New chat']",
       "button[aria-label='New chat']",
+      "a[href='https://chatgpt.com/']",
       "a[href='/']"
     ],
     response: [
       "[data-message-author-role='assistant'] .markdown",
+      "[data-message-author-role='assistant'] .markdown-new-styling",
+      "[data-message-author-role='assistant'] .markdown.prose",
       "[data-message-author-role='assistant'] [data-testid='message-content']",
       "[data-message-author-role='assistant'] .prose",
       "article[data-testid^='conversation-turn-'] [data-message-author-role='assistant'] .markdown"
@@ -48,11 +54,22 @@
       "input[type='password']"
     ],
     modelTrigger: [
+      "button.__composer-pill",
+      ".__composer-pill",
       "button[data-testid='model-switcher-dropdown-button']",
       "button[aria-label*='model selector' i]",
       "button[aria-label*='model' i]"
     ],
+    modelConfigure: [
+      "[data-testid='model-configure-modal']",
+      "[role='menuitem']"
+    ],
+    modelModal: [
+      "[data-testid='modal-intelligence-menu']"
+    ],
     modelOptions: [
+      "[data-testid='modal-intelligence-menu'] button[role='radio']",
+      "button[role='radio']",
       "[role='menuitem']",
       "[role='option']"
     ]
@@ -269,7 +286,7 @@
     let trigger = queryFirst(context, "modelTrigger");
     if (!trigger) {
       const buttons = [...document.querySelectorAll("button")];
-      trigger = buttons.find((button) => /gemini|flash|pro|model/i.test(text(button))) || null;
+      trigger = buttons.find((button) => /model|gpt|chatgpt|instant|thinking|pro|extended/i.test(text(button))) || null;
     }
     if (!trigger) {
       throw new Error("MODEL_PICKER_NOT_FOUND: ChatGPT model picker is not visible");
@@ -279,14 +296,27 @@
 
     trigger.click();
     await sleep(250);
-    let candidates = queryAll(context, "modelOptions");
-    if (!candidates.length) {
-      candidates = [...document.querySelectorAll("[role='menuitem'],[role='option']")];
-    }
-    const match = candidates.find((node) => {
+
+    const findDesiredOption = () => queryAll(context, "modelOptions").find((node) => {
+      if (!isVisible(node)) return false;
       const candidate = normalize(text(node));
       return candidate && (candidate.includes(desiredNorm) || desiredNorm.includes(candidate));
-    });
+    }) || null;
+
+    let match = findDesiredOption();
+    if (!match) {
+      const configure = queryAll(context, "modelConfigure").find((node) => {
+        if (!isVisible(node)) return false;
+        if (node.matches?.("[data-testid='model-configure-modal']")) return true;
+        return /configure/i.test(text(node));
+      }) || null;
+      if (configure) {
+        configure.click();
+        await waitFor(() => queryVisible(context, "modelModal") || findDesiredOption(), 5000);
+        match = findDesiredOption();
+      }
+    }
+
     if (!match) {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       throw new Error("MODEL_NOT_FOUND: ChatGPT model not available in picker: " + desired);
@@ -297,11 +327,12 @@
   };
 
   const responseTexts = (context) => {
-    const values = queryAll(context, "response")
-      .filter(isVisible)
-      .map(text)
-      .filter(Boolean);
-    return [...new Set(values)];
+    const visible = queryAll(context, "response").filter(isVisible);
+    const markdown = visible.filter((node) =>
+      node.matches?.("[data-message-author-role='assistant'] .markdown, [data-message-author-role='assistant'] .markdown-new-styling")
+    );
+    const leaves = markdown.length ? markdown : visible;
+    return leaves.map(text).filter(Boolean);
   };
   const newResponseText = (before, responses) => {
     const prior = new Set(before);
