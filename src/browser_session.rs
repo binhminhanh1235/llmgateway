@@ -71,6 +71,14 @@ pub enum BrowserSessionError {
     NotFound(String),
 }
 
+pub const STATUS_STOPPED: &str = "stopped";
+pub const STATUS_STARTING: &str = "starting";
+pub const STATUS_LOGIN_REQUIRED: &str = "login_required";
+pub const STATUS_READY: &str = "ready";
+pub const STATUS_DEGRADED: &str = "degraded";
+pub const STATUS_REQUIRES_ATTENTION: &str = "requires_attention";
+pub const STATUS_FAILED: &str = "failed";
+
 #[derive(Clone, Debug, Serialize)]
 pub struct BrowserSessionView {
     pub id: String,
@@ -78,6 +86,7 @@ pub struct BrowserSessionView {
     pub label: String,
     pub enabled: bool,
     pub status: String,
+    pub routable: bool,
     pub login_url: String,
     pub profile_dir: String,
     pub login_attempt_id: Option<String>,
@@ -177,15 +186,18 @@ impl BrowserSessionStore {
                     row.try_get("updated_at")?,
                 )
             } else {
-                ("requires_login".into(), None, None, None, None, None, None)
+                (STATUS_LOGIN_REQUIRED.into(), None, None, None, None, None, None)
             };
 
+        let enabled = self.enabled() && spec.enabled;
+        let routable = enabled && status == STATUS_READY;
         Ok(BrowserSessionView {
             id: id.to_string(),
             provider: spec.provider.clone(),
             label: spec.label.clone().unwrap_or_else(|| id.to_string()),
-            enabled: self.enabled() && spec.enabled,
+            enabled,
             status,
+            routable,
             login_url: spec.login_url.clone(),
             profile_dir: self.profile_dir(id).display().to_string(),
             login_attempt_id,
@@ -210,7 +222,7 @@ impl BrowserSessionStore {
         let now = now_string();
         sqlx::query(
             "UPDATE browser_session_state
-             SET status = 'login_in_progress', login_attempt_id = ?, login_started_at = ?,
+             SET status = 'starting', login_attempt_id = ?, login_started_at = ?,
                  last_error = NULL, updated_at = ?
              WHERE session_id = ?",
         )
@@ -288,18 +300,71 @@ impl BrowserSessionStore {
         self.session(id).await
     }
 
+    pub async fn mark_login_required(
+        &self,
+        id: &str,
+        error: Option<&str>,
+    ) -> Result<BrowserSessionView, BrowserSessionError> {
+        self.set_runtime_status(id, STATUS_LOGIN_REQUIRED, error, true).await
+    }
+
+    pub async fn mark_degraded(
+        &self,
+        id: &str,
+        error: &str,
+    ) -> Result<BrowserSessionView, BrowserSessionError> {
+        self.set_runtime_status(id, STATUS_DEGRADED, Some(error), false).await
+    }
+
+    pub async fn mark_stopped(&self, id: &str) -> Result<BrowserSessionView, BrowserSessionError> {
+        self.set_runtime_status(id, STATUS_STOPPED, None, true).await
+    }
+
+    pub async fn mark_failed(
+        &self,
+        id: &str,
+        error: &str,
+    ) -> Result<BrowserSessionView, BrowserSessionError> {
+        self.set_runtime_status(id, STATUS_FAILED, Some(error), true).await
+    }
+
     pub async fn reset(&self, id: &str) -> Result<BrowserSessionView, BrowserSessionError> {
+        self.set_runtime_status(id, STATUS_LOGIN_REQUIRED, None, true).await
+    }
+
+    async fn set_runtime_status(
+        &self,
+        id: &str,
+        status: &str,
+        error: Option<&str>,
+        clear_login: bool,
+    ) -> Result<BrowserSessionView, BrowserSessionError> {
         self.spec(id)?;
         let now = now_string();
-        sqlx::query(
-            "UPDATE browser_session_state
-             SET status = 'requires_login', login_attempt_id = NULL, login_started_at = NULL,
-                 last_error = NULL, updated_at = ? WHERE session_id = ?",
-        )
-        .bind(&now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        if clear_login {
+            sqlx::query(
+                "UPDATE browser_session_state
+                 SET status = ?, login_attempt_id = NULL, login_started_at = NULL,
+                     last_error = ?, updated_at = ? WHERE session_id = ?",
+            )
+            .bind(status)
+            .bind(error)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE browser_session_state
+                 SET status = ?, last_error = ?, updated_at = ? WHERE session_id = ?",
+            )
+            .bind(status)
+            .bind(error)
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        }
         self.session(id).await
     }
 
@@ -319,7 +384,7 @@ impl BrowserSessionStore {
             "CREATE TABLE IF NOT EXISTS browser_session_state (
                 session_id TEXT PRIMARY KEY,
                 provider_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'requires_login',
+                status TEXT NOT NULL DEFAULT 'login_required',
                 login_attempt_id TEXT,
                 login_started_at TEXT,
                 last_ready_at TEXT,
@@ -330,6 +395,21 @@ impl BrowserSessionStore {
         )
         .execute(&self.pool)
         .await?;
+
+        // v0.27 normalizes the pre-reliability lifecycle names in-place so existing
+        // profiles keep their authentication state across upgrades.
+        sqlx::query(
+            "UPDATE browser_session_state SET status = 'login_required'
+             WHERE status = 'requires_login'",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "UPDATE browser_session_state SET status = 'starting'
+             WHERE status = 'login_in_progress'",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -337,7 +417,7 @@ impl BrowserSessionStore {
         for (id, spec) in &self.browser_config.sessions {
             sqlx::query(
                 "INSERT INTO browser_session_state (session_id, provider_id, status, updated_at)
-                 VALUES (?, ?, 'requires_login', ?)
+                 VALUES (?, ?, 'login_required', ?)
                  ON CONFLICT(session_id) DO UPDATE SET provider_id = excluded.provider_id",
             )
             .bind(id)

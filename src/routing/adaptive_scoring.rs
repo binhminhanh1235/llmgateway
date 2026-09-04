@@ -151,6 +151,8 @@ mod tests {
             task_mismatch_penalty: 12,
             task_long_context_threshold_tokens: 12_000,
             task_simple_max_input_tokens: 800,
+            execution_preference: "browser-first".into(),
+            api_fallback: true,
         }
     }
 

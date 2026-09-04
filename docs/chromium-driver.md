@@ -1,31 +1,10 @@
-# Chromium login driver
+# Chromium driver
 
-llmgateway v0.13 can launch a local Chrome/Chromium process for an opt-in browser session while keeping the provider session inside an isolated browser profile.
+The Chromium driver manages isolated browser profiles for browser-backed llmgateway accounts. v0.27 adds restart reconciliation, stale-CDP detection, automatic recovery, and deliberate-stop semantics.
 
-The driver is deliberately narrow. It does not read cookies, copy cookies into SQLite, submit credentials, solve CAPTCHA, or automate 2FA. The user completes normal interactive authentication in the browser. The driver only manages the browser process and observes sanitized page URLs through the loopback DevTools endpoint so it can decide whether login reached a configured authenticated page.
-
-## Security boundary
-
-```text
-llmgateway SQLite
-  lifecycle/status/timestamps only
-
-isolated profile directory (0700 on Unix)
-  cookies
-  Local Storage
-  IndexedDB
-  provider session state
-
-Chromium DevTools on 127.0.0.1
-  page URL observation only
-  query strings and fragments removed before API responses
-```
-
-Never configure `browser.profile_root` to point at your normal Chrome profile. llmgateway creates and owns dedicated profile directories for these sessions.
+The driver does not read or export cookies, submit credentials, solve CAPTCHA, or automate 2FA. Authentication remains a normal user interaction inside Chromium.
 
 ## Configuration
-
-Browser-session persistence and Chromium launching are separate capabilities. Both must be enabled for automatic launch/verification.
 
 ```toml
 [browser]
@@ -33,16 +12,17 @@ enabled = true
 profile_root = "data/browser-profiles"
 
 [browser.sessions.gemini-web-primary]
-provider = "gemini"
+provider = "gemini-web"
 label = "Gemini web primary"
 login_url = "https://gemini.google.com/app"
 enabled = true
 
 [chromium]
 enabled = true
-# Optional. If omitted, llmgateway searches common Chrome/Chromium executable names.
 # executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 startup_timeout_seconds = 15
+auto_recover = true
+reconcile_interval_seconds = 15
 extra_args = []
 
 [chromium.sessions.gemini-web-primary]
@@ -50,63 +30,89 @@ enabled = true
 ready_url_prefixes = ["https://gemini.google.com/app"]
 ```
 
-Qwen example:
+`reconcile_interval_seconds` must be between 5 and 3600 seconds.
 
-```toml
-[browser.sessions.qwen-web-primary]
-provider = "qwen"
-label = "Qwen web primary"
-login_url = "https://chat.qwen.ai/"
-enabled = true
+`ready_url_prefixes` are not credentials. They are sanitized page locations used as evidence that the interactive login reached the authenticated application.
 
-[chromium.sessions.qwen-web-primary]
-enabled = true
-ready_url_prefixes = ["https://chat.qwen.ai/"]
+## Runtime status
+
+`GET .../driver/status` exposes:
+
+- `running`: either a process managed by this gateway instance or a reachable Chromium CDP runtime;
+- `managed`: whether the current gateway instance launched and owns the process handle;
+- `pid`: available for a managed process;
+- `debugger_port`;
+- `debugger_reachable`;
+- sanitized `pages`;
+- `ready_match`.
+
+Query strings, fragments, usernames, and passwords are stripped from page URLs before they are returned.
+
+A gateway restart can therefore produce:
+
+```json
+{
+  "running": true,
+  "managed": false,
+  "debugger_reachable": true,
+  "ready_match": "https://gemini.google.com/app"
+}
 ```
 
-`ready_url_prefixes` are not authentication credentials. They are simply the page locations that llmgateway treats as evidence that the normal interactive login flow reached the authenticated application.
+This is expected: Chromium survived the gateway restart and v0.27 reconnected to its loopback CDP endpoint.
 
-## API flow
+## Startup reconciliation
 
-All endpoints require the normal llmgateway API key.
+Before the HTTP listener starts, llmgateway reconciles every enabled Chromium session.
 
-Launch Chromium and begin a login attempt:
+The important cases are:
 
-```bash
-curl -X POST \
-  http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-web-primary/driver/launch \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
-```
+| Persisted/runtime state | v0.27 behavior |
+| --- | --- |
+| ready + live authenticated Chromium | mark/keep ready |
+| ready + Chromium survived gateway restart | reconnect and keep ready |
+| ready/degraded + Chromium crashed | remove stale CDP metadata, relaunch same profile, verify |
+| browser alive but authenticated page missing | login_required/degraded; not routable |
+| stale DevToolsActivePort | never treated as a live browser |
+| stopped | do not auto-launch |
+| requires_attention | do not auto-launch |
+| login_required | do not auto-launch |
+| recovery launch/verify fails | failed with diagnostic error |
 
-The process receives a dedicated `--user-data-dir`, loopback-only remote debugging, and the configured login URL. Complete login normally in the opened browser window.
+The same reconciliation runs periodically using `reconcile_interval_seconds`.
 
-Inspect process state and sanitized page locations:
+## Automatic recovery
 
-```bash
-curl \
-  http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-web-primary/driver/status \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
-```
+With `auto_recover = true`, an unexpectedly lost session that was previously active can be relaunched using its existing isolated profile.
 
-Ask llmgateway to verify the current page against `ready_url_prefixes`:
+Recovery is deliberately conservative:
 
-```bash
-curl -X POST \
-  http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-web-primary/driver/verify \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
-```
+1. verify the old CDP runtime is actually gone;
+2. remove a stale `DevToolsActivePort` only when it is unreachable;
+3. launch Chromium with the same `--user-data-dir`;
+4. wait for CDP;
+5. verify an authenticated page;
+6. only then restore lifecycle `ready`.
 
-When a ready URL matches, the browser-session lifecycle automatically moves to `ready` and records `last_ready_at` / `last_verified_at`.
+If provider authentication has expired, the browser remains available for normal interactive login but the route does not become ready automatically.
 
-Stop the Chromium process managed by llmgateway:
+## Deliberate stop
 
-```bash
-curl -X POST \
-  http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-web-primary/driver/stop \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
-```
+`POST .../driver/stop` marks the session `stopped`.
 
-Stopping the browser does not delete the profile. A later launch reuses the same isolated profile so a still-valid provider session can survive process restarts.
+A stopped session is not auto-recovered. The profile remains on disk so a later Launch can reuse it.
+
+When Chromium survived a gateway restart, the new gateway has no OS child-process handle for it. v0.27 closes that reconnected browser through loopback CDP `Browser.close` instead of merely deleting `DevToolsActivePort`, avoiding an orphaned process/profile lock.
+
+## Live route safety
+
+For `browser-cdp` providers, Router readiness checks the live Chromium runtime at plan time. A route requires:
+
+- session lifecycle `ready`;
+- Chromium/CDP reachable;
+- a configured ready URL currently visible.
+
+This closes the gap between background reconciliation ticks: if Chromium dies immediately before a request, the dead browser route is skipped and failover can continue.
 
 ## API endpoints
 
@@ -117,16 +123,4 @@ POST /_llmgateway/browser-sessions/{session_id}/driver/verify
 POST /_llmgateway/browser-sessions/{session_id}/driver/stop
 ```
 
-The older browser-session lifecycle APIs remain available and are intentionally independent from the Chromium launcher.
-
-## Failure behavior
-
-- Missing Chrome/Chromium: launch returns a configuration error; the gateway continues serving API providers normally.
-- Browser launch failure: the browser session is moved to `requires_attention` with a diagnostic error.
-- DevTools startup timeout: the managed process is stopped and the session is moved to `requires_attention`.
-- Browser exits before verification: `driver/verify` moves an in-progress login to `requires_attention`.
-- Login challenge/CAPTCHA/2FA: the driver does nothing special; complete it normally in the browser.
-
-## What comes next
-
-The Chromium driver is process/session infrastructure, not a Gemini or Qwen web-chat adapter. The next layer can use a `ready` browser session to implement provider-specific web operations while keeping browser secrets inside the profile and preserving llmgateway's canonical thread/context model.
+See [Browser sessions](browser-sessions.md) for lifecycle and persistence semantics, and [Browser provider adapters](browser-provider-adapters.md) for the execution boundary.

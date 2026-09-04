@@ -1,5 +1,5 @@
 use crate::{
-    browser_session_runtime,
+    browser_session_runtime, chromium_driver_runtime,
     config::{AccountConfig, ProviderConfig, RouteConfig},
 };
 use async_trait::async_trait;
@@ -147,6 +147,13 @@ impl BrowserProviderRegistry {
         self.adapters.contains_key(kind)
     }
 
+    pub fn session_id_for_account(&self, account_id: &str) -> Option<&str> {
+        self.config
+            .bindings
+            .get(account_id)
+            .map(|binding| binding.session.as_str())
+    }
+
     pub async fn route_available(&self, provider_kind: &str, account_id: &str) -> bool {
         if !Self::is_browser_kind(provider_kind) || !self.supports(provider_kind) {
             return false;
@@ -160,10 +167,55 @@ impl BrowserProviderRegistry {
         let Some(store) = browser_session_runtime::get() else {
             return false;
         };
-        match store.session(&binding.session).await {
+        let session_ready = match store.session(&binding.session).await {
             Ok(session) => session.enabled && session.status == "ready",
             Err(_) => false,
+        };
+        if !session_ready {
+            return false;
         }
+
+        if provider_kind == "browser-cdp" {
+            let Some(driver) = chromium_driver_runtime::get() else {
+                return false;
+            };
+            return driver
+                .status(&binding.session)
+                .await
+                .is_ok_and(|status| {
+                    status.running
+                        && status.debugger_reachable
+                        && status.ready_match.is_some()
+                });
+        }
+
+        true
+    }
+
+    pub async fn mark_degraded(
+        &self,
+        account_id: &str,
+        error: &str,
+    ) -> Result<(), BrowserProviderError> {
+        let binding = self
+            .config
+            .bindings
+            .get(account_id)
+            .ok_or_else(|| BrowserProviderError::MissingBinding(account_id.to_string()))?;
+        let Some(store) = browser_session_runtime::get() else {
+            return Err(BrowserProviderError::SessionUnavailable {
+                account_id: account_id.to_string(),
+                session_id: binding.session.clone(),
+            });
+        };
+        store
+            .mark_degraded(&binding.session, error)
+            .await
+            .map_err(|_| BrowserProviderError::SessionUnavailable {
+                account_id: account_id.to_string(),
+                session_id: binding.session.clone(),
+            })?;
+        Ok(())
     }
 
     pub async fn require_attention(
@@ -228,7 +280,7 @@ impl BrowserProviderRegistry {
             });
         }
 
-        adapter
+        let result = adapter
             .execute_chat(BrowserAdapterRequest {
                 provider: provider.clone(),
                 account: account.clone(),
@@ -238,7 +290,22 @@ impl BrowserProviderRegistry {
                 profile_dir: session.profile_dir,
                 binding: binding.clone(),
             })
-            .await
+            .await;
+        if provider.kind == "browser-cdp"
+            && matches!(
+                &result,
+                Err(BrowserProviderError::SessionUnavailable { .. })
+                    | Err(BrowserProviderError::Transport(_))
+            )
+        {
+            let error_text = result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "browser CDP runtime unavailable".into());
+            let _ = self.mark_degraded(&account.id, &error_text).await;
+        }
+        result
     }
 }
 

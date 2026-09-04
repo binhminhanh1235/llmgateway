@@ -1,4 +1,6 @@
-use crate::{browser_provider_runtime, config::AppConfig, quota_usage_runtime};
+use crate::{
+    browser_provider_runtime, browser_session_runtime, config::AppConfig, quota_usage_runtime,
+};
 use serde::Serialize;
 use std::env;
 
@@ -12,6 +14,9 @@ pub struct AccountReadiness {
     pub reasons: Vec<String>,
     pub credential_configured: Option<bool>,
     pub browser_ready: Option<bool>,
+    pub browser_session_id: Option<String>,
+    pub browser_session_status: Option<String>,
+    pub browser_last_error: Option<String>,
     pub quota_blocked: bool,
     pub quota_pressure: f64,
     pub route_count: usize,
@@ -30,6 +35,9 @@ impl AccountReadiness {
             reasons: vec![reason.into()],
             credential_configured: None,
             browser_ready: None,
+            browser_session_id: None,
+            browser_session_status: None,
+            browser_last_error: None,
             quota_blocked: false,
             quota_pressure: 0.0,
             route_count: 0,
@@ -65,6 +73,9 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
         reasons: Vec::new(),
         credential_configured: None,
         browser_ready: None,
+        browser_session_id: None,
+        browser_session_status: None,
+        browser_last_error: None,
         quota_blocked: false,
         quota_pressure: 0.0,
         route_count: 0,
@@ -81,14 +92,33 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
 
     if provider.is_browser() {
         let browser_ready = match browser_provider_runtime::get() {
-            Some(registry) => registry.route_available(&provider.kind, &account.id).await,
+            Some(registry) => {
+                if let Some(session_id) = registry.session_id_for_account(&account.id) {
+                    readiness.browser_session_id = Some(session_id.to_string());
+                    if let Some(store) = browser_session_runtime::get() {
+                        if let Ok(session) = store.session(session_id).await {
+                            readiness.browser_session_status = Some(session.status.clone());
+                            readiness.browser_last_error = session.last_error.clone();
+                        }
+                    }
+                }
+                registry.route_available(&provider.kind, &account.id).await
+            }
             None => false,
         };
         readiness.browser_ready = Some(browser_ready);
         if !browser_ready {
             readiness.effective_status = "unavailable".into();
             readiness.routable = false;
-            readiness.reasons.push("browser_session_not_ready".into());
+            let reason = match readiness.browser_session_status.as_deref() {
+                Some("stopped") => "browser_session_stopped",
+                Some("login_required") | Some("starting") => "browser_login_required",
+                Some("degraded") => "browser_session_degraded",
+                Some("requires_attention") => "browser_session_requires_attention",
+                Some("failed") => "browser_session_failed",
+                _ => "browser_session_not_ready",
+            };
+            readiness.reasons.push(reason.into());
         }
     } else {
         let configured = env::var(&account.api_key_env)
@@ -141,6 +171,9 @@ mod tests {
             reasons: Vec::new(),
             credential_configured: Some(true),
             browser_ready: None,
+            browser_session_id: None,
+            browser_session_status: None,
+            browser_last_error: None,
             quota_blocked: false,
             quota_pressure: 0.0,
             route_count: 0,

@@ -88,7 +88,7 @@ assert x["enabled"] is True, x
 assert len(x["sessions"]) == 1, x
 s=x["sessions"][0]
 assert s["id"] == "fake-web", s
-assert s["status"] == "requires_login", s
+assert s["status"] == "login_required", s
 assert "cookie" not in json.dumps(x).lower(), x
 '
 
@@ -102,7 +102,7 @@ START=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-sessions/fak
 printf '%s' "$START" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
-assert x["session"]["status"] == "login_in_progress", x
+assert x["session"]["status"] == "starting", x
 assert x["login_attempt_id"].startswith("browser_login_"), x
 assert x["login_url"].endswith("/login"), x
 assert len(x["instructions"]) >= 4, x
@@ -139,7 +139,7 @@ import json,sys
 x=json.load(sys.stdin)
 s=x["session"]
 assert x["reset"] is True, x
-assert s["status"] == "requires_login", s
+assert s["status"] == "login_required", s
 assert s["last_error"] is None, s
 '
 

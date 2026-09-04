@@ -47,6 +47,10 @@ pub enum GatewayError {
     InvalidConfig(String),
     #[error("upstream request failed: {0}")]
     Transport(String),
+    #[error("browser session unavailable: {0}")]
+    BrowserSessionUnavailable(String),
+    #[error("browser transport failed: {0}")]
+    BrowserTransport(String),
     #[error("upstream rejected request with {status}: {body}")]
     Upstream { status: StatusCode, body: String },
     #[error("{source}")]
@@ -133,7 +137,7 @@ impl Gateway {
                 let keep_sticky = index == 0
                     || self
                         .router
-                        .sticky_route_matches_best_task_fit(body, &routes[index], &routes[0]);
+                        .sticky_route_matches_best_task_fit(requested_model, body, &routes[index], &routes[0]);
                 if keep_sticky {
                     let preferred = routes.remove(index);
                     routes.insert(0, preferred);
@@ -330,6 +334,11 @@ impl Gateway {
                             true,
                         )
                         .await;
+                    let outcome = match &error {
+                        GatewayError::BrowserSessionUnavailable(_) => "browser_session_unavailable",
+                        GatewayError::BrowserTransport(_) => "browser_transport_error",
+                        _ => "transport_error",
+                    };
                     self.record_execution_attempt(AttemptRecord {
                         request_id: &request_id,
                         attempt_index,
@@ -337,7 +346,7 @@ impl Gateway {
                         account_id: &account.id,
                         model: &route.model,
                         status_code: None,
-                        outcome: "transport_error",
+                        outcome,
                         retryable: true,
                         duration_ms,
                         error: Some(&error_text),
@@ -347,7 +356,7 @@ impl Gateway {
                         account,
                         &route,
                         None,
-                        "transport_error",
+                        outcome,
                         estimated_input_tokens,
                         Some(&error_text),
                     )
@@ -500,9 +509,10 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
         | BrowserProviderError::MissingBinding(_)
         | BrowserProviderError::Io(_)
         | BrowserProviderError::Toml(_) => GatewayError::InvalidConfig(error.to_string()),
-        BrowserProviderError::SessionUnavailable { .. } | BrowserProviderError::Transport(_) => {
-            GatewayError::Transport(error.to_string())
+        BrowserProviderError::SessionUnavailable { .. } => {
+            GatewayError::BrowserSessionUnavailable(error.to_string())
         }
+        BrowserProviderError::Transport(_) => GatewayError::BrowserTransport(error.to_string())
     }
 }
 

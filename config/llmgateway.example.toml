@@ -49,6 +49,11 @@ profile_root = "data/browser-profiles"
 enabled = false
 # executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 startup_timeout_seconds = 15
+# v0.27 reconciles SQLite lifecycle state with the real Chromium/CDP runtime.
+# A previously-ready profile is safely relaunched after an unexpected browser crash.
+# Deliberately stopped / login-required / attention sessions are never auto-launched.
+auto_recover = true
+reconcile_interval_seconds = 15
 extra_args = []
 
 # Enable a driver mapping for each browser session you want llmgateway to launch/verify.
@@ -107,6 +112,13 @@ task_fit_max_bonus = 20
 task_mismatch_penalty = 12
 task_long_context_threshold_tokens = 12000
 task_simple_max_input_tokens = 800
+
+# v0.27 is browser-first by default for virtual models. Browser and API routes still
+# use the normal priority/quota/adaptive/task score inside their transport tier.
+# Set "balanced" to remove the transport preference or "api-first" to invert it.
+execution_preference = "browser-first"
+# When false under browser-first, API routes are excluded from virtual-model fallback.
+api_fallback = true
 
 # Context is compiled before persistent-thread requests are sent upstream.
 # Full transcripts remain in SQLite; checkpoints only replace older turns in the model input.
