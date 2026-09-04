@@ -10,6 +10,7 @@
       "div[aria-label='Enter a prompt for Gemini']",
       "[aria-label='Enter a prompt here']",
       "div.ql-editor[contenteditable='true']",
+      "div.ql-editor",
       "div.ql-editor[role='textbox'][contenteditable='true']",
       "rich-textarea .ql-editor[contenteditable='true']",
       "rich-textarea [contenteditable='true']",
@@ -18,6 +19,7 @@
     ],
     send: [
       "button[aria-label='Send message']",
+      "button[aria-label*='Send' i]",
       "button.send-button",
       ".send-button"
     ],
