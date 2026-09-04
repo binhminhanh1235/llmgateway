@@ -29,18 +29,30 @@ profile_root = "data/browser-profiles"
 # login_url = "https://chat.qwen.ai/"
 # enabled = true
 #
-# Browser-backed gateway accounts are explicitly bound to one session. A browser route is
-# eligible only while its bound session is READY. CDP bindings can also choose the page and
-# provider-specific trusted local adapter script.
+# Browser-backed gateway accounts are explicitly bound to one isolated browser session.
+# v0.28 has built-in first-class Gemini/Qwen adapters. Their scripts are embedded in the
+# binary, versioned by contract, and probed before routing; no adapter_script is required.
+# Provider UI model selection is optional. If model_labels is omitted, the adapter keeps
+# the model already selected in the provider UI.
 # [browser.bindings.gemini-web-account]
 # session = "gemini-web-primary"
-# target_url_prefix = "https://gemini.google.com/app"
-# adapter_script = "adapters/gemini.js"
+# adapter_contract_version = 1
+# models = ["gemini-web-pro", "gemini-web-flash"]
+# model_labels = { "gemini-web-pro" = "Pro", "gemini-web-flash" = "Flash" }
+# ephemeral_chat = true
+# probe_timeout_ms = 3000
+# response_timeout_ms = 180000
+# # Emergency DOM drift override example:
+# # selector_overrides = { input = ["div[aria-label='Enter a prompt for Gemini']"] }
 #
 # [browser.bindings.qwen-web-account]
 # session = "qwen-web-primary"
-# target_url_prefix = "https://chat.qwen.ai/"
-# adapter_script = "adapters/qwen.js"
+# adapter_contract_version = 1
+# models = ["qwen-web-coder"]
+# model_labels = { "qwen-web-coder" = "Qwen3-Coder" }
+# ephemeral_chat = true
+# probe_timeout_ms = 3000
+# response_timeout_ms = 180000
 
 # Optional local Chromium launcher. This is separate from browser session persistence so API-only
 # and headless deployments remain unchanged. The driver always uses the isolated profile above,
@@ -167,14 +179,19 @@ kind = "openai-compatible"
 base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 models_path = "models"
 
-# v0.16+ browser-cdp executes a trusted local adapter script inside an authenticated Chromium page.
-# Browser providers do not require base_url unless their adapter itself uses it as configuration.
+# v0.28 built-in browser providers execute the embedded, versioned adapter contract inside
+# an authenticated Chromium page. Browser providers do not require base_url or API keys.
 # [[providers]]
 # id = "gemini-web"
-# kind = "browser-cdp"
+# kind = "browser-gemini"
 #
 # [[providers]]
 # id = "qwen-web"
+# kind = "browser-qwen"
+#
+# Generic custom browser-cdp remains available for trusted local adapter scripts:
+# [[providers]]
+# id = "custom-web"
 # kind = "browser-cdp"
 
 # v0.15 browser-http remains available for a local bridge/test adapter.
@@ -268,20 +285,20 @@ capabilities = ["chat", "tools", "coding", "reasoning", "long-context", "premium
 # context_window = 200000 # optional example; use the provider/model value you have verified
 
 # [[routes]]
-# id = "gemini-web-route"
+# id = "gemini-web-pro"
 # account = "gemini-web-account"
-# model = "gemini-web-model"
+# model = "gemini-web-pro"
 # priority = 5
 # enabled = true
-# capabilities = ["chat"]
+# capabilities = ["chat", "reasoning", "long-context"]
 #
 # [[routes]]
-# id = "qwen-web-route"
+# id = "qwen-web-coder"
 # account = "qwen-web-account"
-# model = "qwen-web-model"
+# model = "qwen-web-coder"
 # priority = 6
 # enabled = true
-# capabilities = ["chat"]
+# capabilities = ["chat", "coding", "reasoning"]
 
 [virtual_models.llmgateway-auto]
 routes = ["gemini-primary", "gemini-secondary", "qwen-coder", "openrouter-fallback"]

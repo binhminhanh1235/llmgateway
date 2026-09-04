@@ -5,6 +5,22 @@
 // that provider's terms and must not bypass CAPTCHA, 2FA, anti-abuse controls, or quotas.
 
 globalThis.__LLMGATEWAY_ADAPTER__ = {
+  meta: {
+    contract_version: 1,
+    id: "example-cdp",
+    provider: "example",
+    adapter_version: "1.0.0"
+  },
+
+  async probe() {
+    return {
+      ok: true,
+      code: "ready",
+      message: "example adapter is compatible",
+      page_signature: "example-v1"
+    };
+  },
+
   async chat(request) {
     const lastUserMessage = [...(request.messages || [])]
       .reverse()

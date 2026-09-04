@@ -466,6 +466,16 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
             "browser_transport_error",
             &message,
         ),
+        GatewayError::BrowserAdapterIncompatible(message) => json_error(
+            StatusCode::BAD_GATEWAY,
+            "browser_adapter_incompatible",
+            &message,
+        ),
+        GatewayError::BrowserModelUnavailable(message) => json_error(
+            StatusCode::BAD_GATEWAY,
+            "browser_model_unavailable",
+            &message,
+        ),
         GatewayError::Upstream { status, body } => json_error(status, "upstream_error", &body),
         GatewayError::Execution { request_id, source } => {
             let mut response = gateway_error(*source);

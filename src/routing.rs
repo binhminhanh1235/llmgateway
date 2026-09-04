@@ -7,6 +7,7 @@ pub use adaptive_scoring::AdaptiveRouteSnapshot;
 pub use task_aware::{TaskFitSnapshot, TaskProfile};
 
 use crate::{
+    browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AppConfig, RouteConfig},
     quota_usage_runtime,
@@ -209,6 +210,12 @@ impl Router {
 
             if !route.enabled {
                 push_unique(&mut exclusion_reasons, "route_disabled");
+            }
+            if transport == "browser"
+                && browser_provider_runtime::get()
+                    .is_some_and(|registry| !registry.model_allowed(&route.account, &route.model))
+            {
+                push_unique(&mut exclusion_reasons, "browser_model_unavailable");
             }
             if apply_execution_policy
                 && self.config.routing.execution_preference == "browser-first"

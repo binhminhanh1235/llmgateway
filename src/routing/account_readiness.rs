@@ -17,6 +17,8 @@ pub struct AccountReadiness {
     pub browser_session_id: Option<String>,
     pub browser_session_status: Option<String>,
     pub browser_last_error: Option<String>,
+    pub browser_adapter_status: Option<String>,
+    pub browser_adapter_message: Option<String>,
     pub quota_blocked: bool,
     pub quota_pressure: f64,
     pub route_count: usize,
@@ -38,6 +40,8 @@ impl AccountReadiness {
             browser_session_id: None,
             browser_session_status: None,
             browser_last_error: None,
+            browser_adapter_status: None,
+            browser_adapter_message: None,
             quota_blocked: false,
             quota_pressure: 0.0,
             route_count: 0,
@@ -76,6 +80,8 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
         browser_session_id: None,
         browser_session_status: None,
         browser_last_error: None,
+        browser_adapter_status: None,
+        browser_adapter_message: None,
         quota_blocked: false,
         quota_pressure: 0.0,
         route_count: 0,
@@ -102,7 +108,13 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
                         }
                     }
                 }
-                registry.route_available(&provider.kind, &account.id).await
+                let available = registry.route_available(&provider.kind, &account.id).await;
+                let diagnostics = registry
+                    .adapter_diagnostics(&provider.kind, &account.id)
+                    .await;
+                readiness.browser_adapter_status = Some(diagnostics.status);
+                readiness.browser_adapter_message = Some(diagnostics.message);
+                available
             }
             None => false,
         };
@@ -110,13 +122,18 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
         if !browser_ready {
             readiness.effective_status = "unavailable".into();
             readiness.routable = false;
-            let reason = match readiness.browser_session_status.as_deref() {
-                Some("stopped") => "browser_session_stopped",
-                Some("login_required") | Some("starting") => "browser_login_required",
-                Some("degraded") => "browser_session_degraded",
-                Some("requires_attention") => "browser_session_requires_attention",
-                Some("failed") => "browser_session_failed",
-                _ => "browser_session_not_ready",
+            let reason = match readiness.browser_adapter_status.as_deref() {
+                Some("adapter_incompatible") => "browser_adapter_incompatible",
+                Some("login_required") => "browser_adapter_login_required",
+                Some("unsupported") | Some("unconfigured") => "browser_adapter_unavailable",
+                _ => match readiness.browser_session_status.as_deref() {
+                    Some("stopped") => "browser_session_stopped",
+                    Some("login_required") | Some("starting") => "browser_login_required",
+                    Some("degraded") => "browser_session_degraded",
+                    Some("requires_attention") => "browser_session_requires_attention",
+                    Some("failed") => "browser_session_failed",
+                    _ => "browser_session_not_ready",
+                },
             };
             readiness.reasons.push(reason.into());
         }
@@ -174,6 +191,8 @@ mod tests {
             browser_session_id: None,
             browser_session_status: None,
             browser_last_error: None,
+            browser_adapter_status: None,
+            browser_adapter_message: None,
             quota_blocked: false,
             quota_pressure: 0.0,
             route_count: 0,

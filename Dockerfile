@@ -3,6 +3,7 @@ WORKDIR /app
 COPY Cargo.toml ./
 COPY src ./src
 COPY ui ./ui
+COPY adapters ./adapters
 RUN cargo build --release
 
 FROM debian:bookworm-slim

@@ -1,20 +1,29 @@
-# Browser CDP adapter (v0.16+)
+# Custom browser CDP adapters
 
-`browser-cdp` executes a small local adapter script inside an already-authenticated Chromium page through the loopback Chrome DevTools Protocol (CDP).
+`browser-cdp` is the generic extension point for trusted local provider integrations.
 
-The design keeps authentication material inside the isolated Chromium profile:
+For Gemini Web and Qwen Web, prefer the built-in v0.28 provider kinds:
 
-- llmgateway does not export or persist raw cookies.
-- the browser session must already be `ready` before the route is eligible.
-- CAPTCHA and 2FA are completed normally by the user in Chromium.
-- the adapter script runs in the page context, so normal same-origin browser credentials remain owned by Chromium.
-- CDP remains reachable only through the loopback debugger started by the Chromium driver.
+```text
+browser-gemini
+browser-qwen
+```
 
-This is an experimental integration surface. Provider-specific scripts must respect the provider's terms and must not be used to bypass authentication challenges, anti-abuse controls, or provider quota enforcement.
+They use the same CDP contract but ship with embedded adapters, diagnostics and deterministic regression fixtures.
+
+## Security boundary
+
+A CDP adapter executes inside an authenticated Chromium page and therefore has the same origin-level authority available to page JavaScript.
+
+- cookies/local storage remain inside the isolated profile;
+- CDP is bound to loopback by the Chromium driver;
+- raw cookies are not returned through llmgateway APIs;
+- CAPTCHA, 2FA/passkeys and provider authentication remain interactive;
+- adapter code must respect provider terms, anti-abuse controls and quotas.
+
+Treat custom adapter scripts as trusted local code. Do not load scripts from untrusted sources.
 
 ## Configuration
-
-A CDP-backed account uses the same routing model as every other llmgateway account. Since v0.17, browser accounts are first-class and do not need dummy API credentials or an explicit `discover_models = false`.
 
 ```toml
 [browser]
@@ -30,7 +39,9 @@ enabled = true
 [browser.bindings.example-web-account]
 session = "example-web"
 target_url_prefix = "https://example.com/chat"
-adapter_script = "adapters/example.js"
+adapter_script = "examples/browser-cdp-adapter.js"
+adapter_contract_version = 1
+ephemeral_chat = false
 
 [chromium]
 enabled = true
@@ -58,15 +69,31 @@ enabled = true
 capabilities = ["chat"]
 ```
 
-`target_url_prefix` chooses which authenticated page target receives the CDP call. `adapter_script` is a local trusted JavaScript file. The core limits adapter scripts to 512 KiB.
+The core limits custom scripts to 512 KiB.
 
-## Script contract
+## Contract v1
 
-The script must expose:
+v0.28 replaces the old implicit `chat(request)`-only contract with an explicit versioned contract.
 
 ```js
 globalThis.__LLMGATEWAY_ADAPTER__ = {
-  async chat(request) {
+  meta: {
+    contract_version: 1,
+    id: "example-cdp",
+    provider: "example",
+    adapter_version: "1.0.0"
+  },
+
+  async probe(context) {
+    return {
+      ok: true,
+      code: "ready",
+      message: "page compatible",
+      page_signature: "example-v1"
+    };
+  },
+
+  async chat(request, context) {
     return {
       status: 200,
       content_type: "application/json",
@@ -74,38 +101,114 @@ globalThis.__LLMGATEWAY_ADAPTER__ = {
         id: "chatcmpl_example",
         object: "chat.completion",
         model: request.model,
-        choices: [
-          {
-            index: 0,
-            message: { role: "assistant", content: "hello" },
-            finish_reason: "stop"
-          }
-        ]
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "hello" },
+          finish_reason: "stop"
+        }]
       }
     };
   }
 };
 ```
 
-The request passed to `chat()` is OpenAI-chat shaped and the physical route model has already replaced the virtual model name.
+See `examples/browser-cdp-adapter.js` for a complete minimal adapter.
 
-The result envelope is deliberately small:
+### Migration from v0.27 and earlier
 
-- `status`: HTTP-style status code, default `200`.
-- `content_type`: response media type, default `application/json`.
-- `body`: either a JSON value or a string.
+A legacy custom script such as:
 
-For streaming, return `content_type = "text/event-stream"` and `body` as a complete OpenAI-compatible SSE payload. v0.16/v0.17 buffers that returned string before forwarding it. True incremental CDP streaming is intentionally deferred to a later milestone.
+```js
+globalThis.__LLMGATEWAY_ADAPTER__ = {
+  async chat(request) { /* ... */ }
+};
+```
 
-## Failure semantics
+must add:
 
-The browser route still uses the normal Router and Gateway behavior:
+- `meta.contract_version = 1`;
+- non-empty `meta.id`;
+- non-empty `meta.provider`;
+- a `probe(context)` function, or accept the contract's default probe behavior.
 
-- a session that is not `ready` is excluded during route planning;
-- 429 participates in normal account quota/cooldown handling;
-- 401/403 marks the browser session `requires_attention` and the router can fail over to another account/provider;
-- transport/script failures count as route failures and can fail over according to the existing route order.
+The runtime always verifies script metadata. `adapter_contract_version = 1` in TOML is an optional startup guard that makes the intended contract explicit.
 
-## Security boundary
+A legacy script without contract metadata is reported as `browser_adapter_incompatible`; it is not silently executed as an unknown contract version.
 
-Treat an adapter script as trusted local code. It runs in the authenticated page and therefore has the same origin-level authority available to page JavaScript. Keep scripts in a user-controlled local directory, review them before use, and do not accept adapter scripts from untrusted sources.
+## Probe semantics
+
+`probe(context)` should cheaply decide whether the current authenticated page still matches the adapter.
+
+Recommended result:
+
+```js
+{
+  ok: true,
+  code: "ready",
+  message: "composer detected",
+  page_signature: "provider-page-v3"
+}
+```
+
+Common failure codes include:
+
+```text
+adapter_incompatible
+login_required
+wrong_page
+```
+
+The probe should not submit prompts or mutate account data.
+
+## Chat result
+
+`chat(request, context)` receives an OpenAI Chat Completions-shaped request whose `model` is the selected physical route model.
+
+It returns:
+
+- `status`: HTTP-style status, default 200;
+- `content_type`: response media type, default `application/json`;
+- `body`: JSON value or string.
+
+For the current browser streaming path, return `text/event-stream` and a complete OpenAI-compatible SSE string. It is still buffered before forwarding. True incremental CDP streaming is scheduled for v0.30.
+
+## Context object
+
+The contract context may include:
+
+```text
+provider
+adapter_id
+contract_version
+model_label
+selectors
+probe_timeout_ms
+response_timeout_ms
+```
+
+Custom adapters receive the route model as `model_label` by default. Built-in Gemini/Qwen adapters only receive a model label when the binding has an explicit `model_labels` mapping.
+
+## Diagnostics and drift
+
+CDP adapters participate in Account Intelligence and Route Readiness.
+
+A page that no longer matches the adapter is excluded with:
+
+```text
+browser_adapter_incompatible
+```
+
+instead of being treated as a random transport outage.
+
+Runtime/CDP failures remain separate:
+
+```text
+browser_session_unavailable
+browser_transport_error
+```
+
+This separation prevents retry storms when the provider simply changed its UI.
+
+## Built-in adapters
+
+For normal Gemini/Qwen usage, use `browser-gemini` / `browser-qwen` rather than copying their scripts into a custom adapter. See [Browser provider adapters](browser-provider-adapters.md).

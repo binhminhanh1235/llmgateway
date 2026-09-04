@@ -1,130 +1,326 @@
 # Browser provider adapters
 
-llmgateway lets browser-backed accounts participate in the same router used by API accounts.
+llmgateway treats browser accounts as first-class execution providers behind the same Router used by API accounts.
 
-The ownership rule is simple: browser cookies, local storage, refresh state, CAPTCHA, and 2FA stay inside the isolated Chromium profile. The gateway does not export raw browser credentials through its API or provider adapter contract.
+The security and ownership boundary is deliberate:
 
-## Route lifecycle
+- cookies, local storage, refresh state and provider authentication stay inside the isolated Chromium profile;
+- CAPTCHA, 2FA, passkeys and anti-abuse challenges remain normal interactive provider flows;
+- llmgateway never exports raw browser credentials through its APIs;
+- llmgateway owns conversation/context state; provider-native chats are execution surfaces for individual turns.
+
+## v0.28 provider kinds
+
+v0.28 adds two built-in browser provider kinds:
 
 ```text
-virtual model
-    |
-    v
-Router
-    |
-    +-- API route ----------------------> OpenAI-compatible transport
-    |
-    +-- browser route
-           |
-           +-- account -> browser binding -> browser session
-           |
-           +-- session READY? -- no --> route is excluded
-           |
-           +-- yes
-                 |
-                 v
-          BrowserProviderRegistry
-                 |
-                 v
-             adapter kind
-                 |
-                 v
-          upstream response
+browser-gemini
+browser-qwen
 ```
 
-Browser routes use the normal `[[providers]]`, `[[accounts]]`, `[[routes]]`, and `[virtual_models.*]` configuration. The only extra mapping is an account-to-session binding:
+The generic integration lanes remain available:
+
+```text
+browser-cdp    trusted local contract-v1 adapter script
+browser-http   local bridge/test transport
+```
+
+Built-in Gemini/Qwen adapters are embedded into the llmgateway binary. They do not require an `adapter_script` path.
+
+## Example: Gemini Web
 
 ```toml
+[browser.sessions.gemini-web-primary]
+provider = "gemini-web"
+label = "Gemini web primary"
+login_url = "https://gemini.google.com/app"
+enabled = true
+
 [browser.bindings.gemini-web-account]
 session = "gemini-web-primary"
-```
+adapter_contract_version = 1
+models = ["gemini-web-pro"]
+# Optional. If omitted, keep the model already selected in Gemini UI.
+model_labels = { "gemini-web-pro" = "Pro" }
+ephemeral_chat = true
 
-The route is eligible only when that browser session is enabled and has lifecycle status `ready`. Since v0.27, `browser-cdp` routes additionally verify that the live Chromium/CDP runtime is reachable and that a configured authenticated page is visible at route-planning time.
+[chromium.sessions.gemini-web-primary]
+enabled = true
+ready_url_prefixes = ["https://gemini.google.com/app"]
 
-## First-class browser accounts (v0.17)
-
-Browser accounts no longer need fake API credentials or an explicit model-discovery switch. The provider kind defines the transport boundary.
-
-```toml
 [[providers]]
 id = "gemini-web"
-kind = "browser-cdp"
+kind = "browser-gemini"
 
 [[accounts]]
 id = "gemini-web-account"
 provider = "gemini-web"
 enabled = true
-```
-
-For `browser-*` providers, llmgateway automatically:
-
-- treats the account transport as browser-backed;
-- does not require `api_key_env`;
-- disables API model discovery;
-- prevents the account from being used as a hybrid-retrieval embedding backend.
-
-API accounts are unchanged and still default to model discovery enabled:
-
-```toml
-[[accounts]]
-id = "openrouter-main"
-provider = "openrouter"
-api_key_env = "OPENROUTER_API_KEY"
-enabled = true
-```
-
-## Adapter contract
-
-`BrowserProviderAdapter` receives an OpenAI-shaped chat request plus the selected provider, account, route, and opaque browser session ID. It returns a normal upstream HTTP response, so compatibility, quota, retry, and failover behavior stay shared with API providers.
-
-Two execution lanes are available:
-
-- `browser-http`: a narrow local bridge/test contract that forwards opaque session/account/route IDs but never cookies or profile secrets.
-- `browser-cdp`: executes a trusted local provider adapter inside an already-authenticated Chromium page over loopback CDP.
-
-Example CDP provider:
-
-```toml
-[[providers]]
-id = "gemini-web"
-kind = "browser-cdp"
-
-[[accounts]]
-id = "gemini-web-account"
-provider = "gemini-web"
-enabled = true
-
-[browser.bindings.gemini-web-account]
-session = "gemini-web-primary"
-target_url_prefix = "https://gemini.google.com/app"
-adapter_script = "adapters/gemini.js"
 
 [[routes]]
-id = "gemini-web-route"
+id = "gemini-web-pro"
 account = "gemini-web-account"
-model = "gemini-web-model"
-priority = 10
+model = "gemini-web-pro"
+priority = 5
 enabled = true
-capabilities = ["chat"]
+capabilities = ["chat", "reasoning", "long-context"]
 ```
 
-Provider-specific adapter scripts remain experimental integration code. They must respect service terms and normal authentication, anti-abuse, and quota controls. llmgateway does not automate CAPTCHA/2FA or expose raw browser session secrets.
+## Example: Qwen Web
 
-## Authentication expiry
+```toml
+[browser.sessions.qwen-web-primary]
+provider = "qwen-web"
+label = "Qwen web primary"
+login_url = "https://chat.qwen.ai/"
+enabled = true
 
-A `401` or `403` from a browser adapter has browser-specific meaning. llmgateway:
+[browser.bindings.qwen-web-account]
+session = "qwen-web-primary"
+adapter_contract_version = 1
+models = ["qwen-web-coder"]
+model_labels = { "qwen-web-coder" = "Qwen3-Coder" }
+ephemeral_chat = true
 
-1. records the route/account failure through the normal quota and health path,
-2. transitions the bound browser session to `requires_attention`,
-3. continues failover to the next healthy route,
-4. excludes that browser route from future plans until the user signs in again and the session returns to `ready`.
+[chromium.sessions.qwen-web-primary]
+enabled = true
+ready_url_prefixes = ["https://chat.qwen.ai/"]
 
-This makes an expired browser login visible in the Accounts UI instead of creating an invisible retry loop.
+[[providers]]
+id = "qwen-web"
+kind = "browser-qwen"
 
-Transport/runtime failures are also distinguishable in Execution Trace as `browser_session_unavailable` or `browser_transport_error`. CDP runtime failures degrade the session so the v0.27 reconciler can recover it when safe.
+[[accounts]]
+id = "qwen-web-account"
+provider = "qwen-web"
+enabled = true
 
-## Why the router is shared
+[[routes]]
+id = "qwen-web-coder"
+account = "qwen-web-account"
+model = "qwen-web-coder"
+priority = 5
+enabled = true
+capabilities = ["chat", "coding", "reasoning"]
+```
 
-There is intentionally no second browser router. Browser-backed models are another execution lane behind the same route planner. That preserves one place for readiness, priority, quota pressure, adaptive health, task fit, cooldown, and affinity.
+Browser accounts need no dummy API key and API model discovery is disabled automatically.
 
-v0.27 adds a transport policy for virtual models. The default `execution_preference = "browser-first"` ranks eligible browser routes as a tier before API routes, while all normal scoring still chooses the best route inside each tier. API routes remain deterministic fallback when `api_fallback = true`.
+## Adapter contract v1
+
+All CDP adapters now use a versioned page-context contract.
+
+An adapter exposes:
+
+```js
+globalThis.__LLMGATEWAY_ADAPTER__ = {
+  meta: {
+    contract_version: 1,
+    id: "provider-adapter-id",
+    provider: "provider-name",
+    adapter_version: "..."
+  },
+
+  async probe(context) {
+    return {
+      ok: true,
+      code: "ready",
+      message: "compatible page detected",
+      page_signature: "provider-page-v1"
+    };
+  },
+
+  async chat(request, context) {
+    return {
+      status: 200,
+      content_type: "application/json",
+      body: { /* OpenAI Chat Completions-shaped response */ }
+    };
+  }
+};
+```
+
+The gateway validates the contract and adapter identity before trusting the result.
+
+The probe runs before a CDP-backed route becomes eligible. This gives provider UI drift a dedicated failure state instead of pretending it is a generic network error.
+
+## Adapter diagnostics
+
+Account Intelligence exposes adapter-level state independently from Chromium/session state:
+
+```text
+browser_adapter.status
+browser_adapter.adapter_id
+browser_adapter.adapter_version
+browser_adapter.contract_version
+browser_adapter.expected_contract_version
+browser_adapter.message
+browser_adapter.page_signature
+browser_adapter.configured_models
+```
+
+Readiness reasons include:
+
+```text
+browser_adapter_incompatible
+browser_adapter_login_required
+browser_adapter_unavailable
+```
+
+Execution Trace can distinguish:
+
+```text
+browser_adapter_incompatible
+browser_model_unavailable
+browser_session_unavailable
+browser_transport_error
+```
+
+This matters because the remedies are different:
+
+- browser process/CDP unavailable: runtime recovery can help;
+- login required: user must authenticate normally;
+- adapter incompatible: provider UI/selectors changed, so retrying the same route blindly is pointless;
+- model unavailable: fix model mapping/provider UI choice.
+
+## Page-drift recovery
+
+Built-in adapters carry several selector fallbacks, but provider web UIs can change without notice.
+
+A binding can temporarily override selector groups without rebuilding llmgateway:
+
+```toml
+[browser.bindings.gemini-web-account]
+session = "gemini-web-primary"
+selector_overrides = { input = ["div[aria-label='Enter a prompt for Gemini']"], send = ["button[aria-label='Send message']"] }
+```
+
+
+Selector overrides are a recovery mechanism, not a way to bypass authentication or provider controls.
+
+## Model selection
+
+The route `model` is the stable llmgateway model ID.
+
+Provider web UIs often display a different label, so bindings can map logical IDs to UI labels:
+
+```toml
+model_labels = {
+  "gemini-web-pro" = "Pro",
+  "gemini-web-flash" = "Flash"
+}
+```
+
+Built-in adapters only touch the provider model picker when a mapping exists. Without a mapping they leave the currently selected provider UI model unchanged. This avoids guessing unstable provider display names.
+
+The optional `models` list is an account binding allowlist. A route requesting a model outside that list fails as `browser_model_unavailable`.
+
+## Stateless provider tabs
+
+Built-in Gemini/Qwen adapters default to:
+
+```toml
+ephemeral_chat = true
+```
+
+For each gateway request:
+
+```text
+existing authenticated Chromium profile
+             |
+             v
+create fresh provider chat tab
+             |
+             v
+send llmgateway-compiled context
+             |
+             v
+read result
+             |
+             v
+close provider tab
+```
+
+Cookies/authentication are reused from the profile, while provider-native conversation history is not silently reused.
+
+This preserves llmgateway's core ownership rule:
+
+> The conversation belongs to llmgateway, not to a provider-native chat ID.
+
+Set `ephemeral_chat = false` only when intentionally using a persistent provider page.
+
+## Coding-agent tool bridge
+
+Claude Code, Codex and OpenCode depend on tool/function calls. Provider web UIs do not expose the same native OpenAI/Anthropic tool API, so built-in adapters implement a prompt-mediated compatibility bridge.
+
+When the normalized request contains `tools`, the adapter:
+
+1. serializes function names, descriptions and JSON schemas into a tool protocol;
+2. sends prior assistant tool calls and tool results as part of the compiled turn history;
+3. asks the web model to emit a strict llmgateway tool envelope when a client tool is required;
+4. parses that envelope;
+5. converts it into OpenAI-compatible `tool_calls`;
+6. lets the existing Anthropic/Responses compatibility layer translate it for Claude Code or Codex.
+
+Both non-streaming and the current buffered-SSE browser path emit standard OpenAI tool-call shapes.
+
+This is a compatibility bridge, not provider-native function calling. Model compliance with the prompt protocol is therefore best-effort. True incremental browser streaming remains the v0.30 milestone.
+
+## Failure semantics
+
+The normal Router still owns fallback.
+
+Examples:
+
+```text
+Gemini A: adapter incompatible
+        -> excluded
+
+Gemini B: ready
+        -> selected
+
+Gemini B: login expires
+        -> requires_attention
+
+Qwen A: ready
+        -> selected
+
+all browser accounts unavailable
+        -> optional API fallback
+```
+
+HTTP 401/403 from a browser provider marks its bound session `requires_attention`. Runtime transport failures can move a CDP session to `degraded`, allowing the v0.27 reconciler to recover it safely.
+
+Adapter incompatibility does not intentionally destroy or reset the browser profile. The account stays diagnosable so selectors/adapter code can be updated without forcing a fresh login.
+
+## Deterministic CI
+
+v0.28 does not depend on live Gemini/Qwen websites in CI.
+
+The suite includes:
+
+- Node fake-page fixtures for Gemini/Qwen probe behavior;
+- healthy composer detection;
+- login-required detection;
+- page-drift / missing-selector detection;
+- coding-agent tool-call conversion;
+- fake CDP target/Runtime.evaluate fixtures;
+- contract metadata/version validation;
+- adapter health/page-signature diagnostics.
+
+Live provider pages can still evolve between releases, which is why diagnostics and selector overrides are first-class product behavior rather than hidden implementation details.
+
+## Security and service constraints
+
+Browser adapters must respect provider terms, quota limits, anti-abuse controls and normal authentication flows.
+
+llmgateway does not:
+
+- solve or bypass CAPTCHA;
+- automate 2FA/passkey challenges;
+- export raw cookies;
+- bypass provider rate limits;
+- make an unavailable model appear available;
+- treat a changed provider UI as healthy.
+
+The browser integration is designed to fail visibly and fall back safely.
