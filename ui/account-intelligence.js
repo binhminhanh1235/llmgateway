@@ -56,9 +56,13 @@
       const state = classify(account);
       const readiness = account.readiness || {};
       const session = account.browser_session;
+      const adapter = account.browser_adapter;
       const credential = account.transport === "api"
         ? account.credential_configured === true ? "Key configured" : "Key missing"
         : session?.label || session?.id || "Browser session";
+      const adapterText = account.transport === "browser" && adapter?.adapter_id
+        ? adapter.adapter_id + (adapter.adapter_version ? " · " + adapter.adapter_version : "")
+        : "";
       const routeCount = Number(readiness.route_count ?? (account.route_ids || []).length);
       const healthyRoutes = Number(readiness.healthy_route_count ?? routeCount);
       const routeText = routeCount ? `${healthyRoutes}/${routeCount} routes healthy` : "dynamic routes";
@@ -67,10 +71,12 @@
         <span class="account-intel-chip transport-${escapeAttr(account.transport)}">${account.transport === "browser" ? "Browser" : "API"}</span>
         <span class="account-intel-chip state-${escapeAttr(state.level)}"><span class="account-intel-dot"></span>${escapeHtml(state.label)}</span>
         <span class="account-intel-detail">${escapeHtml(credential)}</span>
+        ${adapterText ? `<span class="account-intel-detail">${escapeHtml(adapterText)}</span>` : ""}
         <span class="account-intel-detail">${escapeHtml(routeText)}</span>`;
 
       const reasons = Array.isArray(readiness.reasons) ? readiness.reasons.join(", ") : "";
-      const message = session?.last_error || state.note || reasons;
+      const adapterProblem = adapter && adapter.status !== "ready" ? adapter.message : "";
+      const message = adapterProblem || session?.last_error || readiness.browser_adapter_message || state.note || reasons;
       strip.title = message || "";
     }
   }
@@ -98,17 +104,32 @@
     if (reasons.has("quota_blocked")) {
       return { level: "danger", label: "Quota blocked", note: "Router is excluding this account until quota state recovers" };
     }
+    if (reasons.has("browser_adapter_incompatible")) {
+      return { level: "danger", label: "Adapter incompatible", note: account.browser_adapter?.message || readiness.browser_adapter_message || "Provider web UI no longer matches the adapter" };
+    }
+    if (reasons.has("browser_adapter_login_required")) {
+      return { level: "warning", label: "Login required", note: account.browser_adapter?.message || "Sign in again in the browser" };
+    }
+    if (reasons.has("browser_adapter_unavailable")) {
+      return { level: "danger", label: "Adapter unavailable", note: account.browser_adapter?.message || "Browser adapter is not available" };
+    }
+    if (reasons.has("browser_session_stopped")) {
+      return { level: "muted", label: "Stopped", note: "Browser session was stopped intentionally" };
+    }
+    if (reasons.has("browser_login_required")) {
+      return { level: "warning", label: "Login required", note: "Open the browser session and sign in" };
+    }
+    if (reasons.has("browser_session_degraded")) {
+      return { level: "warning", label: "Recovering", note: account.browser_session?.last_error || "Browser runtime is being recovered" };
+    }
+    if (reasons.has("browser_session_requires_attention")) {
+      return { level: "danger", label: "Needs attention", note: account.browser_session?.last_error || "Browser authentication needs attention" };
+    }
+    if (reasons.has("browser_session_failed")) {
+      return { level: "danger", label: "Browser failed", note: account.browser_session?.last_error || "Browser recovery failed" };
+    }
     if (reasons.has("browser_session_not_ready")) {
-      switch (account.browser_session?.status) {
-        case "login_in_progress":
-          return { level: "working", label: "Signing in", note: "Waiting for browser login verification" };
-        case "requires_login":
-          return { level: "warning", label: "Login required", note: "Open the browser session and sign in" };
-        case "requires_attention":
-          return { level: "danger", label: "Needs attention", note: account.browser_session?.last_error || "Browser session needs attention" };
-        default:
-          return { level: "danger", label: "Browser unavailable", note: "Browser account is not currently ready for routing" };
-      }
+      return { level: "danger", label: "Browser unavailable", note: "Browser account is not currently ready for routing" };
     }
     return { level: "danger", label: "Unavailable", note: [...reasons].join(", ") || "Account is not eligible for routing" };
   }
