@@ -99,6 +99,15 @@ adaptive_latency_target_ms = 1200
 adaptive_max_penalty = 30
 adaptive_failure_weight = 0.70
 
+# v0.26 task-aware routing classifies the request locally, without another LLM call.
+# Lower final scores win. Matching route metadata can subtract a bounded bonus while
+# explicit premium/expensive metadata may add a small simple-chat mismatch penalty.
+task_aware_enabled = true
+task_fit_max_bonus = 20
+task_mismatch_penalty = 12
+task_long_context_threshold_tokens = 12000
+task_simple_max_input_tokens = 800
+
 # Context is compiled before persistent-thread requests are sent upstream.
 # Full transcripts remain in SQLite; checkpoints only replace older turns in the model input.
 [context]
@@ -210,13 +219,16 @@ discover_models = true
 # enabled = true
 
 # Routes are explicit preferred bindings. Discovered API account/model pairs can also be used dynamically.
+# Task-aware capability tags are policy metadata: coding, reasoning, long-context, cheap, fast,
+# simple-chat, premium, expensive. context_window is optional and should be set only when known;
+# a known window that cannot fit the request is excluded before scoring.
 [[routes]]
 id = "gemini-primary"
 account = "gemini-primary"
 model = "gemini-3.7-flash"
 priority = 10
 enabled = true
-capabilities = ["chat", "tools", "vision", "coding"]
+capabilities = ["chat", "tools", "vision", "coding", "cheap", "fast"]
 
 [[routes]]
 id = "gemini-secondary"
@@ -224,7 +236,7 @@ account = "gemini-secondary"
 model = "gemini-3.7-flash"
 priority = 20
 enabled = true
-capabilities = ["chat", "tools", "vision", "coding"]
+capabilities = ["chat", "tools", "vision", "coding", "cheap", "fast"]
 
 [[routes]]
 id = "qwen-coder"
@@ -232,7 +244,7 @@ account = "qwen-primary"
 model = "qwen3-coder-plus"
 priority = 10
 enabled = true
-capabilities = ["chat", "tools", "coding"]
+capabilities = ["chat", "tools", "coding", "reasoning"]
 
 [[routes]]
 id = "openrouter-fallback"
@@ -240,7 +252,8 @@ account = "openrouter-main"
 model = "anthropic/claude-sonnet-4.6"
 priority = 100
 enabled = true
-capabilities = ["chat", "tools", "coding"]
+capabilities = ["chat", "tools", "coding", "reasoning", "long-context", "premium"]
+# context_window = 200000 # optional example; use the provider/model value you have verified
 
 # [[routes]]
 # id = "gemini-web-route"
