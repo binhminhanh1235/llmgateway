@@ -600,13 +600,18 @@
       );
       const composer = queryVisible(context, "input");
       const loginVisible = Boolean(loginIndicator(context));
+      if (loginVisible) {
+        return {
+          ok: false,
+          code: "login_required",
+          message: "ChatGPT login is required before the adapter can run."
+        };
+      }
       if (!composer) {
         return {
           ok: false,
-          code: loginVisible ? "login_required" : "adapter_incompatible",
-          message: loginVisible
-            ? "ChatGPT login is required before the adapter can run."
-            : "ChatGPT prompt composer was not found; the web UI may have changed."
+          code: "adapter_incompatible",
+          message: "ChatGPT prompt composer was not found; the web UI may have changed."
         };
       }
       return {
