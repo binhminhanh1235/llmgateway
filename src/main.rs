@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let live_config = LiveConfig::new(config.clone());
     let gateway_api_key = Arc::new(config.gateway_api_key()?);
 
-    let catalog = Arc::new(ModelCatalog::connect(config.clone()).await?);
+    let catalog = Arc::new(ModelCatalog::connect(live_config.clone()).await?);
     catalog.seed_from_config().await?;
     let conversations = Arc::new(ConversationStore::connect(config.clone()).await?);
     let execution_traces = Arc::new(ExecutionTraceStore::connect(config.clone()).await?);
@@ -178,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let gateway = Arc::new(Gateway::new(
         config.clone(),
-        live_config,
+        live_config.clone(),
         catalog.clone(),
         execution_traces,
     )?);
