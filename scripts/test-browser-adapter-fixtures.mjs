@@ -273,6 +273,49 @@ async function testChatGPTToolBridge() {
   );
 }
 
+async function testChatGPTModelPickerFlow() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const trigger = new FakeElement("Instant");
+  const configure = new FakeElement("Configure...");
+  const modal = new FakeElement("Intelligence");
+  const thinking = new FakeElement("Thinking For complex questions");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "#prompt-textarea": input,
+    "button.__composer-pill": trigger,
+    "#composer-submit-button": send,
+    "[data-message-author-role='assistant'] .markdown": response
+  };
+  let selected = false;
+  trigger.onClick = () => {
+    nodes["[data-testid='model-configure-modal']"] = configure;
+  };
+  configure.onClick = () => {
+    nodes["[data-testid='modal-intelligence-menu']"] = modal;
+    nodes["[data-testid='modal-intelligence-menu'] button[role='radio']"] = thinking;
+  };
+  thinking.onClick = () => { selected = true; };
+  send.onClick = () => {
+    response.innerText = "model-selected";
+    response.textContent = response.innerText;
+  };
+
+  installPage({ host: "chatgpt.com", nodes });
+  const adapter = loadAdapter("adapters/chatgpt-web.js");
+  const result = await adapter.chat({
+    model: "chatgpt-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "Use Thinking" }]
+  }, {
+    model_label: "Thinking",
+    response_timeout_ms: 4000
+  });
+
+  assert.equal(selected, true);
+  assert.equal(result.body.choices[0].message.content, "model-selected");
+}
+
 async function testQwenToolBridgeStream() {
   const input = new FakeTextAreaElement();
   const response = new FakeElement("");
@@ -435,6 +478,7 @@ await testChatGPT();
 await testQwen();
 await testGeminiToolBridge();
 await testChatGPTToolBridge();
+await testChatGPTModelPickerFlow();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
 await testGeminiStreamCancellation();
