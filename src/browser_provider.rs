@@ -6,15 +6,25 @@ use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{header::CONTENT_TYPE, Client};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
-use tokio::time::timeout;
+use tokio::{sync::RwLock, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const MAX_ADAPTER_SCRIPT_BYTES: u64 = 512 * 1024;
 const CDP_EXECUTION_TIMEOUT_SECONDS: u64 = 600;
+pub const BROWSER_ADAPTER_CONTRACT_VERSION: u32 = 1;
+const ADAPTER_HEALTH_TTL_SECONDS: u64 = 30;
+const GEMINI_WEB_ADAPTER: &str = include_str!("../adapters/gemini-web.js");
+const QWEN_WEB_ADAPTER: &str = include_str!("../adapters/qwen-web.js");
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct BrowserProviderConfig {
@@ -29,6 +39,80 @@ pub struct BrowserAccountBinding {
     pub target_url_prefix: Option<String>,
     #[serde(default)]
     pub adapter_script: Option<String>,
+    #[serde(default)]
+    pub adapter_contract_version: Option<u32>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub model_labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub selector_overrides: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub ephemeral_chat: Option<bool>,
+    #[serde(default)]
+    pub probe_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub response_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BrowserAdapterDiagnostics {
+    pub account_id: String,
+    pub provider_kind: String,
+    pub adapter_id: Option<String>,
+    pub adapter_version: Option<String>,
+    pub contract_version: Option<u32>,
+    pub expected_contract_version: u32,
+    pub status: String,
+    pub message: String,
+    pub page_signature: Option<String>,
+    pub target_url_prefix: Option<String>,
+    pub configured_models: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedAdapterDiagnostics {
+    checked_at: Instant,
+    diagnostics: BrowserAdapterDiagnostics,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdapterMeta {
+    contract_version: u32,
+    id: String,
+    provider: String,
+    #[serde(default)]
+    adapter_version: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdapterProbeResult {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    page_signature: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdapterContractError {
+    code: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdapterContractEnvelope {
+    #[serde(default)]
+    meta: Option<AdapterMeta>,
+    #[serde(default)]
+    probe: Option<AdapterProbeResult>,
+    #[serde(default)]
+    result: Option<CdpAdapterResult>,
+    #[serde(default)]
+    error: Option<AdapterContractError>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -61,6 +145,14 @@ pub enum BrowserProviderError {
         account_id: String,
         session_id: String,
     },
+    #[error("browser adapter incompatible for account '{account_id}' ({code}): {message}")]
+    AdapterIncompatible {
+        account_id: String,
+        code: String,
+        message: String,
+    },
+    #[error("browser model '{model}' is not available for account '{account_id}'")]
+    ModelUnavailable { account_id: String, model: String },
     #[error("browser provider transport error: {0}")]
     Transport(String),
     #[error("browser provider config read error: {0}")]
@@ -82,6 +174,7 @@ pub trait BrowserProviderAdapter: Send + Sync {
 pub struct BrowserProviderRegistry {
     config: Arc<BrowserProviderConfig>,
     adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>>,
+    adapter_health: Arc<RwLock<BTreeMap<String, CachedAdapterDiagnostics>>>,
 }
 
 impl BrowserProviderConfig {
