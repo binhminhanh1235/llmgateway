@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04.2";
+  const ADAPTER_VERSION = "2026.09.04.3";
 
   const defaults = {
     input: [
@@ -22,6 +22,14 @@
       "button[aria-label*='Send' i]",
       "button.send-button",
       ".send-button"
+    ],
+    newChat: [
+      "button[aria-label='New chat']",
+      "button[aria-label*='New chat' i]",
+      "a[aria-label='New chat']",
+      "a[aria-label*='New chat' i]",
+      "[data-test-id='new-chat-button']",
+      "a[href='/app']"
     ],
     response: [
       "div.markdown.markdown-main-panel",
@@ -89,6 +97,7 @@
     } catch (_) {}
     return true;
   };
+  const queryVisible = (context, key) => queryAll(context, key).find(isVisible) || null;
   const loginIndicator = (context) => queryAll(context, "login").find(isVisible) || null;
   const waitFor = async (fn, timeoutMs = 30000, pollMs = 120) => {
     const deadline = Date.now() + timeoutMs;
@@ -280,7 +289,52 @@
     return desired;
   };
 
-  const responseTexts = (context) => queryAll(context, "response").map(text).filter(Boolean);
+  const responseTexts = (context) => {
+    const visible = queryAll(context, "response").filter(isVisible);
+    const markdown = visible.filter((node) => node.matches?.("div.markdown.markdown-main-panel"));
+    const messageContent = visible.filter((node) => node.matches?.("model-response message-content"));
+    const leaves = markdown.length ? markdown : messageContent;
+    return leaves.map(text).filter(Boolean);
+  };
+  const newResponseText = (before, responses) => {
+    const prior = new Set(before);
+    return responses.find((value) => !prior.has(value))
+      || responses.find((value, index) => value !== before[index])
+      || "";
+  };
+
+  const captureResponseBaseline = async (context) => {
+    if (!context?.reuse_native_conversation) return responseTexts(context);
+    const hydrated = await waitFor(() => {
+      const responses = responseTexts(context);
+      return responses.length ? responses : null;
+    }, 10000);
+    if (!hydrated) {
+      throw new Error("ADAPTER_INCOMPATIBLE: Gemini conversation history did not load");
+    }
+    await sleep(1000);
+    return responseTexts(context);
+  };
+
+  const freshChatLocation = () => {
+    const segments = String(location.pathname || "").split("/").filter(Boolean);
+    const appIndex = segments.lastIndexOf("app");
+    return appIndex >= 0 && appIndex === segments.length - 1;
+  };
+
+  const startNewConversation = async (context) => {
+    if (!context?.start_new_conversation) return;
+    const newChat = await waitFor(() => queryVisible(context, "newChat"), 8000);
+    if (!newChat) {
+      throw new Error("ADAPTER_INCOMPATIBLE: Gemini New chat control was not found");
+    }
+    newChat.click();
+    const reset = await waitFor(freshChatLocation, 8000);
+    if (!reset) {
+      throw new Error("ADAPTER_INCOMPATIBLE: Gemini did not open a fresh chat");
+    }
+    await sleep(250);
+  };
 
   const streamJobs = globalThis.__LLMGATEWAY_STREAM_JOBS__ || new Map();
   globalThis.__LLMGATEWAY_STREAM_JOBS__ = streamJobs;
@@ -326,16 +380,16 @@
     Promise.resolve().then(async () => {
       try {
         await selectModel(context);
-        const composer = await waitFor(() => queryFirst(context, "input"), 15000);
+        await startNewConversation(context);
+        const composer = await waitFor(() => queryVisible(context, "input"), 15000);
         if (!composer) throw new Error("ADAPTER_INCOMPATIBLE: Gemini prompt composer disappeared");
 
-        const before = responseTexts(context);
-        const baselineText = before[before.length - 1] || "";
+        const before = await captureResponseBaseline(context);
         const prompt = formatMessages(request);
         if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
         setComposer(composer, prompt);
 
-        const send = await waitFor(() => queryFirst(context, "send"), 5000);
+        const send = await waitFor(() => queryVisible(context, "send"), 5000);
         if (!send) {
           if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: Gemini session expired");
           throw new Error("ADAPTER_INCOMPATIBLE: Gemini send control was not found");
@@ -348,7 +402,7 @@
         let answer = "";
         while (Date.now() - startedAt < Number(context?.response_timeout_ms || 180000)) {
           if (state.cancelled) {
-            const stop = queryFirst(context, "completion");
+            const stop = queryVisible(context, "completion");
             try { stop?.click(); } catch (_) {}
             throw new Error("STREAM_CANCELLED: client disconnected or cancelled");
           }
@@ -356,9 +410,9 @@
             throw new Error("LOGIN_REQUIRED: Gemini session expired while waiting for a response");
           }
           const responses = responseTexts(context);
-          const candidate = responses[responses.length - 1] || "";
-          const responseAdvanced = responses.length > before.length || (candidate && candidate !== baselineText);
-          const generating = Boolean(queryFirst(context, "completion"));
+          const candidate = newResponseText(before, responses);
+          const responseAdvanced = Boolean(candidate);
+          const generating = Boolean(queryVisible(context, "completion"));
           if (!responseAdvanced) {
             await sleep(120);
             continue;
@@ -453,7 +507,7 @@
     const state = streamJobs.get(String(streamId || ""));
     if (!state) return { cancelled: false, missing: true };
     state.cancelled = true;
-    try { queryFirst(state.context, "completion")?.click(); } catch (_) {}
+    try { queryVisible(state.context, "completion")?.click(); } catch (_) {}
     return { cancelled: true };
   };
 
@@ -473,10 +527,10 @@
         return { ok: false, code: "wrong_page", message: "Expected gemini.google.com but found " + currentHost };
       }
       await waitFor(
-        () => queryFirst(context, "input") || loginIndicator(context),
+        () => queryVisible(context, "input") || loginIndicator(context),
         probeTimeoutMs
       );
-      const composer = queryFirst(context, "input");
+      const composer = queryVisible(context, "input");
       const loginVisible = Boolean(loginIndicator(context));
       if (!composer) {
         return {
@@ -509,16 +563,16 @@
 
     async chat(request, context) {
       await selectModel(context);
-      const composer = await waitFor(() => queryFirst(context, "input"), 15000);
+      await startNewConversation(context);
+      const composer = await waitFor(() => queryVisible(context, "input"), 15000);
       if (!composer) throw new Error("ADAPTER_INCOMPATIBLE: Gemini prompt composer disappeared");
 
-      const before = responseTexts(context);
-      const baselineText = before[before.length - 1] || "";
+      const before = await captureResponseBaseline(context);
       const prompt = formatMessages(request);
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
       setComposer(composer, prompt);
 
-      const send = await waitFor(() => queryFirst(context, "send"), 5000);
+      const send = await waitFor(() => queryVisible(context, "send"), 5000);
       if (!send) {
         if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: Gemini session expired");
         throw new Error("ADAPTER_INCOMPATIBLE: Gemini send control was not found");
@@ -534,9 +588,9 @@
           throw new Error("LOGIN_REQUIRED: Gemini session expired while waiting for a response");
         }
         const responses = responseTexts(context);
-        const candidate = responses[responses.length - 1] || "";
-        const responseAdvanced = responses.length > before.length || (candidate && candidate !== baselineText);
-        const generating = Boolean(queryFirst(context, "completion"));
+        const candidate = newResponseText(before, responses);
+        const responseAdvanced = Boolean(candidate);
+        const generating = Boolean(queryVisible(context, "completion"));
         if (!responseAdvanced) {
           await sleep(180);
           continue;

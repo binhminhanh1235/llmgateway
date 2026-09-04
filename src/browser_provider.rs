@@ -909,7 +909,9 @@ struct CdpStreamPoll {
 struct CdpStreamCleanup {
     adapter: CdpBrowserAdapter,
     target: CdpTarget,
+    provider_id: String,
     account_id: String,
+    thread_id: Option<String>,
     stream_id: String,
     profile_dir: String,
     ephemeral: bool,
@@ -934,7 +936,9 @@ impl Drop for CdpStreamCleanup {
         }
         let adapter = self.adapter.clone();
         let target = self.target.clone();
+        let provider_id = self.provider_id.clone();
         let account_id = self.account_id.clone();
+        let thread_id = self.thread_id.clone();
         let stream_id = self.stream_id.clone();
         let profile_dir = self.profile_dir.clone();
         let ephemeral = self.ephemeral;
@@ -948,8 +952,16 @@ impl Drop for CdpStreamCleanup {
                         &account_id,
                     )
                     .await;
-                if ephemeral {
+                if ephemeral || thread_id.is_some() {
                     adapter.close_target(&profile_dir, &target.id).await;
+                }
+                if let (Some(thread_id), Some(store)) = (thread_id, conversation_runtime::get()) {
+                    if let Err(error) = store
+                        .delete_provider_conversation(&thread_id, &provider_id, &account_id)
+                        .await
+                    {
+                        warn!(%error, %thread_id, %provider_id, %account_id, "failed to clear native conversation affinity after browser stream abort");
+                    }
                 }
             });
         }
@@ -1573,13 +1585,6 @@ impl CdpBrowserAdapter {
         let native_affinity_request =
             (request.thread_id.is_some() && self.supports_native_conversation_affinity())
                 .then(|| request.clone());
-        let native_conversation_persisted = if let Some(native_request) = native_affinity_request.as_ref() {
-            self.persist_native_conversation(native_request, &target, Duration::from_millis(250))
-                .await
-        } else {
-            false
-        };
-
         let status = match reqwest::StatusCode::from_u16(start.status) {
             Ok(status) => status,
             Err(error) => {
@@ -1603,19 +1608,23 @@ impl CdpBrowserAdapter {
         );
         let stream_target = target.clone();
         let stream_native_request = native_affinity_request.clone();
+        let stream_provider_id = request.provider.id.clone();
+        let stream_thread_id = request.thread_id.clone();
 
         let stream = async_stream::stream! {
-            let mut native_conversation_persisted = native_conversation_persisted;
             let mut cleanup = CdpStreamCleanup {
                 adapter: adapter.clone(),
                 target: stream_target.clone(),
+                provider_id: stream_provider_id,
                 account_id: account_id.clone(),
+                thread_id: stream_thread_id,
                 stream_id: stream_id.clone(),
                 profile_dir,
                 ephemeral,
                 armed: true,
             };
             let mut saw_event = false;
+            let mut saw_assistant_output = false;
             let mut last_progress = Instant::now();
 
             loop {
@@ -1627,6 +1636,7 @@ impl CdpBrowserAdapter {
                 let elapsed = last_progress.elapsed();
                 if elapsed >= limit {
                     let kind = if saw_event { "idle stream" } else { "first byte" };
+                    warn!(%kind, "browser stream timed out");
                     yield Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         format!("browser {kind} timeout"),
@@ -1648,11 +1658,13 @@ impl CdpBrowserAdapter {
                 let envelope = match polled {
                     Ok(Ok(envelope)) => envelope,
                     Ok(Err(error)) => {
+                        warn!(%error, "browser stream poll failed");
                         yield Err(std::io::Error::other(error.to_string()));
                         break;
                     }
                     Err(_) => {
                         let kind = if saw_event { "idle stream" } else { "first byte" };
+                        warn!(%kind, "browser stream poll timed out");
                         yield Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             format!("browser {kind} timeout"),
@@ -1662,6 +1674,7 @@ impl CdpBrowserAdapter {
                 };
 
                 if let Some(error) = envelope.error {
+                    warn!(code = %error.code, message = %error.message, "browser stream adapter returned an error");
                     yield Err(std::io::Error::other(format!(
                         "{}: {}",
                         error.code, error.message
@@ -1669,6 +1682,7 @@ impl CdpBrowserAdapter {
                     break;
                 }
                 let Some(stream_value) = envelope.stream else {
+                    warn!("browser stream adapter poll returned no stream payload");
                     yield Err(std::io::Error::other(
                         "browser stream poll returned no stream payload",
                     ));
@@ -1677,6 +1691,7 @@ impl CdpBrowserAdapter {
                 let poll: CdpStreamPoll = match serde_json::from_value(stream_value) {
                     Ok(poll) => poll,
                     Err(error) => {
+                        warn!(%error, "browser stream adapter returned an invalid poll payload");
                         yield Err(std::io::Error::other(format!(
                             "invalid browser stream poll payload: {error}"
                         )));
@@ -1684,6 +1699,7 @@ impl CdpBrowserAdapter {
                     }
                 };
                 if let Some(error) = poll.error {
+                    warn!(code = %error.code, message = %error.message, "browser stream job returned an error");
                     yield Err(std::io::Error::other(format!(
                         "{}: {}",
                         error.code, error.message
@@ -1691,27 +1707,21 @@ impl CdpBrowserAdapter {
                     break;
                 }
 
-                if !native_conversation_persisted {
-                    if let Some(native_request) = stream_native_request.as_ref() {
-                        native_conversation_persisted = adapter
-                            .persist_native_conversation(
-                                native_request,
-                                &stream_target,
-                                Duration::from_millis(250),
-                            )
-                            .await;
-                    }
-                }
-
                 if !poll.events.is_empty() {
                     saw_event = true;
                     last_progress = Instant::now();
                     for event in poll.events {
+                        let has_assistant_output = browser_stream_event_has_assistant_output(&event);
+                        if !has_assistant_output {
+                            warn!(event = %event, "browser stream event has no assistant output");
+                        }
+                        saw_assistant_output |= has_assistant_output;
                         match serde_json::to_string(&event) {
                             Ok(data) => {
                                 yield Ok(Bytes::from(format!("data: {data}\n\n")));
                             }
                             Err(error) => {
+                                warn!(%error, "browser stream event could not be serialized");
                                 yield Err(std::io::Error::other(error.to_string()));
                                 return;
                             }
@@ -1720,26 +1730,31 @@ impl CdpBrowserAdapter {
                 }
 
                 if poll.done {
-                    if !native_conversation_persisted {
-                        if let Some(native_request) = stream_native_request.as_ref() {
-                            native_conversation_persisted = adapter
-                                .persist_native_conversation(
-                                    native_request,
-                                    &stream_target,
-                                    Duration::from_secs(5),
-                                )
-                                .await;
-                            if !native_conversation_persisted {
-                                warn!(
-                                    thread_id = native_request.thread_id.as_deref().unwrap_or("<unknown>"),
-                                    account = %native_request.account.id,
-                                    "Gemini native conversation URL was still unavailable when the stream completed"
-                                );
-                            }
+                    if !saw_assistant_output {
+                        warn!("browser stream completed without assistant output");
+                        yield Err(std::io::Error::other(
+                            "browser stream completed without assistant output",
+                        ));
+                        break;
+                    }
+                    if let Some(native_request) = stream_native_request.as_ref() {
+                        let persisted = adapter
+                            .persist_native_conversation(
+                                native_request,
+                                &stream_target,
+                                Duration::from_secs(5),
+                            )
+                            .await;
+                        if !persisted {
+                            warn!(
+                                thread_id = native_request.thread_id.as_deref().unwrap_or("<unknown>"),
+                                account = %native_request.account.id,
+                                "Gemini native conversation URL was still unavailable when the stream completed"
+                            );
                         }
                     }
-                    yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
                     cleanup.complete().await;
+                    yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
                     break;
                 }
 
@@ -1906,7 +1921,7 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         })?;
         object.insert("model".into(), Value::String(request.route.model.clone()));
 
-        let context = self.context(&request.binding, Some(&request.route.model));
+        let mut context = self.context(&request.binding, Some(&request.route.model));
         let thread_affinity = request
             .thread_id
             .as_deref()
@@ -1952,6 +1967,17 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
             .as_ref()
             .map(|conversation| conversation.conversation_url.as_str());
         let ephemeral = thread_affinity.is_none() && self.use_ephemeral_chat(&request.binding);
+        let start_new_conversation = persistent_url.is_none() && (thread_affinity.is_some() || ephemeral);
+        if let Some(context) = context.as_object_mut() {
+            context.insert(
+                "start_new_conversation".into(),
+                Value::Bool(start_new_conversation),
+            );
+            context.insert(
+                "reuse_native_conversation".into(),
+                Value::Bool(persistent_url.is_some()),
+            );
+        }
         let target = if let Some(url) = persistent_url {
             let new_chat_url = self.spec.new_chat_url.ok_or_else(|| {
                 BrowserProviderError::InvalidConfig(
@@ -2437,6 +2463,38 @@ return {{ meta: __meta, error: {{ code: "invalid_stream_operation", message: "un
     ))
 }
 
+fn browser_stream_event_has_assistant_output(event: &Value) -> bool {
+    event
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                let Some(delta) = choice.get("delta") else {
+                    return false;
+                };
+                delta
+                    .get("content")
+                    .is_some_and(browser_stream_content_has_output)
+                    || delta
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .is_some_and(|calls| !calls.is_empty())
+            })
+        })
+}
+
+fn browser_stream_content_has_output(content: &Value) -> bool {
+    match content {
+        Value::String(text) => !text.is_empty(),
+        Value::Array(parts) => parts.iter().any(|part| {
+            part.get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.is_empty())
+        }),
+        _ => false,
+    }
+}
+
 fn validate_contract_envelope(
     account_id: &str,
     spec: CdpAdapterSpec,
@@ -2750,6 +2808,16 @@ mod tests {
     }
 
     #[test]
+    fn gemini_adapter_can_force_a_fresh_conversation() {
+        assert!(GEMINI_WEB_ADAPTER.contains("start_new_conversation"));
+        assert!(GEMINI_WEB_ADAPTER.contains("Gemini New chat control was not found"));
+        assert!(GEMINI_WEB_ADAPTER.contains("queryAll(context, \"response\").filter(isVisible)"));
+        assert!(GEMINI_WEB_ADAPTER.contains("newResponseText(before, responses)"));
+        assert!(GEMINI_WEB_ADAPTER.contains("div.markdown.markdown-main-panel"));
+        assert!(GEMINI_WEB_ADAPTER.contains("reuse_native_conversation"));
+    }
+
+    #[test]
     fn gemini_account_scoped_app_urls_match_provider_prefix() {
         assert!(target_url_matches_prefix(
             "https://gemini.google.com/u/1/app/abc123",
@@ -2830,6 +2898,22 @@ mod tests {
                 {"role":"user","content":"current user"}
             ])
         );
+    }
+
+    #[test]
+    fn stream_output_detection_ignores_metadata_only_events() {
+        assert!(!browser_stream_event_has_assistant_output(&json!({
+            "choices": [{"delta": {"role": "assistant"}}]
+        })));
+        assert!(!browser_stream_event_has_assistant_output(&json!({
+            "choices": [{"delta": {"content": ""}}]
+        })));
+        assert!(browser_stream_event_has_assistant_output(&json!({
+            "choices": [{"delta": {"content": "answer"}}]
+        })));
+        assert!(browser_stream_event_has_assistant_output(&json!({
+            "choices": [{"delta": {"tool_calls": [{"id": "call_1"}]}}]
+        })));
     }
 
     #[test]

@@ -561,6 +561,7 @@ impl Gateway {
             };
 
             let mut sse_tail = Vec::<u8>::new();
+            let mut saw_done = false;
             while let Some(item) = upstream.next().await {
                 match item {
                     Ok(bytes) => {
@@ -569,6 +570,7 @@ impl Gateway {
                         scan.extend_from_slice(&sse_tail);
                         scan.extend_from_slice(&bytes);
                         if scan.windows(b"data: [DONE]".len()).any(|window| window == b"data: [DONE]") {
+                            saw_done = true;
                             guard.finish("completed", None).await;
                         }
                         let keep = scan.len().min(32);
@@ -585,7 +587,14 @@ impl Gateway {
                 }
             }
 
-            guard.finish("completed", None).await;
+            if !saw_done {
+                guard
+                    .finish(
+                        "failed",
+                        Some("upstream stream ended before terminal [DONE] frame"),
+                    )
+                    .await;
+            }
         };
 
         let mut response = HttpResponse::builder()
