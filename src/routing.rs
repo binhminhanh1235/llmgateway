@@ -404,9 +404,10 @@ impl Router {
     }
 
     fn route_transport(&self, route: &RouteConfig) -> &'static str {
-        self.config
+        let config = self.live_config.snapshot();
+        config
             .account(&route.account)
-            .and_then(|account| self.config.provider(&account.provider))
+            .and_then(|account| config.provider(&account.provider))
             .map(|provider| provider.transport())
             .unwrap_or("unknown")
     }
@@ -420,22 +421,23 @@ impl Router {
     }
 
     async fn candidate_routes(&self, resolved: &str) -> Vec<RouteConfig> {
-        if let Some(vm) = self.config.virtual_models.get(resolved) {
+        let config = self.live_config.snapshot();
+        if let Some(vm) = config.virtual_models.get(resolved) {
             vm.routes
                 .iter()
-                .filter_map(|id| self.config.route(id).cloned())
+                .filter_map(|id| config.route(id).cloned())
                 .collect()
-        } else if let Some(route) = self.config.route(resolved) {
+        } else if let Some(route) = config.route(resolved) {
             vec![route.clone()]
         } else {
-            self.routes_for_physical_model(resolved).await
+            self.routes_for_physical_model(config, resolved).await
         }
     }
 
     pub async fn account_readiness(&self, account_id: &str) -> AccountReadiness {
-        let mut readiness = evaluate_base(self.config.as_ref(), account_id).await;
-        let routes = self
-            .config
+        let config = self.live_config.snapshot();
+        let mut readiness = evaluate_base(config.as_ref(), account_id).await;
+        let routes = config
             .routes
             .iter()
             .filter(|route| route.enabled && route.account == account_id)
@@ -463,10 +465,14 @@ impl Router {
         readiness
     }
 
-    async fn routes_for_physical_model(&self, requested: &str) -> Vec<RouteConfig> {
+    async fn routes_for_physical_model(
+        &self,
+        config: Arc<AppConfig>,
+        requested: &str,
+    ) -> Vec<RouteConfig> {
         let (provider_filter, external_id) = requested
             .split_once('/')
-            .filter(|(provider, _)| self.config.provider(provider).is_some())
+            .filter(|(provider, _)| config.provider(provider).is_some())
             .map(|(provider, external)| (Some(provider), external))
             .unwrap_or((None, requested));
 
@@ -474,7 +480,7 @@ impl Router {
             Ok(models) => models,
             Err(error) => {
                 warn!(%error, "failed to read model catalog while planning route");
-                return self.config_routes_for_model(provider_filter, external_id);
+                return self.config_routes_for_model(config.as_ref(), provider_filter, external_id);
             }
         };
 
@@ -488,7 +494,7 @@ impl Router {
                 binding.enabled
                     && matches!(binding.availability.as_str(), "available" | "unknown")
             }) {
-                let Some(account) = self.config.account(&binding.account_id) else {
+                let Some(account) = config.account(&binding.account_id) else {
                     continue;
                 };
                 if !account.enabled || account.provider != model.provider {
@@ -499,7 +505,7 @@ impl Router {
                     continue;
                 }
 
-                if let Some(configured) = self.config.routes.iter().find(|route| {
+                if let Some(configured) = config.routes.iter().find(|route| {
                     route.enabled && route.account == account.id && route.model == external_id
                 }) {
                     let mut configured = configured.clone();
@@ -515,12 +521,11 @@ impl Router {
                     continue;
                 }
 
-                let account_order = self
-                    .config
+                let account_order = config
                     .accounts
                     .iter()
                     .position(|candidate| candidate.id == account.id)
-                    .unwrap_or(self.config.accounts.len()) as i32;
+                    .unwrap_or(config.accounts.len()) as i32;
                 routes.push(RouteConfig {
                     id: format!("discovered:{}:{}", account.id, external_id),
                     account: account.id.clone(),
@@ -534,7 +539,7 @@ impl Router {
         }
 
         if routes.is_empty() {
-            self.config_routes_for_model(provider_filter, external_id)
+            self.config_routes_for_model(config.as_ref(), provider_filter, external_id)
         } else {
             routes
         }
@@ -542,17 +547,18 @@ impl Router {
 
     fn config_routes_for_model(
         &self,
+        config: &AppConfig,
         provider_filter: Option<&str>,
         external_id: &str,
     ) -> Vec<RouteConfig> {
-        self.config
+        config
             .routes
             .iter()
             .filter(|route| {
                 route.enabled
                     && route.model == external_id
                     && provider_filter.is_none_or(|provider| {
-                        self.config
+                        config
                             .account(&route.account)
                             .is_some_and(|account| account.provider == provider)
                     })
