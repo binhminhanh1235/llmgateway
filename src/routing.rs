@@ -396,16 +396,16 @@ impl Router {
 
     pub async fn restore_adaptive_samples<I>(&self, samples: I) -> usize
     where
-        I: IntoIterator<Item = (String, bool, u64)>,
+        I: IntoIterator<Item = (String, bool, u64, i64)>,
     {
         let mut adaptive = self.adaptive.write().await;
         let mut restored = 0usize;
-        for (route_id, success, latency_ms) in samples {
+        for (route_id, success, latency_ms, observed_at_ms) in samples {
             let entry = adaptive.entry(route_id).or_default();
             if success {
-                entry.observe_success(latency_ms, &self.config.routing);
+                entry.observe_success_at(latency_ms, observed_at_ms, &self.config.routing);
             } else {
-                entry.observe_failure(latency_ms, &self.config.routing);
+                entry.observe_failure_at(latency_ms, observed_at_ms, &self.config.routing);
             }
             restored = restored.saturating_add(1);
         }
