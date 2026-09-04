@@ -73,6 +73,7 @@ pub struct BrowserAdapterDiagnostics {
 #[derive(Clone, Debug)]
 struct CachedAdapterDiagnostics {
     checked_at: Instant,
+    session_marker: Option<String>,
     diagnostics: BrowserAdapterDiagnostics,
 }
 
@@ -344,12 +345,6 @@ impl BrowserProviderRegistry {
         provider_kind: &str,
         account_id: &str,
     ) -> BrowserAdapterDiagnostics {
-        if let Some(cached) = self.adapter_health.read().await.get(account_id).cloned() {
-            if cached.checked_at.elapsed() < Duration::from_secs(ADAPTER_HEALTH_TTL_SECONDS) {
-                return cached.diagnostics;
-            }
-        }
-
         let Some(adapter) = self.adapters.get(provider_kind) else {
             return self
                 .cache_diagnostics(BrowserAdapterDiagnostics {
@@ -411,9 +406,10 @@ impl BrowserProviderRegistry {
             }
         };
         if !session.enabled || session.status != "ready" {
-            // Session lifecycle can transition from login_required -> ready immediately
-            // after interactive verification. Do not cache this transient diagnostic,
-            // otherwise a successful login can remain unroutable for the health TTL.
+            // Session lifecycle can transition immediately during login/re-auth.
+            // Drop any prior ready probe so a later verified generation must be
+            // diagnosed again rather than borrowing stale adapter health.
+            self.invalidate_diagnostics(account_id).await;
             return unavailable_diagnostics(
                 account_id,
                 provider_kind,
@@ -423,10 +419,20 @@ impl BrowserProviderRegistry {
             );
         }
 
+        let session_marker = session.updated_at.clone();
+        if let Some(cached) = self.adapter_health.read().await.get(account_id).cloned() {
+            if cached.checked_at.elapsed() < Duration::from_secs(ADAPTER_HEALTH_TTL_SECONDS)
+                && cached.session_marker == session_marker
+                && cached.diagnostics.provider_kind == provider_kind
+            {
+                return cached.diagnostics;
+            }
+        }
+
         let diagnostics = adapter
             .diagnose(account_id, &session.profile_dir, &binding)
             .await;
-        self.cache_diagnostics(diagnostics).await
+        self.cache_session_diagnostics(diagnostics, session_marker).await
     }
 
     async fn cache_diagnostics(
@@ -437,6 +443,23 @@ impl BrowserProviderRegistry {
             diagnostics.account_id.clone(),
             CachedAdapterDiagnostics {
                 checked_at: Instant::now(),
+                session_marker: None,
+                diagnostics: diagnostics.clone(),
+            },
+        );
+        diagnostics
+    }
+
+    async fn cache_session_diagnostics(
+        &self,
+        diagnostics: BrowserAdapterDiagnostics,
+        session_marker: Option<String>,
+    ) -> BrowserAdapterDiagnostics {
+        self.adapter_health.write().await.insert(
+            diagnostics.account_id.clone(),
+            CachedAdapterDiagnostics {
+                checked_at: Instant::now(),
+                session_marker,
                 diagnostics: diagnostics.clone(),
             },
         );
