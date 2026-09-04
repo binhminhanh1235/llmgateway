@@ -34,6 +34,15 @@ ready_url_prefixes = ["https://gemini.google.com/app"]
 
 `ready_url_prefixes` are not credentials. They are sanitized page locations used as evidence that the interactive login reached the authenticated application.
 
+### CDP startup reliability
+
+The driver launches each account with an absolute, isolated `--user-data-dir` and an explicit loopback-only `--remote-debugging-port`. It polls the real CDP endpoint for readiness instead of depending only on Chromium creating `DevToolsActivePort`.
+
+After CDP becomes reachable, llmgateway persists the selected port in the profile's `DevToolsActivePort` file so restart reconciliation and browser-provider execution keep the existing profile contract. Existing profiles that already contain a Chromium-generated `DevToolsActivePort` remain compatible.
+
+Chromium stderr is captured into a bounded in-memory diagnostic buffer during startup. If the browser exits early or CDP never becomes reachable, the session error includes the executable, profile path, selected port/exit status, and the bounded stderr tail. On Windows, a short launcher-handoff grace period avoids treating a transient `chrome.exe` launcher exit as a browser crash.
+
+
 ## Runtime status
 
 `GET .../driver/status` exposes:
@@ -89,8 +98,8 @@ Recovery is deliberately conservative:
 
 1. verify the old CDP runtime is actually gone;
 2. remove a stale `DevToolsActivePort` only when it is unreachable;
-3. launch Chromium with the same `--user-data-dir`;
-4. wait for CDP;
+3. launch Chromium with the same isolated `--user-data-dir` and a fresh explicit loopback CDP port;
+4. poll the actual CDP endpoint and persist the reachable port;
 5. verify an authenticated page;
 6. only then restore lifecycle `ready`.
 
