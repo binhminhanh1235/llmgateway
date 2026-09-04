@@ -638,4 +638,28 @@ discover_models = true"#,
         config.validate().unwrap();
         assert!(!config.account("account").unwrap().discover_models);
     }
+
+    #[test]
+    fn adaptive_routing_defaults_are_conservative_and_valid() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "api"
+kind = "openai-compatible"
+base_url = "https://example.test/v1""#,
+            r#"[[accounts]]
+id = "account"
+provider = "api"
+api_key_env = "EXAMPLE_API_KEY"
+enabled = true"#,
+        );
+        let mut config: AppConfig = toml::from_str(&raw).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+
+        assert!(config.routing.adaptive_enabled);
+        assert_eq!(config.routing.adaptive_min_samples, 3);
+        assert_eq!(config.routing.adaptive_max_penalty, 30);
+        assert!((config.routing.adaptive_ewma_alpha - 0.25).abs() < f64::EPSILON);
+        assert!((config.routing.adaptive_failure_weight - 0.70).abs() < f64::EPSILON);
+    }
 }
