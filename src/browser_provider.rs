@@ -164,6 +164,17 @@ pub enum BrowserProviderError {
 #[async_trait]
 pub trait BrowserProviderAdapter: Send + Sync {
     fn kind(&self) -> &'static str;
+    fn adapter_id(&self) -> &'static str;
+    fn is_cdp(&self) -> bool {
+        false
+    }
+
+    async fn diagnose(
+        &self,
+        account_id: &str,
+        profile_dir: &str,
+        binding: &BrowserAccountBinding,
+    ) -> BrowserAdapterDiagnostics;
 
     async fn execute_chat(
         &self,
@@ -208,6 +219,53 @@ impl BrowserProviderConfig {
             {
                 return Err(BrowserProviderError::InvalidConfig(format!(
                     "browser binding '{account}' adapter_script cannot be empty"
+                )));
+            }
+            if binding
+                .adapter_contract_version
+                .is_some_and(|value| value != BROWSER_ADAPTER_CONTRACT_VERSION)
+            {
+                return Err(BrowserProviderError::InvalidConfig(format!(
+                    "browser binding '{account}' adapter_contract_version must be {}",
+                    BROWSER_ADAPTER_CONTRACT_VERSION
+                )));
+            }
+            if binding.models.iter().any(|model| model.trim().is_empty()) {
+                return Err(BrowserProviderError::InvalidConfig(format!(
+                    "browser binding '{account}' models cannot contain empty values"
+                )));
+            }
+            for (model, label) in &binding.model_labels {
+                if model.trim().is_empty() || label.trim().is_empty() {
+                    return Err(BrowserProviderError::InvalidConfig(format!(
+                        "browser binding '{account}' model_labels keys and values cannot be empty"
+                    )));
+                }
+            }
+            for (group, selectors) in &binding.selector_overrides {
+                if group.trim().is_empty()
+                    || selectors.is_empty()
+                    || selectors.iter().any(|selector| selector.trim().is_empty())
+                {
+                    return Err(BrowserProviderError::InvalidConfig(format!(
+                        "browser binding '{account}' selector_overrides must contain non-empty groups and selectors"
+                    )));
+                }
+            }
+            if binding
+                .probe_timeout_ms
+                .is_some_and(|value| !(500..=60_000).contains(&value))
+            {
+                return Err(BrowserProviderError::InvalidConfig(format!(
+                    "browser binding '{account}' probe_timeout_ms must be between 500 and 60000"
+                )));
+            }
+            if binding
+                .response_timeout_ms
+                .is_some_and(|value| !(1_000..=600_000).contains(&value))
+            {
+                return Err(BrowserProviderError::InvalidConfig(format!(
+                    "browser binding '{account}' response_timeout_ms must be between 1000 and 600000"
                 )));
             }
         }
