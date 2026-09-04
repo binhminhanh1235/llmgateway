@@ -102,7 +102,7 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
                 if let Some(session_id) = registry.session_id_for_account(&account.id) {
                     readiness.browser_session_id = Some(session_id.to_string());
                     if let Some(store) = browser_session_runtime::get() {
-                        if let Ok(session) = store.session(session_id).await {
+                        if let Ok(session) = store.session(&session_id).await {
                             readiness.browser_session_status = Some(session.status.clone());
                             readiness.browser_last_error = session.last_error.clone();
                         }
