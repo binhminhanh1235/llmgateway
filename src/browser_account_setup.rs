@@ -269,7 +269,7 @@ pub fn apply_browser_account_setup(
         let route = append_new_by_id(routes, &route_id)?;
         route["account"] = value(&account_id);
         route["model"] = value(&model_id);
-        route["priority"] = value(priority);
+        route["priority"] = value(i64::from(priority));
         route["enabled"] = value(true);
         route["capabilities"] = Item::Value(Value::Array(string_array(
             preset.default_capabilities.iter().copied(),
@@ -399,10 +399,12 @@ fn upsert_by_id<'a>(
     tables: &'a mut ArrayOfTables,
     id: &str,
 ) -> Result<&'a mut Table, BrowserAccountSetupError> {
-    if let Some(index) = tables
-        .iter()
-        .position(|table| table.get("id").and_then(Item::as_str) == Some(id))
-    {
+    let existing_index = {
+        tables
+            .iter()
+            .position(|table| table.get("id").and_then(Item::as_str) == Some(id))
+    };
+    if let Some(index) = existing_index {
         return tables.get_mut(index).ok_or_else(|| {
             BrowserAccountSetupError::Invalid(format!("could not update table '{id}'"))
         });
