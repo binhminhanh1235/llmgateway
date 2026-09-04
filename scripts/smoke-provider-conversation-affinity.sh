@@ -134,11 +134,18 @@ try:
         stream_debug = [line.strip() for line in f if line.strip()]
 except FileNotFoundError:
     stream_debug = []
+db = sqlite3.connect("data/llmgateway.db")
+all_mappings = db.execute(
+    """SELECT thread_id, provider, account_id, conversation_url, last_synced_ordinal
+       FROM provider_conversations
+       ORDER BY created_at, thread_id"""
+).fetchall()
+
 assert opened[:2] == [
     "https://gemini.google.com/app",
     "https://gemini.google.com/app",
-], {"opened": opened, "stream_debug": stream_debug}
-assert len(opened) == 2, {"opened": opened, "stream_debug": stream_debug}
+], {"opened": opened, "stream_debug": stream_debug, "mappings": all_mappings}
+assert len(opened) == 2, {"opened": opened, "stream_debug": stream_debug, "mappings": all_mappings}
 
 with open(os.path.join(profile, "browser-requests.jsonl"), encoding="utf-8") as f:
     requests = [json.loads(line) for line in f if line.strip()]
@@ -151,7 +158,6 @@ assert messages[2] == [{"role": "user", "content": "beta-one"}], messages[2]
 assert recent[0]["target_id"] == recent[1]["target_id"], recent
 assert recent[2]["target_id"] != recent[0]["target_id"], recent
 
-db = sqlite3.connect("data/llmgateway.db")
 rows = db.execute(
     """SELECT thread_id, conversation_url, last_synced_ordinal
        FROM provider_conversations
