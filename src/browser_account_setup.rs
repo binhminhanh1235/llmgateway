@@ -362,6 +362,9 @@ pub fn apply_browser_account_setup(
         if !browser.contains_key("profile_root") {
             browser["profile_root"] = value("data/browser-profiles");
         }
+        if !browser.contains_key("auth_vault_root") {
+            browser["auth_vault_root"] = value("data/browser-auth");
+        }
         let sessions = ensure_table(browser, "sessions")?;
         if sessions.contains_key(&session_id) {
             return Err(BrowserAccountSetupError::Conflict(account_id));
