@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04.2";
+  const ADAPTER_VERSION = "2026.09.04.4";
 
   const defaults = {
     input: [
@@ -23,12 +23,17 @@
       "button.send-button",
       ".send-button"
     ],
+    newChat: [
+      "button[aria-label='New chat']",
+      "button[aria-label*='New chat' i]",
+      "a[aria-label='New chat']",
+      "a[aria-label*='New chat' i]",
+      "[data-test-id='new-chat-button']",
+      "a[href='/app']"
+    ],
     response: [
       "div.markdown.markdown-main-panel",
-      "model-response message-content",
-      "model-response .model-response-text",
-      "div.response-container",
-      "div.presented-response-container"
+      "model-response message-content"
     ],
     completion: [
       "button[aria-label='Stop response']",
@@ -89,6 +94,7 @@
     } catch (_) {}
     return true;
   };
+  const queryVisible = (context, key) => queryAll(context, key).find(isVisible) || null;
   const loginIndicator = (context) => queryAll(context, "login").find(isVisible) || null;
   const waitFor = async (fn, timeoutMs = 30000, pollMs = 120) => {
     const deadline = Date.now() + timeoutMs;
@@ -280,7 +286,86 @@
     return desired;
   };
 
-  const responseTexts = (context) => queryAll(context, "response").map(text).filter(Boolean);
+  const responseLeaves = (context) => {
+    for (const selector of selectors(context, "response")) {
+      try {
+        const leaves = [...document.querySelectorAll(selector)].filter(isVisible);
+        if (leaves.length) return leaves;
+      } catch (_) {}
+    }
+    return [];
+  };
+  const responseSnapshotKey = (leaves) =>
+    leaves.map((node, index) => index + ":" + text(node)).join("\u241e");
+
+  const captureResponseBaseline = async (context) => {
+    if (!context?.reuse_native_conversation) {
+      const leaves = responseLeaves(context);
+      return { count: leaves.length, nodes: new Set(leaves) };
+    }
+
+    const timeoutMs = Number(context?.history_hydration_timeout_ms || 12000);
+    const stableMs = Number(context?.history_stable_ms || 1200);
+    const deadline = Date.now() + timeoutMs;
+    let lastKey = null;
+    let stableSince = 0;
+    let lastLeaves = [];
+
+    while (Date.now() < deadline) {
+      const leaves = responseLeaves(context);
+      const key = responseSnapshotKey(leaves);
+      if (leaves.length && key === lastKey) {
+        if (stableSince && Date.now() - stableSince >= stableMs) {
+          return { count: leaves.length, nodes: new Set(leaves) };
+        }
+      } else {
+        lastKey = key;
+        lastLeaves = leaves;
+        stableSince = leaves.length ? Date.now() : 0;
+      }
+      await sleep(120);
+    }
+
+    if (!lastLeaves.length) {
+      throw new Error("ADAPTER_INCOMPATIBLE: Gemini conversation history did not load");
+    }
+    throw new Error("ADAPTER_INCOMPATIBLE: Gemini conversation history did not stabilize");
+  };
+
+  const newResponseText = (baseline, leaves) => {
+    if (!baseline || leaves.length <= baseline.count) return "";
+    for (let index = leaves.length - 1; index >= baseline.count; index -= 1) {
+      const node = leaves[index];
+      if (!baseline.nodes.has(node)) {
+        const value = text(node);
+        if (value) return value;
+      }
+    }
+    return "";
+  };
+
+  const freshChatLocation = () => {
+    const segments = String(location.pathname || "").split("/").filter(Boolean);
+    const appIndex = segments.lastIndexOf("app");
+    return appIndex >= 0 && appIndex === segments.length - 1;
+  };
+
+  const startNewConversation = async (context) => {
+    if (!context?.start_new_conversation) return;
+    const newChat = await waitFor(() => queryVisible(context, "newChat"), 8000);
+    if (!newChat) {
+      throw new Error("ADAPTER_INCOMPATIBLE: Gemini New chat control was not found");
+    }
+    newChat.click();
+    const reset = await waitFor(
+      () => freshChatLocation() && responseLeaves(context).length === 0,
+      8000
+    );
+    if (!reset) {
+      throw new Error("ADAPTER_INCOMPATIBLE: Gemini did not open a clean fresh chat");
+    }
+    await sleep(250);
+  };
 
   const streamJobs = globalThis.__LLMGATEWAY_STREAM_JOBS__ || new Map();
   globalThis.__LLMGATEWAY_STREAM_JOBS__ = streamJobs;
@@ -326,16 +411,16 @@
     Promise.resolve().then(async () => {
       try {
         await selectModel(context);
-        const composer = await waitFor(() => queryFirst(context, "input"), 15000);
+        await startNewConversation(context);
+        const composer = await waitFor(() => queryVisible(context, "input"), 15000);
         if (!composer) throw new Error("ADAPTER_INCOMPATIBLE: Gemini prompt composer disappeared");
 
-        const before = responseTexts(context);
-        const baselineText = before[before.length - 1] || "";
+        const before = await captureResponseBaseline(context);
         const prompt = formatMessages(request);
         if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
         setComposer(composer, prompt);
 
-        const send = await waitFor(() => queryFirst(context, "send"), 5000);
+        const send = await waitFor(() => queryVisible(context, "send"), 5000);
         if (!send) {
           if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: Gemini session expired");
           throw new Error("ADAPTER_INCOMPATIBLE: Gemini send control was not found");
@@ -348,17 +433,17 @@
         let answer = "";
         while (Date.now() - startedAt < Number(context?.response_timeout_ms || 180000)) {
           if (state.cancelled) {
-            const stop = queryFirst(context, "completion");
+            const stop = queryVisible(context, "completion");
             try { stop?.click(); } catch (_) {}
             throw new Error("STREAM_CANCELLED: client disconnected or cancelled");
           }
           if (loginIndicator(context)) {
             throw new Error("LOGIN_REQUIRED: Gemini session expired while waiting for a response");
           }
-          const responses = responseTexts(context);
-          const candidate = responses[responses.length - 1] || "";
-          const responseAdvanced = responses.length > before.length || (candidate && candidate !== baselineText);
-          const generating = Boolean(queryFirst(context, "completion"));
+          const responses = responseLeaves(context);
+          const candidate = newResponseText(before, responses);
+          const responseAdvanced = Boolean(candidate);
+          const generating = Boolean(queryVisible(context, "completion"));
           if (!responseAdvanced) {
             await sleep(120);
             continue;
@@ -368,7 +453,7 @@
             answer = candidate;
             state.answer = candidate;
             stableSince = Date.now();
-          } else if (candidate && !generating && stableSince && Date.now() - stableSince >= 900) {
+          } else if (candidate && !generating && stableSince && Date.now() - stableSince >= Number(context?.response_stable_ms || 900)) {
             answer = candidate;
             state.answer = candidate;
             break;
@@ -453,7 +538,7 @@
     const state = streamJobs.get(String(streamId || ""));
     if (!state) return { cancelled: false, missing: true };
     state.cancelled = true;
-    try { queryFirst(state.context, "completion")?.click(); } catch (_) {}
+    try { queryVisible(state.context, "completion")?.click(); } catch (_) {}
     return { cancelled: true };
   };
 
@@ -473,10 +558,10 @@
         return { ok: false, code: "wrong_page", message: "Expected gemini.google.com but found " + currentHost };
       }
       await waitFor(
-        () => queryFirst(context, "input") || loginIndicator(context),
+        () => queryVisible(context, "input") || loginIndicator(context),
         probeTimeoutMs
       );
-      const composer = queryFirst(context, "input");
+      const composer = queryVisible(context, "input");
       const loginVisible = Boolean(loginIndicator(context));
       if (!composer) {
         return {
@@ -509,16 +594,16 @@
 
     async chat(request, context) {
       await selectModel(context);
-      const composer = await waitFor(() => queryFirst(context, "input"), 15000);
+      await startNewConversation(context);
+      const composer = await waitFor(() => queryVisible(context, "input"), 15000);
       if (!composer) throw new Error("ADAPTER_INCOMPATIBLE: Gemini prompt composer disappeared");
 
-      const before = responseTexts(context);
-      const baselineText = before[before.length - 1] || "";
+      const before = await captureResponseBaseline(context);
       const prompt = formatMessages(request);
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
       setComposer(composer, prompt);
 
-      const send = await waitFor(() => queryFirst(context, "send"), 5000);
+      const send = await waitFor(() => queryVisible(context, "send"), 5000);
       if (!send) {
         if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: Gemini session expired");
         throw new Error("ADAPTER_INCOMPATIBLE: Gemini send control was not found");
@@ -533,10 +618,10 @@
         if (loginIndicator(context)) {
           throw new Error("LOGIN_REQUIRED: Gemini session expired while waiting for a response");
         }
-        const responses = responseTexts(context);
-        const candidate = responses[responses.length - 1] || "";
-        const responseAdvanced = responses.length > before.length || (candidate && candidate !== baselineText);
-        const generating = Boolean(queryFirst(context, "completion"));
+        const responses = responseLeaves(context);
+        const candidate = newResponseText(before, responses);
+        const responseAdvanced = Boolean(candidate);
+        const generating = Boolean(queryVisible(context, "completion"));
         if (!responseAdvanced) {
           await sleep(180);
           continue;
@@ -545,7 +630,7 @@
           last = candidate;
           answer = candidate;
           stableSince = Date.now();
-        } else if (candidate && !generating && stableSince && Date.now() - stableSince >= 1200) {
+        } else if (candidate && !generating && stableSince && Date.now() - stableSince >= Number(context?.response_stable_ms || 1200)) {
           answer = candidate;
           break;
         }

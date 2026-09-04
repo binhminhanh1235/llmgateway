@@ -24,6 +24,7 @@ jobs:
       - run: cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
+      - run: bash scripts/smoke-provider-conversation-affinity.sh
       - run: bash scripts/smoke-local.sh
       - run: bash scripts/smoke-hybrid.sh
       - run: bash scripts/smoke-memory.sh
@@ -36,7 +37,6 @@ jobs:
       - run: bash scripts/smoke-first-class-browser-account.sh
       - run: bash scripts/smoke-browser-reliability.sh
       - run: bash scripts/smoke-browser-routing-intelligence.sh
-      - run: bash scripts/smoke-provider-conversation-affinity.sh
       - run: bash scripts/smoke-account-intelligence.sh
       - run: bash scripts/smoke-routing-trace.sh
       - run: bash scripts/smoke-execution-trace.sh

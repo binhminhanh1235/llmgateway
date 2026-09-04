@@ -109,15 +109,15 @@ curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-af
 
 THREAD_A=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${JSON[@]}"   -d '{"title":"Affinity A","model":"llmgateway-auto"}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-curl -fsS -D /tmp/affinity-a1.headers -o /tmp/affinity-a1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-one","stream":false}'
+curl -fsS -D /tmp/affinity-a1.headers -o /tmp/affinity-a1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-one","stream":true}'
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-a1.headers
 
-curl -fsS -D /tmp/affinity-a2.headers -o /tmp/affinity-a2.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-two","stream":false}'
+curl -fsS -D /tmp/affinity-a2.headers -o /tmp/affinity-a2.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-two","stream":true}'
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-a2.headers
 
 THREAD_B=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${JSON[@]}"   -d '{"title":"Affinity B","model":"llmgateway-auto"}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-curl -fsS -D /tmp/affinity-b1.headers -o /tmp/affinity-b1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_B/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"beta-one","stream":false}'
+curl -fsS -D /tmp/affinity-b1.headers -o /tmp/affinity-b1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_B/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"beta-one","stream":true}'
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-b1.headers
 
 python3 <<'PY'
@@ -129,11 +129,29 @@ profile = os.environ["PROFILE_DIR"]
 
 with open(os.path.join(profile, "opened-targets.log"), encoding="utf-8") as f:
     opened = [line.strip() for line in f if line.strip()]
+try:
+    with open(os.path.join(profile, "stream-debug.log"), encoding="utf-8") as f:
+        stream_debug = [line.strip() for line in f if line.strip()]
+except FileNotFoundError:
+    stream_debug = []
+db = sqlite3.connect("data/llmgateway.db")
+all_mappings = db.execute(
+    """SELECT thread_id, provider, account_id, conversation_url, last_synced_ordinal
+       FROM provider_conversations
+       ORDER BY created_at, thread_id"""
+).fetchall()
+
+try:
+    with open("/tmp/llmgateway-provider-conversation.log", encoding="utf-8") as f:
+        gateway_log = f.read().splitlines()[-120:]
+except FileNotFoundError:
+    gateway_log = []
+
 assert opened[:2] == [
     "https://gemini.google.com/app",
     "https://gemini.google.com/app",
-], opened
-assert len(opened) == 2, opened
+], {"opened": opened, "stream_debug": stream_debug, "mappings": all_mappings, "gateway_log": gateway_log}
+assert len(opened) == 2, {"opened": opened, "stream_debug": stream_debug, "mappings": all_mappings, "gateway_log": gateway_log}
 
 with open(os.path.join(profile, "browser-requests.jsonl"), encoding="utf-8") as f:
     requests = [json.loads(line) for line in f if line.strip()]
@@ -146,7 +164,6 @@ assert messages[2] == [{"role": "user", "content": "beta-one"}], messages[2]
 assert recent[0]["target_id"] == recent[1]["target_id"], recent
 assert recent[2]["target_id"] != recent[0]["target_id"], recent
 
-db = sqlite3.connect("data/llmgateway.db")
 rows = db.execute(
     """SELECT thread_id, conversation_url, last_synced_ordinal
        FROM provider_conversations

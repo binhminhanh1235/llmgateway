@@ -98,8 +98,9 @@ def ensure_native_conversation(target_id, provider):
         target_urls[target_id] = native
     append_marker("native-conversations.log", native)
 
-def adapter_identity(expression):
-    if "gemini-web" in expression or '"provider":"gemini"' in expression:
+def adapter_identity(expression, target_id):
+    target_host = urlparse(target_url_for(target_id)).hostname or ""
+    if target_host == "gemini.google.com" or "gemini-web" in expression or '"provider":"gemini"' in expression:
         return "gemini-web", "gemini", "gemini-web-default"
     return "qwen-web", "qwen", "qwen-web-default"
 
@@ -120,7 +121,7 @@ def runtime_evaluate_value(expression, target_id):
 
 def envelope_for(expression, target_id):
     global stream_seq
-    adapter_id, provider, model = adapter_identity(expression)
+    adapter_id, provider, model = adapter_identity(expression, target_id)
     meta = {
         "contract_version": 1,
         "id": adapter_id,
@@ -137,7 +138,7 @@ def envelope_for(expression, target_id):
     if 'const __operation = "chat_stream_start"' in expression:
         request = expression_request(expression)
         append_marker("browser-requests.jsonl", json.dumps({"target_id": target_id, "messages": request.get("messages", [])}, ensure_ascii=False))
-        ensure_native_conversation(target_id, provider)
+        append_marker("stream-debug.log", f"start provider={provider} target={target_id} url={target_url_for(target_id)}")
         prompt_text = json.dumps(request.get("messages", []), ensure_ascii=False)
         if "force-browser-stream-fallback" in prompt_text:
             write_marker("stream-start-failed", "forced")
@@ -152,7 +153,13 @@ def envelope_for(expression, target_id):
         with stream_lock:
             stream_seq += 1
             stream_id = f"ci-stream-{stream_seq}"
-            streams[stream_id] = {"poll": 0, "cancelled": False, "model": model}
+            streams[stream_id] = {
+                "poll": 0,
+                "cancelled": False,
+                "model": model,
+                "provider": provider,
+                "target_id": target_id,
+            }
         write_marker("stream-started", stream_id)
         return {
             "meta": meta,
@@ -190,10 +197,15 @@ def envelope_for(expression, target_id):
             state["poll"] += 1
             poll = state["poll"]
             model = state["model"]
+            stream_provider = state["provider"]
+            stream_target_id = state["target_id"]
 
         write_marker("stream-poll-count", poll)
         completion_id = "chatcmpl_browser_stream"
         if poll == 1:
+            append_marker("stream-debug.log", f"poll1-before provider={stream_provider} target={stream_target_id} url={target_url_for(stream_target_id)}")
+            ensure_native_conversation(stream_target_id, stream_provider)
+            append_marker("stream-debug.log", f"poll1-after provider={stream_provider} target={stream_target_id} url={target_url_for(stream_target_id)}")
             events = [{
                 "id": completion_id,
                 "object": "chat.completion.chunk",

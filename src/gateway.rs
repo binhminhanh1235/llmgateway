@@ -118,6 +118,36 @@ impl Drop for ExecutionStreamGuard {
     }
 }
 
+fn observe_terminal_sse_done(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    buffer.extend_from_slice(chunk);
+    let mut saw_done = false;
+
+    loop {
+        let lf_end = buffer.windows(2).position(|window| window == b"\n\n").map(|pos| (pos, 2));
+        let crlf_end = buffer
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|pos| (pos, 4));
+        let Some((frame_end, delimiter_len)) = (match (lf_end, crlf_end) {
+            (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        }) else {
+            break;
+        };
+
+        let frame = String::from_utf8_lossy(&buffer[..frame_end]);
+        let is_done = frame.lines().any(|line| {
+            line.strip_prefix("data:")
+                .is_some_and(|payload| payload.trim() == "[DONE]")
+        });
+        buffer.drain(..frame_end + delimiter_len);
+        saw_done |= is_done;
+    }
+
+    saw_done
+}
+
 #[derive(Debug, Error)]
 pub enum GatewayError {
     #[error("{0}")]
@@ -560,20 +590,16 @@ impl Gateway {
                 finished: false,
             };
 
-            let mut sse_tail = Vec::<u8>::new();
+            let mut sse_buffer = Vec::<u8>::new();
+            let mut saw_done = false;
             while let Some(item) = upstream.next().await {
                 match item {
                     Ok(bytes) => {
                         guard.observe(bytes.len());
-                        let mut scan = Vec::with_capacity(sse_tail.len() + bytes.len());
-                        scan.extend_from_slice(&sse_tail);
-                        scan.extend_from_slice(&bytes);
-                        if scan.windows(b"data: [DONE]".len()).any(|window| window == b"data: [DONE]") {
+                        if observe_terminal_sse_done(&mut sse_buffer, &bytes) {
+                            saw_done = true;
                             guard.finish("completed", None).await;
                         }
-                        let keep = scan.len().min(32);
-                        sse_tail.clear();
-                        sse_tail.extend_from_slice(&scan[scan.len().saturating_sub(keep)..]);
                         yield Ok::<_, std::io::Error>(bytes);
                     }
                     Err(error) => {
@@ -585,7 +611,14 @@ impl Gateway {
                 }
             }
 
-            guard.finish("completed", None).await;
+            if !saw_done {
+                guard
+                    .finish(
+                        "failed",
+                        Some("upstream stream ended before terminal [DONE] frame"),
+                    )
+                    .await;
+            }
         };
 
         let mut response = HttpResponse::builder()
@@ -828,5 +861,31 @@ fn cooldown_for(status: StatusCode) -> i64 {
         429 => 60,
         500..=599 => 20,
         _ => 10,
+    }
+}
+
+
+#[cfg(test)]
+mod stream_trace_tests {
+    use super::observe_terminal_sse_done;
+
+    #[test]
+    fn terminal_done_detector_requires_a_complete_sse_data_frame() {
+        let mut buffer = Vec::new();
+        assert!(!observe_terminal_sse_done(
+            &mut buffer,
+            b"data: {\"message\":\"please wait for data: [DONE]\"}\n\n",
+        ));
+        assert!(!observe_terminal_sse_done(&mut buffer, b"data: [DO"));
+        assert!(observe_terminal_sse_done(&mut buffer, b"NE]\n\n"));
+    }
+
+    #[test]
+    fn terminal_done_detector_accepts_crlf_frames() {
+        let mut buffer = Vec::new();
+        assert!(observe_terminal_sse_done(
+            &mut buffer,
+            b"event: message\r\ndata: [DONE]\r\n\r\n",
+        ));
     }
 }

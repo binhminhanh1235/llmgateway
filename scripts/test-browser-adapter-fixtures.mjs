@@ -32,8 +32,8 @@ globalThis.KeyboardEvent = class {
   constructor(type, init = {}) { this.type = type; Object.assign(this, init); }
 };
 
-function installPage({ host, nodes = {} }) {
-  globalThis.location = { hostname: host };
+function installPage({ host, path = "/app", nodes = {} }) {
+  globalThis.location = { hostname: host, pathname: path };
   globalThis.document = {
     querySelector(selector) {
       return nodes[selector] ?? null;
@@ -154,17 +154,18 @@ async function testGeminiToolBridge() {
   const input = new FakeElement();
   const response = new FakeElement("");
   const send = new FakeElement("Send");
+  const nodes = {
+    "div[aria-label='Enter a prompt for Gemini']": input,
+    "button[aria-label='Send message']": send
+  };
   send.onClick = () => {
     response.innerText = '[[LLMGATEWAY_TOOL_CALLS]]{"tool_calls":[{"name":"read_file","arguments":{"path":"src/main.rs"}}]}[[/LLMGATEWAY_TOOL_CALLS]]';
     response.textContent = response.innerText;
+    nodes["div.markdown.markdown-main-panel"] = [response];
   };
   installPage({
     host: "gemini.google.com",
-    nodes: {
-      "div[aria-label='Enter a prompt for Gemini']": input,
-      "button[aria-label='Send message']": send,
-      "div.markdown.markdown-main-panel": response
-    }
+    nodes
   });
   const adapter = loadAdapter("adapters/gemini-web.js");
   const result = await adapter.chat({
@@ -330,6 +331,86 @@ async function testGeminiStreamCancellation() {
 }
 
 
+
+async function testGeminiFreshThreadForcesNewChat() {
+  const input = new FakeElement();
+  const oldResponse = new FakeElement("stale restored response");
+  const newResponse = new FakeElement("fresh answer");
+  const newChat = new FakeElement("New chat");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "div[aria-label='Enter a prompt for Gemini']": input,
+    "button[aria-label='Send message']": send,
+    "button[aria-label='New chat']": newChat,
+    "div.markdown.markdown-main-panel": [oldResponse]
+  };
+  newChat.onClick = () => {
+    globalThis.location.pathname = "/app";
+    nodes["div.markdown.markdown-main-panel"] = [];
+  };
+  send.onClick = () => {
+    nodes["div.markdown.markdown-main-panel"] = [newResponse];
+  };
+
+  installPage({ host: "gemini.google.com", path: "/app/restored", nodes });
+  const adapter = loadAdapter("adapters/gemini-web.js");
+  const result = await adapter.chat({
+    model: "gemini-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "fresh logical thread" }]
+  }, {
+    start_new_conversation: true,
+    response_timeout_ms: 1500,
+    response_stable_ms: 60
+  });
+
+  assert.equal(result.body.choices[0].message.content, "fresh answer");
+  assert.equal(globalThis.location.pathname, "/app");
+}
+
+async function testGeminiReopenWaitsForStableHistoryAndIgnoresRerenderedOldTurns() {
+  const input = new FakeElement();
+  const oldOne = new FakeElement("old one");
+  const oldTwo = new FakeElement("old two");
+  const answer = new FakeElement("new answer");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "div[aria-label='Enter a prompt for Gemini']": input,
+    "button[aria-label='Send message']": send,
+    "div.markdown.markdown-main-panel": [oldOne]
+  };
+
+  setTimeout(() => {
+    nodes["div.markdown.markdown-main-panel"] = [oldOne, oldTwo];
+  }, 30);
+
+  send.onClick = () => {
+    setTimeout(() => {
+      oldOne.innerText = "old one with late citation";
+      oldOne.textContent = oldOne.innerText;
+    }, 20);
+    setTimeout(() => {
+      nodes["div.markdown.markdown-main-panel"] = [oldOne, oldTwo, answer];
+    }, 60);
+  };
+
+  installPage({ host: "gemini.google.com", path: "/app/native-thread", nodes });
+  const adapter = loadAdapter("adapters/gemini-web.js");
+  const result = await adapter.chat({
+    model: "gemini-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "continue native thread" }]
+  }, {
+    reuse_native_conversation: true,
+    history_hydration_timeout_ms: 1500,
+    history_stable_ms: 80,
+    response_timeout_ms: 1500,
+    response_stable_ms: 60
+  });
+
+  assert.equal(result.body.choices[0].message.content, "new answer");
+}
+
 async function testMidRequestLoginExpiry() {
   const input = new FakeElement();
   const nodes = {
@@ -358,5 +439,7 @@ await testGeminiToolBridge();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
 await testGeminiStreamCancellation();
+await testGeminiFreshThreadForcesNewChat();
+await testGeminiReopenWaitsForStableHistoryAndIgnoresRerenderedOldTurns();
 await testMidRequestLoginExpiry();
 console.log("built-in Gemini/Qwen fake-page adapter fixtures passed");

@@ -342,6 +342,24 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub async fn delete_provider_conversation(
+        &self,
+        thread_id: &str,
+        provider: &str,
+        account_id: &str,
+    ) -> Result<(), ConversationError> {
+        sqlx::query(
+            "DELETE FROM provider_conversations
+             WHERE thread_id = ? AND provider = ? AND account_id = ?",
+        )
+        .bind(thread_id)
+        .bind(provider)
+        .bind(account_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn append_message(
         &self,
         thread_id: &str,
@@ -503,13 +521,14 @@ pub fn openai_stream_with_capture(
         let mut buffer = String::new();
         let mut text = String::new();
         let mut tools: BTreeMap<usize, CapturedTool> = BTreeMap::new();
+        let mut completed = false;
 
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(bytes) => {
                     let normalized = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
                     buffer.push_str(&normalized);
-                    capture_frames(&mut buffer, &mut text, &mut tools);
+                    capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
                     yield Ok(bytes);
                 }
                 Err(_) => {
@@ -517,7 +536,10 @@ pub fn openai_stream_with_capture(
                 }
             }
         }
-        capture_frames(&mut buffer, &mut text, &mut tools);
+        capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
+        if !captured_assistant_is_persistable(completed, &text, &tools) {
+            return;
+        }
         let mut message = json!({
             "role":"assistant",
             "content": if text.is_empty() { Value::Null } else { Value::String(text) }
@@ -539,6 +561,14 @@ pub fn openai_stream_with_capture(
     }
 }
 
+fn captured_assistant_is_persistable(
+    completed: bool,
+    text: &str,
+    tools: &BTreeMap<usize, CapturedTool>,
+) -> bool {
+    completed && (!text.is_empty() || !tools.is_empty())
+}
+
 #[derive(Default)]
 struct CapturedTool {
     id: String,
@@ -546,7 +576,12 @@ struct CapturedTool {
     arguments: String,
 }
 
-fn capture_frames(buffer: &mut String, text: &mut String, tools: &mut BTreeMap<usize, CapturedTool>) {
+fn capture_frames(
+    buffer: &mut String,
+    text: &mut String,
+    tools: &mut BTreeMap<usize, CapturedTool>,
+    completed: &mut bool,
+) {
     while let Some(pos) = buffer.find("\n\n") {
         let frame = buffer[..pos].to_string();
         buffer.drain(..pos + 2);
@@ -554,6 +589,7 @@ fn capture_frames(buffer: &mut String, text: &mut String, tools: &mut BTreeMap<u
             continue;
         };
         if data == "[DONE]" {
+            *completed = true;
             continue;
         }
         let Ok(chunk) = serde_json::from_str::<Value>(data) else {
@@ -645,9 +681,42 @@ mod tests {
         ).to_string();
         let mut text = String::new();
         let mut tools = BTreeMap::new();
-        capture_frames(&mut buffer, &mut text, &mut tools);
+        let mut completed = false;
+        capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
         assert_eq!(text, "hello");
         assert_eq!(tools.get(&0).unwrap().name, "read");
         assert_eq!(tools.get(&0).unwrap().arguments, "{\"p\":1}");
+        assert!(!completed);
+    }
+
+    #[test]
+    fn capture_frames_marks_a_terminal_done_frame() {
+        let mut buffer = "data: [DONE]\n\n".to_string();
+        let mut text = String::new();
+        let mut tools = BTreeMap::new();
+        let mut completed = false;
+
+        capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
+
+        assert!(completed);
+    }
+
+    #[test]
+    fn incomplete_or_empty_streams_are_not_persistable() {
+        let empty_tools = BTreeMap::new();
+        assert!(!captured_assistant_is_persistable(false, "partial", &empty_tools));
+        assert!(!captured_assistant_is_persistable(true, "", &empty_tools));
+
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            0,
+            CapturedTool {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        );
+        assert!(captured_assistant_is_persistable(true, "", &tools));
+        assert!(captured_assistant_is_persistable(true, "answer", &empty_tools));
     }
 }
