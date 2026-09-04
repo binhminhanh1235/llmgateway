@@ -42,6 +42,8 @@ profile_root = "data/browser-profiles"
 # ephemeral_chat = true
 # probe_timeout_ms = 3000
 # response_timeout_ms = 180000
+# first_byte_timeout_ms = 30000
+# idle_stream_timeout_ms = 30000
 # # Emergency DOM drift override example:
 # # selector_overrides = { input = ["div[aria-label='Enter a prompt for Gemini']"] }
 #
