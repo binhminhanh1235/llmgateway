@@ -162,7 +162,7 @@ grep -q '/ui/browser-control.js' <<<"$UI_HTML"
 grep -q '/ui/browser-control.css' <<<"$UI_HTML"
 grep -q '/driver/launch' <<<"$BROWSER_JS"
 grep -q '/driver/verify' <<<"$BROWSER_JS"
-grep -q 'login_in_progress' <<<"$BROWSER_JS"
+grep -q 'login_required' <<<"$BROWSER_JS"
 grep -q '.browser-control-panel' <<<"$BROWSER_CSS"
 
 LAUNCH=$(curl -fsS -X POST \
