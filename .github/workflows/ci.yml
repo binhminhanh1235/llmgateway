@@ -32,4 +32,5 @@ jobs:
       - run: bash scripts/smoke-account-intelligence.sh
       - run: bash scripts/smoke-routing-trace.sh
       - run: bash scripts/smoke-execution-trace.sh
+      - run: bash scripts/smoke-adaptive-routing.sh
       - run: docker build -t llmgateway:ci .
