@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     env, fs,
+    net::TcpListener,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, RwLock},
@@ -17,11 +18,14 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
+    io::AsyncReadExt,
     process::{Child, Command},
     sync::Mutex,
     time::{sleep, Instant},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+const MAX_CHROMIUM_STDERR_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ChromiumConfig {
@@ -85,8 +89,12 @@ pub enum ChromiumDriverError {
     AlreadyRunning(String),
     #[error("failed to launch Chromium: {0}")]
     Launch(#[source] std::io::Error),
-    #[error("Chromium did not expose DevTools before the startup timeout")]
-    StartupTimeout,
+    #[error("failed to reserve a loopback Chromium DevTools port: {0}")]
+    DevToolsPortReservation(#[source] std::io::Error),
+    #[error("Chromium exited before DevTools became reachable: {0}")]
+    EarlyExit(String),
+    #[error("Chromium did not expose DevTools before the startup timeout: {0}")]
+    StartupTimeout(String),
     #[error("invalid DevToolsActivePort file: {0}")]
     InvalidDevToolsPort(String),
     #[error("failed to query Chromium DevTools: {0}")]
@@ -164,6 +172,7 @@ struct ManagedProcess {
     executable: String,
     started_at: String,
     pid: Option<u32>,
+    debugger_port: u16,
 }
 
 #[derive(Clone)]
@@ -259,18 +268,24 @@ impl ChromiumDriver {
 
         let runtime_config = self.config_snapshot();
         let executable = resolve_executable(runtime_config.executable.as_deref())?;
-        let profile_dir = PathBuf::from(&session.profile_dir);
+        let profile_dir = absolute_path(Path::new(&session.profile_dir))?;
         let devtools_file = profile_dir.join("DevToolsActivePort");
         if existing.debugger_port.is_some() && !existing.debugger_reachable {
             let _ = fs::remove_file(&devtools_file);
         }
 
+        // Use an explicit loopback port instead of relying exclusively on Chrome's
+        // DevToolsActivePort side effect. This is more deterministic on Windows and
+        // still keeps CDP local-only. The selected port is persisted after CDP answers
+        // so restart reconciliation and browser-provider execution keep using the
+        // existing profile contract.
+        let requested_port = reserve_debugger_port()?;
         let login = self.sessions.begin_login(session_id).await?;
         let mut command = Command::new(&executable);
         command
             .arg(format!("--user-data-dir={}", profile_dir.display()))
             .arg("--remote-debugging-address=127.0.0.1")
-            .arg("--remote-debugging-port=0")
+            .arg(format!("--remote-debugging-port={requested_port}"))
             .arg("--no-first-run")
             .arg("--no-default-browser-check");
         for arg in &runtime_config.extra_args {
@@ -281,10 +296,10 @@ impl ChromiumDriver {
             .arg(&login.login_url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(false);
 
-        let child = match command.spawn() {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 let _ = self
@@ -295,6 +310,24 @@ impl ChromiumDriver {
             }
         };
         let pid = child.id();
+        let stderr_buffer = Arc::new(Mutex::new(Vec::new()));
+        if let Some(mut stderr) = child.stderr.take() {
+            let buffer = stderr_buffer.clone();
+            tokio::spawn(async move {
+                let mut chunk = [0u8; 1024];
+                loop {
+                    match stderr.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            let mut captured = buffer.lock().await;
+                            append_capped_stderr(&mut captured, &chunk[..read]);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
         {
             let mut processes = self.processes.lock().await;
             processes.insert(
@@ -304,15 +337,22 @@ impl ChromiumDriver {
                     executable: executable.clone(),
                     started_at: now_string(),
                     pid,
+                    debugger_port: requested_port,
                 },
             );
         }
 
-        let debugger_port = match wait_for_debugger_port(
-            &devtools_file,
-            Duration::from_secs(runtime_config.startup_timeout_seconds),
-        )
-        .await
+        let debugger_port = match self
+            .wait_for_debugger(
+                session_id,
+                &devtools_file,
+                requested_port,
+                Duration::from_secs(runtime_config.startup_timeout_seconds),
+                &stderr_buffer,
+                &executable,
+                &profile_dir,
+            )
+            .await
         {
             Ok(port) => port,
             Err(error) => {
@@ -322,13 +362,26 @@ impl ChromiumDriver {
             }
         };
 
+        {
+            let mut processes = self.processes.lock().await;
+            if let Some(process) = processes.get_mut(session_id) {
+                process.debugger_port = debugger_port;
+            }
+        }
+
+        if let Err(error) = write_debugger_port(&devtools_file, debugger_port) {
+            let _ = self.stop(session_id).await;
+            let _ = self.sessions.mark_failed(session_id, &error.to_string()).await;
+            return Err(error);
+        }
+
         Ok(ChromiumLaunchView {
             session_id: session_id.to_string(),
             login_attempt_id: login.login_attempt_id,
             executable,
             pid,
             debugger_port,
-            profile_dir: login.profile_dir,
+            profile_dir: profile_dir.display().to_string(),
             login_url: login.login_url,
         })
     }
@@ -345,12 +398,16 @@ impl ChromiumDriver {
                     process.pid,
                     process.executable.clone(),
                     process.started_at.clone(),
+                    process.debugger_port,
                 )
             })
         };
 
-        let profile_dir = PathBuf::from(&session.profile_dir);
-        let debugger_port = read_debugger_port(&profile_dir.join("DevToolsActivePort")).ok();
+        let profile_dir = absolute_path(Path::new(&session.profile_dir))?;
+        let debugger_port = process_meta
+            .as_ref()
+            .map(|meta| meta.3)
+            .or_else(|| read_debugger_port(&profile_dir.join("DevToolsActivePort")).ok());
         let (debugger_reachable, pages) = if let Some(port) = debugger_port {
             match self.devtools_pages(port).await {
                 Ok(pages) => (true, pages),
@@ -442,7 +499,8 @@ impl ChromiumDriver {
         }
 
         let session = self.sessions.session(session_id).await?;
-        let devtools_file = PathBuf::from(&session.profile_dir).join("DevToolsActivePort");
+        let profile_dir = absolute_path(Path::new(&session.profile_dir))?;
+        let devtools_file = profile_dir.join("DevToolsActivePort");
         if devtools_file.exists() {
             let _ = fs::remove_file(&devtools_file);
         }
@@ -642,8 +700,9 @@ impl ChromiumDriver {
         }
 
         if status.debugger_port.is_some() && !status.debugger_reachable {
-            let devtools_file = PathBuf::from(&session.profile_dir).join("DevToolsActivePort");
-            let _ = fs::remove_file(devtools_file);
+            if let Ok(profile_dir) = absolute_path(Path::new(&session.profile_dir)) {
+                let _ = fs::remove_file(profile_dir.join("DevToolsActivePort"));
+            }
         }
 
         if matches!(
@@ -799,6 +858,63 @@ impl ChromiumDriver {
         Ok(None)
     }
 
+    async fn wait_for_debugger(
+        &self,
+        session_id: &str,
+        devtools_file: &Path,
+        requested_port: u16,
+        timeout: Duration,
+        stderr_buffer: &Arc<Mutex<Vec<u8>>>,
+        executable: &str,
+        profile_dir: &Path,
+    ) -> Result<u16, ChromiumDriverError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.devtools_pages(requested_port).await.is_ok() {
+                return Ok(requested_port);
+            }
+
+            // Backward compatibility for fake/test Chromium and existing runtimes
+            // that still publish a different ephemeral port through DevToolsActivePort.
+            if let Ok(file_port) = read_debugger_port(devtools_file) {
+                if file_port != requested_port && self.devtools_pages(file_port).await.is_ok() {
+                    return Ok(file_port);
+                }
+            }
+
+            let exited = {
+                let mut processes = self.processes.lock().await;
+                match processes.get_mut(session_id) {
+                    Some(process) => match process.child.try_wait() {
+                        Ok(Some(status)) => Some(status.to_string()),
+                        Ok(None) => None,
+                        Err(error) => Some(format!("process status error: {error}")),
+                    },
+                    None => Some("managed process handle disappeared".into()),
+                }
+            };
+            if let Some(exit) = exited {
+                sleep(Duration::from_millis(50)).await;
+                let stderr = stderr_snapshot(stderr_buffer).await;
+                return Err(ChromiumDriverError::EarlyExit(format!(
+                    "exit={exit}; executable={executable}; profile={}; {}",
+                    profile_dir.display(),
+                    diagnostic_stderr(&stderr)
+                )));
+            }
+
+            if Instant::now() >= deadline {
+                let stderr = stderr_snapshot(stderr_buffer).await;
+                return Err(ChromiumDriverError::StartupTimeout(format!(
+                    "port={requested_port}; executable={executable}; profile={}; {}",
+                    profile_dir.display(),
+                    diagnostic_stderr(&stderr)
+                )));
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn devtools_pages(&self, port: u16) -> Result<Vec<ChromiumPageView>, ChromiumDriverError> {
         let response = self
             .client
@@ -923,22 +1039,6 @@ fn validate_ready_prefix(session_id: &str, prefix: &str) -> Result<(), ChromiumD
     Ok(())
 }
 
-async fn wait_for_debugger_port(
-    path: &Path,
-    timeout: Duration,
-) -> Result<u16, ChromiumDriverError> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Ok(port) = read_debugger_port(path) {
-            return Ok(port);
-        }
-        if Instant::now() >= deadline {
-            return Err(ChromiumDriverError::StartupTimeout);
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-}
-
 fn read_debugger_port(path: &Path) -> Result<u16, ChromiumDriverError> {
     let raw = fs::read_to_string(path).map_err(|error| {
         ChromiumDriverError::InvalidDevToolsPort(format!("{}: {error}", path.display()))
@@ -951,6 +1051,55 @@ fn read_debugger_port(path: &Path) -> Result<u16, ChromiumDriverError> {
         .parse::<u16>()
         .map_err(|error| ChromiumDriverError::InvalidDevToolsPort(error.to_string()))
 }
+
+fn write_debugger_port(path: &Path, port: u16) -> Result<(), ChromiumDriverError> {
+    fs::write(path, format!("{port}\n")).map_err(|error| {
+        ChromiumDriverError::InvalidDevToolsPort(format!(
+            "failed to write {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn reserve_debugger_port() -> Result<u16, ChromiumDriverError> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(ChromiumDriverError::DevToolsPortReservation)?;
+    let port = listener
+        .local_addr()
+        .map_err(ChromiumDriverError::DevToolsPortReservation)?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, ChromiumDriverError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(env::current_dir()?.join(path))
+}
+
+fn append_capped_stderr(buffer: &mut Vec<u8>, chunk: &[u8]) {
+    buffer.extend_from_slice(chunk);
+    if buffer.len() > MAX_CHROMIUM_STDERR_BYTES {
+        let excess = buffer.len() - MAX_CHROMIUM_STDERR_BYTES;
+        buffer.drain(..excess);
+    }
+}
+
+async fn stderr_snapshot(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
+    let captured = buffer.lock().await;
+    String::from_utf8_lossy(&captured).trim().to_string()
+}
+
+fn diagnostic_stderr(stderr: &str) -> String {
+    if stderr.is_empty() {
+        "stderr=<empty>".into()
+    } else {
+        format!("stderr={}", stderr.replace(['\r', '\n'], " "))
+    }
+}
+
 
 fn resolve_executable(configured: Option<&str>) -> Result<String, ChromiumDriverError> {
     if let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) {
@@ -1075,7 +1224,10 @@ fn default_reconcile_interval_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_debugger_port, sanitize_url, validate_chromium_config, ChromiumConfig, ChromiumSessionConfig};
+    use super::{
+        read_debugger_port, reserve_debugger_port, sanitize_url, validate_chromium_config,
+        write_debugger_port, ChromiumConfig, ChromiumSessionConfig,
+    };
     use std::{collections::BTreeMap, fs};
 
     #[test]
@@ -1095,11 +1247,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_devtools_active_port() {
+    fn parses_and_writes_devtools_active_port() {
         let path = std::env::temp_dir().join(format!("llmgateway-devtools-{}", std::process::id()));
         fs::write(&path, "9222\n/devtools/browser/test\n").unwrap();
         assert_eq!(read_debugger_port(&path).unwrap(), 9222);
+        write_debugger_port(&path, 9333).unwrap();
+        assert_eq!(read_debugger_port(&path).unwrap(), 9333);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reserves_loopback_debugger_port() {
+        assert!(reserve_debugger_port().unwrap() > 0);
     }
 
     #[test]
