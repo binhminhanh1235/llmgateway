@@ -83,6 +83,7 @@ pub struct ProviderConversation {
     pub provider: String,
     pub account_id: String,
     pub conversation_url: String,
+    pub last_synced_ordinal: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -158,6 +159,7 @@ impl ConversationStore {
                 provider TEXT NOT NULL,
                 account_id TEXT NOT NULL,
                 conversation_url TEXT NOT NULL,
+                last_synced_ordinal INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(thread_id, provider, account_id),
@@ -266,7 +268,8 @@ impl ConversationStore {
         account_id: &str,
     ) -> Result<Option<ProviderConversation>, ConversationError> {
         let row = sqlx::query(
-            "SELECT thread_id, provider, account_id, conversation_url, created_at, updated_at
+            "SELECT thread_id, provider, account_id, conversation_url, last_synced_ordinal,
+                    created_at, updated_at
              FROM provider_conversations
              WHERE thread_id = ? AND provider = ? AND account_id = ?",
         )
@@ -282,6 +285,7 @@ impl ConversationStore {
                 provider: row.try_get("provider")?,
                 account_id: row.try_get("account_id")?,
                 conversation_url: row.try_get("conversation_url")?,
+                last_synced_ordinal: row.try_get("last_synced_ordinal")?,
                 created_at: row.try_get("created_at")?,
                 updated_at: row.try_get("updated_at")?,
             })
@@ -311,6 +315,28 @@ impl ConversationStore {
         .bind(provider)
         .bind(account_id)
         .bind(conversation_url)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_provider_conversation_synced(
+        &self,
+        thread_id: &str,
+        provider: &str,
+        account_id: &str,
+        through_ordinal: i64,
+    ) -> Result<(), ConversationError> {
+        sqlx::query(
+            "UPDATE provider_conversations
+             SET last_synced_ordinal = MAX(last_synced_ordinal, ?),
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE thread_id = ? AND provider = ? AND account_id = ?",
+        )
+        .bind(through_ordinal)
+        .bind(thread_id)
+        .bind(provider)
+        .bind(account_id)
         .execute(&self.pool)
         .await?;
         Ok(())
