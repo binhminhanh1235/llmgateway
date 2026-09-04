@@ -702,7 +702,7 @@ struct CdpBrowserAdapter {
     spec: CdpAdapterSpec,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct CdpTarget {
     #[serde(default)]
     id: String,
@@ -1092,6 +1092,249 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
             message: "adapter contract did not return a chat result".into(),
         })?;
         synthetic_response(result)
+    }
+}
+
+
+
+fn effective_target_url_prefix(
+    provider_kind: &str,
+    binding: &BrowserAccountBinding,
+) -> Option<String> {
+    binding
+        .target_url_prefix
+        .clone()
+        .or_else(|| match provider_kind {
+            "browser-gemini" => Some("https://gemini.google.com/app".into()),
+            "browser-qwen" => Some("https://chat.qwen.ai/".into()),
+            _ => None,
+        })
+}
+
+fn unavailable_diagnostics(
+    account_id: &str,
+    provider_kind: &str,
+    adapter_id: &str,
+    binding: &BrowserAccountBinding,
+    message: &str,
+) -> BrowserAdapterDiagnostics {
+    BrowserAdapterDiagnostics {
+        account_id: account_id.to_string(),
+        provider_kind: provider_kind.to_string(),
+        adapter_id: Some(adapter_id.to_string()),
+        adapter_version: None,
+        contract_version: None,
+        expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+        status: "unavailable".into(),
+        message: message.to_string(),
+        page_signature: None,
+        target_url_prefix: effective_target_url_prefix(provider_kind, binding),
+        configured_models: binding.models.clone(),
+    }
+}
+
+fn incompatible_diagnostics(
+    account_id: &str,
+    provider_kind: &str,
+    adapter_id: &str,
+    binding: &BrowserAccountBinding,
+    code: &str,
+    message: &str,
+) -> BrowserAdapterDiagnostics {
+    BrowserAdapterDiagnostics {
+        account_id: account_id.to_string(),
+        provider_kind: provider_kind.to_string(),
+        adapter_id: Some(adapter_id.to_string()),
+        adapter_version: None,
+        contract_version: None,
+        expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+        status: if code == "login_required" {
+            "login_required".into()
+        } else {
+            "adapter_incompatible".into()
+        },
+        message: format!("{code}: {message}"),
+        page_signature: None,
+        target_url_prefix: effective_target_url_prefix(provider_kind, binding),
+        configured_models: binding.models.clone(),
+    }
+}
+
+fn build_contract_expression(
+    script: &str,
+    operation: &str,
+    request: Option<&Value>,
+    context: &Value,
+) -> Result<String, BrowserProviderError> {
+    let operation_json = serde_json::to_string(operation)
+        .map_err(|error| BrowserProviderError::InvalidConfig(error.to_string()))?;
+    let request_json = serde_json::to_string(request.unwrap_or(&Value::Null))
+        .map_err(|error| BrowserProviderError::InvalidConfig(error.to_string()))?;
+    let context_json = serde_json::to_string(context)
+        .map_err(|error| BrowserProviderError::InvalidConfig(error.to_string()))?;
+
+    let mut expression = String::from("(async () => {\n");
+    expression.push_str(script);
+    expression.push_str(
+        r#"
+const __adapter = globalThis.__LLMGATEWAY_ADAPTER__;
+const __operation = "#,
+    );
+    expression.push_str(&operation_json);
+    expression.push_str(";\nconst __request = ");
+    expression.push_str(&request_json);
+    expression.push_str(";\nconst __context = ");
+    expression.push_str(&context_json);
+    expression.push_str(
+        r#";
+const __expected = 1;
+if (!__adapter || typeof __adapter !== "object") {
+  return { error: { code: "contract_missing", message: "adapter did not expose globalThis.__LLMGATEWAY_ADAPTER__" } };
+}
+const __meta = __adapter.meta || null;
+if (!__meta || Number(__meta.contract_version || 0) !== __expected) {
+  return {
+    meta: __meta,
+    error: {
+      code: "contract_version_mismatch",
+      message: "expected browser adapter contract v" + __expected + " but adapter reported " + String(__meta?.contract_version || 0)
+    }
+  };
+}
+let __probe = { ok: true, code: "ready", message: "adapter probe not implemented" };
+try {
+  if (typeof __adapter.probe === "function") {
+    __probe = await __adapter.probe(__context);
+  }
+} catch (error) {
+  return {
+    meta: __meta,
+    error: {
+      code: "adapter_incompatible",
+      message: String(error?.message || error || "adapter probe failed")
+    }
+  };
+}
+if (!__probe || __probe.ok !== true) {
+  return {
+    meta: __meta,
+    probe: __probe || null,
+    error: {
+      code: String(__probe?.code || "adapter_incompatible"),
+      message: String(__probe?.message || "adapter probe reported incompatible page")
+    }
+  };
+}
+if (__operation === "probe") {
+  return { meta: __meta, probe: __probe };
+}
+if (typeof __adapter.chat !== "function") {
+  return {
+    meta: __meta,
+    probe: __probe,
+    error: { code: "contract_missing", message: "adapter contract is missing chat(request, context)" }
+  };
+}
+try {
+  const __result = await __adapter.chat(__request, __context);
+  return { meta: __meta, probe: __probe, result: __result };
+} catch (error) {
+  const __message = String(error?.message || error || "adapter execution failed");
+  let __code = "adapter_execution_error";
+  if (/^ADAPTER_INCOMPATIBLE:/i.test(__message)) __code = "adapter_incompatible";
+  else if (/^(MODEL_NOT_FOUND|MODEL_PICKER_NOT_FOUND):/i.test(__message)) __code = "model_unavailable";
+  else if (/^LOGIN_REQUIRED:/i.test(__message)) __code = "login_required";
+  else if (/^RESPONSE_TIMEOUT:/i.test(__message)) __code = "response_timeout";
+  else if (/^INVALID_REQUEST:/i.test(__message)) __code = "invalid_request";
+  return { meta: __meta, probe: __probe, error: { code: __code, message: __message } };
+}
+})()"#,
+    );
+    Ok(expression)
+}
+
+fn validate_contract_envelope(
+    account_id: &str,
+    spec: CdpAdapterSpec,
+    envelope: &AdapterContractEnvelope,
+) -> Result<(), BrowserProviderError> {
+    let Some(meta) = envelope.meta.as_ref() else {
+        let error = envelope.error.as_ref();
+        return Err(BrowserProviderError::AdapterIncompatible {
+            account_id: account_id.to_string(),
+            code: error
+                .map(|error| error.code.clone())
+                .unwrap_or_else(|| "contract_missing".into()),
+            message: error
+                .map(|error| error.message.clone())
+                .unwrap_or_else(|| "adapter metadata is missing".into()),
+        });
+    };
+    if meta.contract_version != BROWSER_ADAPTER_CONTRACT_VERSION {
+        return Err(BrowserProviderError::AdapterIncompatible {
+            account_id: account_id.to_string(),
+            code: "contract_version_mismatch".into(),
+            message: format!(
+                "expected contract v{} but adapter reported v{}",
+                BROWSER_ADAPTER_CONTRACT_VERSION, meta.contract_version
+            ),
+        });
+    }
+    if meta.id.trim().is_empty() || meta.provider.trim().is_empty() {
+        return Err(BrowserProviderError::AdapterIncompatible {
+            account_id: account_id.to_string(),
+            code: "invalid_adapter_metadata".into(),
+            message: "adapter id and provider must be non-empty".into(),
+        });
+    }
+    if spec.builtin_script.is_some() && meta.id != spec.adapter_id {
+        return Err(BrowserProviderError::AdapterIncompatible {
+            account_id: account_id.to_string(),
+            code: "adapter_id_mismatch".into(),
+            message: format!(
+                "{} expected adapter id '{}' but script reported '{}'",
+                spec.kind, spec.adapter_id, meta.id
+            ),
+        });
+    }
+    if spec.builtin_script.is_some() && meta.provider != spec.provider {
+        return Err(BrowserProviderError::AdapterIncompatible {
+            account_id: account_id.to_string(),
+            code: "adapter_provider_mismatch".into(),
+            message: format!(
+                "{} expected provider '{}' but script reported '{}'",
+                spec.kind, spec.provider, meta.provider
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn contract_error_to_provider_error(
+    account_id: &str,
+    model: &str,
+    error: AdapterContractError,
+) -> Result<reqwest::Response, BrowserProviderError> {
+    match error.code.as_str() {
+        "model_unavailable" => Err(BrowserProviderError::ModelUnavailable {
+            account_id: account_id.to_string(),
+            model: model.to_string(),
+        }),
+        "contract_missing"
+        | "contract_version_mismatch"
+        | "adapter_incompatible"
+        | "wrong_page"
+        | "target_not_found"
+        | "login_required" => Err(BrowserProviderError::AdapterIncompatible {
+            account_id: account_id.to_string(),
+            code: error.code,
+            message: error.message,
+        }),
+        "invalid_request" => Err(BrowserProviderError::InvalidConfig(error.message)),
+        _ => Err(BrowserProviderError::Transport(format!(
+            "{}: {}",
+            error.code, error.message
+        ))),
     }
 }
 
