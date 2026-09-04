@@ -862,19 +862,22 @@ fn resolve_executable(configured: Option<&str>) -> Result<String, ChromiumDriver
         return Err(ChromiumDriverError::ExecutableNotFound);
     }
 
-    let mut candidates = vec![
+    #[cfg(target_os = "macos")]
+    let candidates = vec![
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let candidates = vec![
         "google-chrome",
         "google-chrome-stable",
         "chromium",
         "chromium-browser",
     ];
-    #[cfg(target_os = "macos")]
-    {
-        candidates.extend([
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        ]);
-    }
     for candidate in candidates {
         if let Some(path) = find_executable(candidate) {
             return Ok(path.display().to_string());
