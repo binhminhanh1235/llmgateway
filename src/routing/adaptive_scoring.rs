@@ -146,6 +146,11 @@ mod tests {
             adaptive_latency_target_ms: 100,
             adaptive_max_penalty: 30,
             adaptive_failure_weight: 0.7,
+            task_aware_enabled: true,
+            task_fit_max_bonus: 20,
+            task_mismatch_penalty: 12,
+            task_long_context_threshold_tokens: 12_000,
+            task_simple_max_input_tokens: 800,
         }
     }
 
