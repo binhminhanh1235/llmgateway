@@ -329,13 +329,17 @@ impl Gateway {
                     let duration_ms = attempt_started.elapsed().as_millis();
                     let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     let error_text = error.to_string();
+                    let adaptive_failure = matches!(
+                        &error,
+                        GatewayError::Transport(_) | GatewayError::BrowserTransport(_)
+                    );
                     self.router
                         .mark_failure(
                             &route.id,
                             error_text.clone(),
                             10,
                             adaptive_latency_ms,
-                            true,
+                            adaptive_failure,
                         )
                         .await;
                     let outcome = match &error {
