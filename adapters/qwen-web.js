@@ -76,6 +76,14 @@
     }
     return null;
   };
+  const waitForExpectedHost = async (expectedHost, timeoutMs) => {
+    const matched = await waitFor(
+      () => location.hostname === expectedHost,
+      Math.max(Number(timeoutMs || 0), 10000),
+      80
+    );
+    return Boolean(matched);
+  };
   const text = (node) => String(node?.innerText || node?.textContent || "").replace(/\u00a0/g, " ").trim();
   const normalize = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 
@@ -423,13 +431,15 @@
     },
 
     async probe(context) {
-      const hostOk = location.hostname === "chat.qwen.ai";
+      const probeTimeoutMs = Math.max(Number(context?.probe_timeout_ms || 8000), 10000);
+      const hostOk = await waitForExpectedHost("chat.qwen.ai", probeTimeoutMs);
       if (!hostOk) {
-        return { ok: false, code: "wrong_page", message: "Expected chat.qwen.ai but found " + location.hostname };
+        const currentHost = String(location.hostname || "").trim() || "<empty>";
+        return { ok: false, code: "wrong_page", message: "Expected chat.qwen.ai but found " + currentHost };
       }
       await waitFor(
         () => queryFirst(context, "input") || queryFirst(context, "login"),
-        Number(context?.probe_timeout_ms || 8000)
+        probeTimeoutMs
       );
       const composer = queryFirst(context, "input");
       const loginVisible = Boolean(queryFirst(context, "login"));
