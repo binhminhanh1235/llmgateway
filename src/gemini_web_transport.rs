@@ -366,11 +366,10 @@ impl GeminiWebHttpAdapter {
         }
 
         if latest.text.is_empty() {
-            return Err(BrowserProviderError::AdapterIncompatible {
-                account_id: request.account.id.clone(),
-                code: "empty_response".into(),
-                message: "Gemini StreamGenerate completed without assistant text".into(),
-            });
+            return Err(BrowserProviderError::Transport(
+                "Gemini StreamGenerate completed without assistant text after the request was accepted"
+                    .into(),
+            ));
         }
 
         Self::persist_conversation_state(
@@ -579,6 +578,26 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
         _profile_dir: &str,
         binding: &BrowserAccountBinding,
     ) -> BrowserAdapterDiagnostics {
+        if binding
+            .models
+            .iter()
+            .any(|model| model != "gemini-web-default")
+        {
+            return BrowserAdapterDiagnostics {
+                account_id: account_id.to_string(),
+                provider_kind: "browser-gemini".into(),
+                adapter_id: Some(self.adapter_id().into()),
+                adapter_version: Some(GEMINI_ADAPTER_VERSION.into()),
+                contract_version: Some(BROWSER_ADAPTER_CONTRACT_VERSION),
+                expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+                status: "adapter_incompatible".into(),
+                message: "Gemini direct HTTP currently supports gemini-web-default only; keeping Chromium fallback for pinned web models".into(),
+                page_signature: None,
+                target_url_prefix: Some(GEMINI_INIT_URL.into()),
+                configured_models: binding.models.clone(),
+            };
+        }
+
         let result = async {
             let material = self.auth_material(&binding.session, account_id)?;
             self.init_session(
