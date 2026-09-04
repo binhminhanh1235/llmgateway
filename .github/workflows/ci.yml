@@ -18,6 +18,9 @@ jobs:
       - run: node --check ui/account-intelligence.js
       - run: node --check ui/browser-control.js
       - run: node --check ui/trace-console.js
+      - run: node --check adapters/gemini-web.js
+      - run: node --check adapters/qwen-web.js
+      - run: node scripts/test-browser-adapter-fixtures.mjs
       - run: cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
