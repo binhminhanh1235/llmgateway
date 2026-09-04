@@ -1142,6 +1142,88 @@ impl CdpBrowserAdapter {
         })
     }
 
+    async fn select_runtime_ready_target(
+        &self,
+        profile_dir: &str,
+        prefix: Option<&str>,
+        timeout_duration: Duration,
+    ) -> Result<CdpTarget, BrowserProviderError> {
+        let Some(prefix) = prefix else {
+            let targets = self.targets(profile_dir).await?;
+            return self
+                .select_target(&targets, None)
+                .cloned()
+                .ok_or_else(|| BrowserProviderError::AdapterIncompatible {
+                    account_id: "<unknown>".into(),
+                    code: "target_not_found".into(),
+                    message: "No browser page target is available for adapter execution".into(),
+                });
+        };
+
+        let expected_host = Url::parse(prefix)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string));
+        let deadline = Instant::now() + timeout_duration;
+        let mut saw_matching_target = false;
+        let mut last_url = String::new();
+        let mut last_runtime_host = String::new();
+
+        loop {
+            let targets = self.targets(profile_dir).await?;
+            for target in targets.into_iter().filter(|target| {
+                target.kind == "page"
+                    && !target.websocket_debugger_url.is_empty()
+                    && target.url.starts_with(prefix)
+            }) {
+                saw_matching_target = true;
+                last_url = target.url.clone();
+                let runtime_host = timeout(
+                    Duration::from_secs(1),
+                    evaluate_cdp(
+                        &target.websocket_debugger_url,
+                        "String(globalThis.location?.hostname || '')",
+                    ),
+                )
+                .await;
+
+                if let Ok(Ok(Value::String(host))) = runtime_host {
+                    last_runtime_host = host.clone();
+                    if expected_host.as_deref().is_none_or(|expected| host == expected) {
+                        return Ok(target);
+                    }
+                }
+            }
+
+            if Instant::now() >= deadline {
+                if !saw_matching_target {
+                    return Err(BrowserProviderError::AdapterIncompatible {
+                        account_id: "<unknown>".into(),
+                        code: "target_not_found".into(),
+                        message: format!(
+                            "No authenticated provider page matched the configured target URL '{prefix}'"
+                        ),
+                    });
+                }
+
+                let runtime = if last_runtime_host.trim().is_empty() {
+                    "<empty>"
+                } else {
+                    last_runtime_host.as_str()
+                };
+                return Err(BrowserProviderError::AdapterIncompatible {
+                    account_id: "<unknown>".into(),
+                    code: "target_runtime_not_ready".into(),
+                    message: format!(
+                        "provider page metadata matched '{prefix}', but no matching CDP target became runtime-ready (target page: {}; runtime host: {runtime})",
+                        diagnostic_target_location(&last_url)
+                    ),
+                });
+            }
+
+            sleep(Duration::from_millis(120)).await;
+        }
+    }
+
     async fn evaluate_contract(
         &self,
         target: &CdpTarget,
@@ -1482,8 +1564,31 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
                 );
             }
         };
-        let targets = match self.targets(profile_dir).await {
-            Ok(targets) => targets,
+        let configured_probe_timeout = binding.probe_timeout_ms.unwrap_or(8_000);
+        let runtime_target_timeout = Duration::from_millis(if self.spec.builtin_script.is_some() {
+            configured_probe_timeout.max(10_000)
+        } else {
+            configured_probe_timeout
+        });
+        let target = match self
+            .select_runtime_ready_target(
+                profile_dir,
+                self.target_url_prefix(binding),
+                runtime_target_timeout,
+            )
+            .await
+        {
+            Ok(target) => target,
+            Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
+                return incompatible_diagnostics(
+                    account_id,
+                    self.kind(),
+                    self.adapter_id(),
+                    binding,
+                    &code,
+                    &message,
+                );
+            }
             Err(error) => {
                 return unavailable_diagnostics(
                     account_id,
@@ -1494,19 +1599,9 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
                 );
             }
         };
-        let Some(target) = self.select_target(&targets, self.target_url_prefix(binding)) else {
-            return incompatible_diagnostics(
-                account_id,
-                self.kind(),
-                self.adapter_id(),
-                binding,
-                "target_not_found",
-                "No authenticated provider page matched the configured target URL",
-            );
-        };
         let context = self.context(binding, None);
         match self
-            .evaluate_contract(target, &script, "probe", None, &context, account_id)
+            .evaluate_contract(&target, &script, "probe", None, &context, account_id)
             .await
         {
             Ok(envelope) => self.diagnostics_from_envelope(account_id, binding, envelope),
@@ -1572,13 +1667,27 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
                 }
             }
         } else {
-            let targets = self.targets(&request.profile_dir).await?;
-            self.select_target(&targets, self.target_url_prefix(&request.binding))
-                .cloned()
-                .ok_or_else(|| BrowserProviderError::SessionUnavailable {
-                    account_id: request.account.id.clone(),
-                    session_id: request.session_id.clone(),
-                })?
+            let runtime_target_timeout = Duration::from_millis(
+                request.binding.probe_timeout_ms.unwrap_or(8_000).max(10_000),
+            );
+            match self
+                .select_runtime_ready_target(
+                    &request.profile_dir,
+                    self.target_url_prefix(&request.binding),
+                    runtime_target_timeout,
+                )
+                .await
+            {
+                Ok(target) => target,
+                Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
+                    return Err(BrowserProviderError::AdapterIncompatible {
+                        account_id: request.account.id.clone(),
+                        code,
+                        message,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
         };
 
         if normalized_body
@@ -2233,28 +2342,35 @@ mod tests {
         let ws_address = ws_listener.local_addr().unwrap();
         let websocket_url = format!("ws://{ws_address}/devtools/page/fixture");
         let ws_task = tokio::spawn(async move {
-            let (stream, _) = ws_listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            let message = socket.next().await.unwrap().unwrap();
-            let command: Value =
-                serde_json::from_str(message.into_text().unwrap().as_ref()).unwrap();
-            assert_eq!(command["method"], "Runtime.evaluate");
-            let expression = command["params"]["expression"].as_str().unwrap();
-            assert!(expression.contains("gemini-web"));
-            let id = command["id"].as_u64().unwrap();
-            let response = json!({
-                "id": id,
-                "result": {
+            for _ in 0..2 {
+                let (stream, _) = ws_listener.accept().await.unwrap();
+                let mut socket = accept_async(stream).await.unwrap();
+                let message = socket.next().await.unwrap().unwrap();
+                let command: Value =
+                    serde_json::from_str(message.into_text().unwrap().as_ref()).unwrap();
+                assert_eq!(command["method"], "Runtime.evaluate");
+                let expression = command["params"]["expression"].as_str().unwrap();
+                let value = if expression == "String(globalThis.location?.hostname || '')" {
+                    json!("gemini.google.com")
+                } else {
+                    assert!(expression.contains("gemini-web"));
+                    envelope.clone()
+                };
+                let id = command["id"].as_u64().unwrap();
+                let response = json!({
+                    "id": id,
                     "result": {
-                        "type": "object",
-                        "value": envelope
+                        "result": {
+                            "type": "object",
+                            "value": value
+                        }
                     }
-                }
-            });
-            socket
-                .send(Message::Text(response.to_string().into()))
-                .await
-                .unwrap();
+                });
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
+            }
         });
 
         let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
