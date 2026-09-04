@@ -1143,6 +1143,12 @@ impl CdpBrowserAdapter {
                 )
                 .await;
                 if let Ok(Ok(Value::String(href))) = runtime_href {
+                    warn!(
+                        target_id = %target.id,
+                        href = %diagnostic_target_location(&href),
+                        native = is_native_conversation_url(new_chat_url, &href),
+                        "inspected browser runtime URL for native conversation"
+                    );
                     if is_native_conversation_url(new_chat_url, &href) {
                         return Some(href);
                     }
@@ -1151,6 +1157,12 @@ impl CdpBrowserAdapter {
 
             if let Ok(targets) = self.targets(profile_dir).await {
                 if let Some(refreshed) = targets.into_iter().find(|item| item.id == target.id) {
+                    warn!(
+                        target_id = %target.id,
+                        url = %diagnostic_target_location(&refreshed.url),
+                        native = is_native_conversation_url(new_chat_url, &refreshed.url),
+                        "inspected CDP target URL for native conversation"
+                    );
                     if is_native_conversation_url(new_chat_url, &refreshed.url) {
                         return Some(refreshed.url);
                     }
