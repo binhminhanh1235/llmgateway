@@ -1,6 +1,6 @@
 # llmgateway roadmap
 
-This roadmap tracks the path from the current v0.28 browser-first beta to a stable v1.0.
+This roadmap tracks the path from the current v0.29 browser-first beta to a stable v1.0.
 
 ## Product direction
 
@@ -38,7 +38,7 @@ The security boundary stays unchanged:
 - CAPTCHA/2FA and normal authentication are completed interactively by the user;
 - browser integrations must respect provider terms, anti-abuse controls and quota limits.
 
-## Current baseline: v0.28
+## Current baseline: v0.29
 
 Already implemented:
 
@@ -74,9 +74,15 @@ Already implemented:
 - configurable route-model to provider-UI model labels;
 - stateless per-request provider tabs using the authenticated profile;
 - prompt-mediated OpenAI tool-call bridge for coding-agent clients;
-- deterministic fake-page and fake-CDP adapter fixtures.
+- deterministic fake-page and fake-CDP adapter fixtures;
+- managed Browser Accounts wizard for Gemini Web and Qwen Web;
+- safe linked config creation with validation, duplicate protection, backup, and atomic replacement;
+- hot activation of browser sessions, Chromium sessions, provider bindings, accounts, routes, and catalog models;
+- immutable request-level config snapshots across routing/execution during hot reload;
+- browser account disable/re-enable, re-authentication, restart, stop, and recovery controls;
+- deterministic browser-account hot-activation E2E coverage.
 
-The remaining browser work is therefore mostly **setup UX, true streaming and deeper multi-browser intelligence**, rather than inventing a second routing architecture.
+The remaining browser work is therefore mostly **true streaming and deeper multi-browser intelligence**, rather than setup plumbing or a second routing architecture.
 
 ---
 
@@ -154,11 +160,15 @@ Provider UI changes should fail loudly and diagnostically, not silently produce 
 
 ---
 
-## v0.29 - Browser Accounts UX
+## v0.29 - Browser Accounts UX ✅
+
+**Status: shipped**
 
 **Priority: P0**
 
 Goal: adding and maintaining browser accounts should be possible from the local UI without manually editing several TOML sections.
+
+v0.29 ships the managed Gemini/Qwen wizard, validated config persistence, hot activation without process restart, lifecycle controls, request-pinned immutable config snapshots, immediate catalog/router visibility, and a deterministic fake-CDP E2E gate.
 
 ### Scope
 
