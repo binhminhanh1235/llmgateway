@@ -122,11 +122,15 @@ impl Router {
 
     pub fn sticky_route_matches_best_task_fit(
         &self,
+        requested_model: &str,
         body: &Value,
         preferred: &RouteConfig,
         best: &RouteConfig,
     ) -> bool {
-        if self.transport_preference_rank(preferred) != self.transport_preference_rank(best) {
+        let resolved_model = self.config.resolve_model_alias(requested_model);
+        if self.config.virtual_models.contains_key(resolved_model)
+            && self.transport_preference_rank(preferred) != self.transport_preference_rank(best)
+        {
             return false;
         }
         if !self.config.routing.task_aware_enabled {
