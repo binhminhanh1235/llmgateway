@@ -378,7 +378,7 @@ pub fn apply_browser_account_setup(
         binding["adapter_contract_version"] = value(1);
         binding["models"] = Item::Value(Value::Array(string_array([model_id.as_str()])));
         binding["ephemeral_chat"] = value(true);
-        binding["probe_timeout_ms"] = value(3_000);
+        binding["probe_timeout_ms"] = value(10_000);
         binding["response_timeout_ms"] = value(180_000);
         binding["first_byte_timeout_ms"] = value(30_000);
         binding["idle_stream_timeout_ms"] = value(30_000);

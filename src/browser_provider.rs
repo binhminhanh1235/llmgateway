@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use reqwest::{header::CONTENT_TYPE, Client};
+use reqwest::{header::CONTENT_TYPE, Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -974,13 +974,19 @@ impl CdpBrowserAdapter {
     }
 
     fn context(&self, binding: &BrowserAccountBinding, model: Option<&str>) -> Value {
+        let configured_probe_timeout = binding.probe_timeout_ms.unwrap_or(8_000);
+        let probe_timeout_ms = if self.spec.builtin_script.is_some() {
+            configured_probe_timeout.max(10_000)
+        } else {
+            configured_probe_timeout
+        };
         json!({
             "provider": self.spec.provider,
             "adapter_id": self.spec.adapter_id,
             "contract_version": BROWSER_ADAPTER_CONTRACT_VERSION,
             "model_label": model.and_then(|value| self.model_label(binding, value)),
             "selectors": binding.selector_overrides,
-            "probe_timeout_ms": binding.probe_timeout_ms.unwrap_or(8_000),
+            "probe_timeout_ms": probe_timeout_ms,
             "response_timeout_ms": binding.response_timeout_ms.unwrap_or(180_000),
             "first_byte_timeout_ms": binding.first_byte_timeout_ms.unwrap_or(30_000),
             "idle_stream_timeout_ms": binding.idle_stream_timeout_ms.unwrap_or(30_000),
@@ -1054,39 +1060,60 @@ impl CdpBrowserAdapter {
                 message: "DevTools created a browser target without an id".into(),
             });
         }
-        if initial.kind == "page"
-            && !initial.websocket_debugger_url.is_empty()
-            && initial.url.starts_with(prefix)
-        {
-            return Ok(initial);
-        }
 
+        let expected_host = Url::parse(prefix)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string));
         let target_id = initial.id.clone();
-        let mut last_url = initial.url.clone();
+        let mut current = initial;
+        let mut last_url = current.url.clone();
+        let mut last_runtime_host = String::new();
         let deadline = Instant::now() + timeout_duration;
+
         loop {
-            let targets = self.targets(profile_dir).await?;
-            if let Some(current) = targets.into_iter().find(|target| target.id == target_id) {
-                last_url = current.url.clone();
-                if current.kind == "page"
-                    && !current.websocket_debugger_url.is_empty()
-                    && current.url.starts_with(prefix)
-                {
-                    return Ok(current);
+            last_url = current.url.clone();
+            if current.kind == "page"
+                && !current.websocket_debugger_url.is_empty()
+                && current.url.starts_with(prefix)
+            {
+                let runtime_host = timeout(
+                    Duration::from_secs(2),
+                    evaluate_cdp(
+                        &current.websocket_debugger_url,
+                        "String(globalThis.location?.hostname || '')",
+                    ),
+                )
+                .await;
+
+                if let Ok(Ok(Value::String(host))) = runtime_host {
+                    last_runtime_host = host.clone();
+                    if expected_host.as_deref().is_none_or(|expected| host == expected) {
+                        return Ok(current);
+                    }
                 }
             }
 
             if Instant::now() >= deadline {
+                let runtime = if last_runtime_host.trim().is_empty() {
+                    "<empty>"
+                } else {
+                    last_runtime_host.as_str()
+                };
                 return Err(BrowserProviderError::AdapterIncompatible {
                     account_id: "<unknown>".into(),
                     code: "target_navigation_timeout".into(),
                     message: format!(
-                        "new browser tab did not navigate to '{prefix}' before adapter injection (last page: {})",
+                        "new browser tab did not become runtime-ready for '{prefix}' before adapter injection (target page: {}; runtime host: {runtime})",
                         diagnostic_target_location(&last_url)
                     ),
                 });
             }
-            sleep(Duration::from_millis(100)).await;
+
+            let targets = self.targets(profile_dir).await?;
+            if let Some(refreshed) = targets.into_iter().find(|target| target.id == target_id) {
+                current = refreshed;
+            }
+            sleep(Duration::from_millis(120)).await;
         }
     }
 

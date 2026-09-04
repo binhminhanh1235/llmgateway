@@ -67,6 +67,23 @@ async function testGemini() {
   assert.equal(probe.ok, true, probe.message);
   assert.equal(probe.page_signature, "gemini-composer-v1");
 
+  installPage({
+    host: "",
+    nodes: { "div[aria-label='Enter a prompt for Gemini']": input }
+  });
+  adapter = loadAdapter("adapters/gemini-web.js");
+  setTimeout(() => { globalThis.location.hostname = "gemini.google.com"; }, 25);
+  probe = await adapter.probe({ probe_timeout_ms: 200 });
+  assert.equal(probe.ok, true, probe.message);
+  assert.equal(probe.page_signature, "gemini-composer-v1");
+
+  installPage({ host: "example.test", nodes: {} });
+  adapter = loadAdapter("adapters/gemini-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "wrong_page");
+  assert.match(probe.message, /example\.test/);
+
   installPage({ host: "gemini.google.com", nodes: {} });
   adapter = loadAdapter("adapters/gemini-web.js");
   probe = await adapter.probe({ probe_timeout_ms: 20 });
