@@ -32,6 +32,8 @@ page_url = (
 stream_lock = threading.Lock()
 stream_seq = 0
 streams = {}
+runtime_host_lock = threading.Lock()
+runtime_host_attempts = {}
 
 def expression_request(expression):
     match = re.search(r"const __request = (.*?);\n", expression, re.S)
@@ -53,6 +55,19 @@ def adapter_identity(expression):
     if "gemini-web" in expression or '"provider":"gemini"' in expression:
         return "gemini-web", "gemini", "gemini-web-default"
     return "qwen-web", "qwen", "qwen-web-default"
+
+def runtime_evaluate_value(expression, target_id):
+    if "globalThis.location?.hostname" in expression or "location.hostname" in expression:
+        host = urlparse(page_url).hostname or ""
+        with runtime_host_lock:
+            attempts = runtime_host_attempts.get(target_id, 0) + 1
+            runtime_host_attempts[target_id] = attempts
+        # Real Chromium can expose the intended target URL before the new
+        # document execution context commits. Exercise that race in smoke tests.
+        if target_id == "fake-ephemeral" and attempts == 1:
+            return ""
+        return host
+    return envelope_for(expression)
 
 def envelope_for(expression):
     global stream_seq
@@ -292,12 +307,14 @@ class Handler(socketserver.StreamRequestHandler):
                     if command.get("method") != "Runtime.evaluate":
                         continue
                     expression = command.get("params", {}).get("expression", "")
+                    target_id = path.rsplit("/", 1)[-1]
+                    value = runtime_evaluate_value(expression, target_id)
                     response = {
                         "id": command.get("id"),
                         "result": {
                             "result": {
-                                "type": "object",
-                                "value": envelope_for(expression),
+                                "type": "string" if isinstance(value, str) else "object",
+                                "value": value,
                             }
                         },
                     }
