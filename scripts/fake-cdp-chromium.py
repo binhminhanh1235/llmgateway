@@ -98,8 +98,9 @@ def ensure_native_conversation(target_id, provider):
         target_urls[target_id] = native
     append_marker("native-conversations.log", native)
 
-def adapter_identity(expression):
-    if "gemini-web" in expression or '"provider":"gemini"' in expression:
+def adapter_identity(expression, target_id):
+    target_host = urlparse(target_url_for(target_id)).hostname or ""
+    if target_host == "gemini.google.com" or "gemini-web" in expression or '"provider":"gemini"' in expression:
         return "gemini-web", "gemini", "gemini-web-default"
     return "qwen-web", "qwen", "qwen-web-default"
 
@@ -120,7 +121,7 @@ def runtime_evaluate_value(expression, target_id):
 
 def envelope_for(expression, target_id):
     global stream_seq
-    adapter_id, provider, model = adapter_identity(expression)
+    adapter_id, provider, model = adapter_identity(expression, target_id)
     meta = {
         "contract_version": 1,
         "id": adapter_id,
