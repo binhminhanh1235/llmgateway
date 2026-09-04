@@ -166,7 +166,7 @@ pub async fn create_browser_account_setup(
                 result.next_steps = vec![
                     "Open Accounts and choose Login with browser for the new account.".into(),
                     "Complete provider login, CAPTCHA, and 2FA normally in Chromium if requested.".into(),
-                    "Verify the authenticated page; browser-first routing will make the route eligible immediately.".into(),
+                    "Verify the authenticated page; Gemini captures reusable auth material and can chat after Chromium is stopped.".into(),
                 ];
                 json_response(StatusCode::CREATED, json!(result), None)
             }
@@ -378,6 +378,9 @@ pub fn apply_browser_account_setup(
         let bindings = ensure_table(browser, "bindings")?;
         let binding = ensure_table(bindings, &account_id)?;
         binding["session"] = value(&session_id);
+        if preset.id == "gemini" {
+            binding["transport_mode"] = value("http-preferred");
+        }
         binding["adapter_contract_version"] = value(1);
         binding["models"] = Item::Value(Value::Array(string_array([model_id.as_str()])));
         binding["ephemeral_chat"] = value(true);
@@ -482,7 +485,7 @@ pub fn apply_browser_account_setup(
             "Restart llmgateway so the managed browser account becomes active.".into(),
             "Open Accounts and choose Login with browser for the new account.".into(),
             "Complete provider login, CAPTCHA, and 2FA normally in Chromium if requested.".into(),
-            "Verify the authenticated page; browser-first routing will then make the route eligible."
+            "Verify the authenticated page; Gemini can prefer direct HTTP after reusable auth material is captured."
                 .into(),
         ],
     })
