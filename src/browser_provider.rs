@@ -4,6 +4,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
+use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{header::CONTENT_TYPE, Client};
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use tokio::{sync::RwLock, time::timeout};
+use tokio::{
+    sync::RwLock,
+    time::{sleep, timeout},
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const MAX_ADAPTER_SCRIPT_BYTES: u64 = 512 * 1024;
@@ -53,6 +57,10 @@ pub struct BrowserAccountBinding {
     pub probe_timeout_ms: Option<u64>,
     #[serde(default)]
     pub response_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub first_byte_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub idle_stream_timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -112,6 +120,8 @@ struct AdapterContractEnvelope {
     probe: Option<AdapterProbeResult>,
     #[serde(default)]
     result: Option<CdpAdapterResult>,
+    #[serde(default)]
+    stream: Option<Value>,
     #[serde(default)]
     error: Option<AdapterContractError>,
 }
@@ -267,6 +277,22 @@ impl BrowserProviderConfig {
             {
                 return Err(BrowserProviderError::InvalidConfig(format!(
                     "browser binding '{account}' response_timeout_ms must be between 1000 and 600000"
+                )));
+            }
+            if binding
+                .first_byte_timeout_ms
+                .is_some_and(|value| !(500..=120_000).contains(&value))
+            {
+                return Err(BrowserProviderError::InvalidConfig(format!(
+                    "browser binding '{account}' first_byte_timeout_ms must be between 500 and 120000"
+                )));
+            }
+            if binding
+                .idle_stream_timeout_ms
+                .is_some_and(|value| !(500..=120_000).contains(&value))
+            {
+                return Err(BrowserProviderError::InvalidConfig(format!(
+                    "browser binding '{account}' idle_stream_timeout_ms must be between 500 and 120000"
                 )));
             }
         }
@@ -887,6 +913,8 @@ impl CdpBrowserAdapter {
             "selectors": binding.selector_overrides,
             "probe_timeout_ms": binding.probe_timeout_ms.unwrap_or(8_000),
             "response_timeout_ms": binding.response_timeout_ms.unwrap_or(180_000),
+            "first_byte_timeout_ms": binding.first_byte_timeout_ms.unwrap_or(30_000),
+            "idle_stream_timeout_ms": binding.idle_stream_timeout_ms.unwrap_or(30_000),
         })
     }
 
@@ -1679,6 +1707,8 @@ mod tests {
             ephemeral_chat: Some(false),
             probe_timeout_ms: Some(500),
             response_timeout_ms: Some(1_000),
+            first_byte_timeout_ms: Some(1_000),
+            idle_stream_timeout_ms: Some(1_000),
         }
     }
 
