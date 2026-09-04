@@ -148,6 +148,18 @@ fn observe_terminal_sse_done(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
     saw_done
 }
 
+
+fn upstream_stream_error_sse(message: &str) -> bytes::Bytes {
+    let payload = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "upstream_stream_error",
+            "code": "upstream_stream_error"
+        }
+    });
+    bytes::Bytes::from(format!("data: {payload}\n\n"))
+}
+
 #[derive(Debug, Error)]
 pub enum GatewayError {
     #[error("{0}")]
@@ -605,7 +617,11 @@ impl Gateway {
                     Err(error) => {
                         let message = error.to_string();
                         guard.finish("failed", Some(&message)).await;
-                        yield Err(std::io::Error::other(message));
+                        // Preserve a valid SSE response for downstream clients. Propagating a
+                        // transport-level body error makes reqwest surface only the opaque
+                        // "error decoding response body" message and hides the actual cause.
+                        // Do not emit [DONE]: the stream is failed, not completed.
+                        yield Ok::<_, std::io::Error>(upstream_stream_error_sse(&message));
                         return;
                     }
                 }
@@ -867,7 +883,7 @@ fn cooldown_for(status: StatusCode) -> i64 {
 
 #[cfg(test)]
 mod stream_trace_tests {
-    use super::observe_terminal_sse_done;
+    use super::{observe_terminal_sse_done, upstream_stream_error_sse};
 
     #[test]
     fn terminal_done_detector_requires_a_complete_sse_data_frame() {
@@ -878,6 +894,24 @@ mod stream_trace_tests {
         ));
         assert!(!observe_terminal_sse_done(&mut buffer, b"data: [DO"));
         assert!(observe_terminal_sse_done(&mut buffer, b"NE]\n\n"));
+    }
+
+    #[test]
+    fn upstream_stream_errors_are_emitted_as_valid_non_terminal_sse() {
+        let frame = String::from_utf8(upstream_stream_error_sse("browser poll failed").to_vec())
+            .expect("SSE error frame should be UTF-8");
+        assert!(frame.starts_with("data: "));
+        assert!(frame.ends_with("\n\n"));
+        assert!(!frame.contains("[DONE]"));
+
+        let payload = frame
+            .strip_prefix("data: ")
+            .expect("SSE data prefix")
+            .trim();
+        let value: serde_json::Value =
+            serde_json::from_str(payload).expect("valid JSON SSE payload");
+        assert_eq!(value["error"]["code"], "upstream_stream_error");
+        assert_eq!(value["error"]["message"], "browser poll failed");
     }
 
     #[test]
