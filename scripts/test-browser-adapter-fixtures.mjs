@@ -449,11 +449,13 @@ async function testQwenIncrementalStream() {
   const input = new FakeTextAreaElement();
   const response = new FakeElement("");
   const send = new FakeElement("Send");
+  const firstText = "A".repeat(180);
+  const finalText = firstText + "B".repeat(100);
   send.onClick = () => {
-    response.innerText = "Hello";
+    response.innerText = firstText;
     response.textContent = response.innerText;
     setTimeout(() => {
-      response.innerText = "Hello world";
+      response.innerText = finalText;
       response.textContent = response.innerText;
     }, 180);
   };
@@ -472,26 +474,164 @@ async function testQwenIncrementalStream() {
     messages: [{ role: "user", content: "Say hello" }]
   }, { response_timeout_ms: 4000 });
 
+  const emitted = [];
   await new Promise((resolve) => setTimeout(resolve, 140));
   const first = await adapter.streamPoll({ stream_id: started.stream_id });
   assert.equal(first.error, null);
   assert.equal(first.done, false);
-  assert.equal(first.events.length, 1, JSON.stringify(first));
-  assert.equal(first.events[0].choices[0].delta.content, "Hello");
+  assert.ok(first.events.length >= 1, JSON.stringify(first));
+  emitted.push(...first.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
 
   await new Promise((resolve) => setTimeout(resolve, 180));
   const second = await adapter.streamPoll({ stream_id: started.stream_id });
   assert.equal(second.error, null);
   assert.equal(second.done, false);
-  assert.equal(second.events.length, 1, JSON.stringify(second));
-  assert.equal(second.events[0].choices[0].delta.content, " world");
+  emitted.push(...second.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
 
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+  await new Promise((resolve) => setTimeout(resolve, 1100));
   const final = await adapter.streamPoll({ stream_id: started.stream_id });
   assert.equal(final.error, null);
   assert.equal(final.done, true);
+  emitted.push(...final.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
+  assert.equal(emitted.join(""), finalText);
   assert.equal(final.events.at(-1).choices[0].finish_reason, "stop");
 }
+
+async function testBrowserTailRewriteTolerance() {
+  const cases = [
+    {
+      path: "adapters/gemini-web.js",
+      host: "gemini.google.com",
+      pathName: "/app",
+      inputSelector: "div[aria-label='Enter a prompt for Gemini']",
+      sendSelector: "button[aria-label='Send message']",
+      stopSelector: "button[aria-label='Stop response']",
+      responseSelector: "div.markdown.markdown-main-panel",
+      input: new FakeElement()
+    },
+    {
+      path: "adapters/chatgpt-web.js",
+      host: "chatgpt.com",
+      pathName: "/",
+      inputSelector: "#prompt-textarea",
+      sendSelector: "#composer-submit-button",
+      stopSelector: "button[data-testid='stop-button']",
+      responseSelector: "[data-message-author-role='assistant'] .markdown",
+      input: new FakeElement()
+    },
+    {
+      path: "adapters/qwen-web.js",
+      host: "chat.qwen.ai",
+      pathName: "/app",
+      inputSelector: "textarea.message-input-textarea",
+      sendSelector: "button.send-button",
+      stopSelector: "button.stop-button",
+      responseSelector: "div.response-message-content.phase-answer",
+      input: new FakeTextAreaElement()
+    }
+  ];
+
+  const stablePrefix = "Stable browser-stream section. ".repeat(12);
+  const draftAnswer = stablePrefix + "Draft tail that the provider is still composing.";
+  const finalAnswer = stablePrefix + "Corrected tail after the provider rerendered the active sentence.";
+
+  for (const fixture of cases) {
+    const response = new FakeElement("");
+    const send = new FakeElement("Send");
+    const stop = new FakeElement("Stop");
+    const nodes = {
+      [fixture.inputSelector]: fixture.input,
+      [fixture.sendSelector]: send,
+      [fixture.stopSelector]: stop
+    };
+    send.onClick = () => {
+      response.innerText = draftAnswer;
+      response.textContent = response.innerText;
+      nodes[fixture.responseSelector] = response;
+      setTimeout(() => {
+        response.innerText = finalAnswer;
+        response.textContent = response.innerText;
+      }, 220);
+      setTimeout(() => {
+        delete nodes[fixture.stopSelector];
+      }, 420);
+    };
+
+    installPage({ host: fixture.host, path: fixture.pathName, nodes });
+    const adapter = loadAdapter(fixture.path);
+    const started = await adapter.streamStart({
+      model: "browser-rewrite-test",
+      stream: true,
+      messages: [{ role: "user", content: "Generate a paragraph" }]
+    }, { response_timeout_ms: 5000, response_stable_ms: 250 });
+
+    const emitted = [];
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    const first = await adapter.streamPoll({ stream_id: started.stream_id });
+    assert.equal(first.error, null, JSON.stringify(first));
+    emitted.push(...first.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
+
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const rewritten = await adapter.streamPoll({ stream_id: started.stream_id });
+    assert.equal(rewritten.error, null, JSON.stringify(rewritten));
+    assert.equal(rewritten.done, false, JSON.stringify(rewritten));
+    emitted.push(...rewritten.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
+
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    let final = await adapter.streamPoll({ stream_id: started.stream_id });
+    if (!final.done) {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      final = await adapter.streamPoll({ stream_id: started.stream_id });
+    }
+    assert.equal(final.error, null, JSON.stringify(final));
+    assert.equal(final.done, true, JSON.stringify(final));
+    emitted.push(...final.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
+    assert.equal(emitted.join(""), finalAnswer, fixture.path);
+  }
+}
+
+async function testCommittedPrefixRewriteStillFails() {
+  const input = new FakeTextAreaElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  const stop = new FakeElement("Stop");
+  const initial = "A".repeat(320);
+  send.onClick = () => {
+    response.innerText = initial;
+    response.textContent = response.innerText;
+    setTimeout(() => {
+      response.innerText = "B" + initial.slice(1);
+      response.textContent = response.innerText;
+    }, 220);
+  };
+  installPage({
+    host: "chat.qwen.ai",
+    nodes: {
+      "textarea.message-input-textarea": input,
+      "button.send-button": send,
+      "button.stop-button": stop,
+      "div.response-message-content.phase-answer": response
+    }
+  });
+  const adapter = loadAdapter("adapters/qwen-web.js");
+  const started = await adapter.streamStart({
+    model: "qwen-rewrite-test",
+    stream: true,
+    messages: [{ role: "user", content: "Generate a long answer" }]
+  }, { response_timeout_ms: 4000 });
+
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  const first = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(first.error, null, JSON.stringify(first));
+  assert.ok(first.events.some((event) => event.choices?.[0]?.delta?.content), JSON.stringify(first));
+
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  const rewritten = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(rewritten.done, true, JSON.stringify(rewritten));
+  assert.equal(rewritten.error?.code, "stream_rewrite_detected", JSON.stringify(rewritten));
+  assert.match(rewritten.error?.message || "", /committed stream prefix/);
+}
+
 
 async function testBrowserStreamProgressHeartbeats() {
   const cases = [
@@ -707,6 +847,8 @@ await testChatGPTFreshThreadForcesNewChat();
 await testChatGPTReopenWaitsForStableHistory();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
+await testBrowserTailRewriteTolerance();
+await testCommittedPrefixRewriteStillFails();
 await testBrowserStreamProgressHeartbeats();
 await testGeminiStreamCancellation();
 await testGeminiFreshThreadForcesNewChat();
