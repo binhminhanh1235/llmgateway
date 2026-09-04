@@ -49,7 +49,9 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use browser_account_setup::{browser_account_setup_presets, create_browser_account_setup};
+use browser_account_setup::{
+    browser_account_setup_presets, create_browser_account_setup, set_browser_account_enabled,
+};
 use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
 use browser_session::{BrowserConfig, BrowserSessionStore};
 use browser_session_api::{
@@ -282,6 +284,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/_llmgateway/browser-account-setup",
             post(create_browser_account_setup),
+        )
+        .route(
+            "/_llmgateway/browser-account-setup/{account_id}",
+            axum::routing::patch(set_browser_account_enabled),
         )
         .route("/_llmgateway/browser-sessions", get(list_browser_sessions))
         .route(
