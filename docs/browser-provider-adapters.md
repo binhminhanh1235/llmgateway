@@ -39,7 +39,7 @@ Browser routes use the normal `[[providers]]`, `[[accounts]]`, `[[routes]]`, and
 session = "gemini-web-primary"
 ```
 
-The route is eligible only when that browser session is enabled and has lifecycle status `ready`.
+The route is eligible only when that browser session is enabled and has lifecycle status `ready`. Since v0.27, `browser-cdp` routes additionally verify that the live Chromium/CDP runtime is reachable and that a configured authenticated page is visible at route-planning time.
 
 ## First-class browser accounts (v0.17)
 
@@ -121,6 +121,10 @@ A `401` or `403` from a browser adapter has browser-specific meaning. llmgateway
 
 This makes an expired browser login visible in the Accounts UI instead of creating an invisible retry loop.
 
+Transport/runtime failures are also distinguishable in Execution Trace as `browser_session_unavailable` or `browser_transport_error`. CDP runtime failures degrade the session so the v0.27 reconciler can recover it when safe.
+
 ## Why the router is shared
 
-There is intentionally no second browser router. Browser-backed models are another execution lane behind the same route planner. That preserves one place for priority, health, quota pressure, cooldown, affinity, and future task-aware scoring.
+There is intentionally no second browser router. Browser-backed models are another execution lane behind the same route planner. That preserves one place for readiness, priority, quota pressure, adaptive health, task fit, cooldown, and affinity.
+
+v0.27 adds a transport policy for virtual models. The default `execution_preference = "browser-first"` ranks eligible browser routes as a tier before API routes, while all normal scoring still chooses the best route inside each tier. API routes remain deterministic fallback when `api_fallback = true`.
