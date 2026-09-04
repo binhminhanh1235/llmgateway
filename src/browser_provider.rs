@@ -1271,7 +1271,7 @@ impl CdpBrowserAdapter {
             last_url = current.url.clone();
             if current.kind == "page"
                 && !current.websocket_debugger_url.is_empty()
-                && current.url.starts_with(prefix)
+                && target_url_matches_prefix(&current.url, prefix)
             {
                 let runtime_host = timeout(
                     Duration::from_secs(2),
@@ -1370,7 +1370,7 @@ impl CdpBrowserAdapter {
             for target in targets.into_iter().filter(|target| {
                 target.kind == "page"
                     && !target.websocket_debugger_url.is_empty()
-                    && target.url.starts_with(prefix)
+                    && target_url_matches_prefix(&target.url, prefix)
             }) {
                 saw_matching_target = true;
                 last_url = target.url.clone();
@@ -2056,6 +2056,26 @@ fn incremental_browser_body(body: &Value, unsynced_messages: &[Value]) -> Value 
     incremental
 }
 
+fn target_url_matches_prefix(candidate: &str, prefix: &str) -> bool {
+    if candidate.starts_with(prefix) {
+        return true;
+    }
+    let (Ok(candidate), Ok(prefix)) = (Url::parse(candidate), Url::parse(prefix)) else {
+        return false;
+    };
+    if candidate.scheme() != prefix.scheme() || candidate.host_str() != prefix.host_str() {
+        return false;
+    }
+    if prefix.host_str() == Some("gemini.google.com") {
+        let segments = candidate
+            .path_segments()
+            .map(|segments| segments.filter(|segment| !segment.is_empty()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        return segments.iter().any(|segment| *segment == "app" || *segment == "gem");
+    }
+    false
+}
+
 fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
     let Ok(base) = Url::parse(new_chat_url) else {
         return false;
@@ -2639,6 +2659,22 @@ mod tests {
         assert_eq!(qwen.adapter_id(), "qwen-web");
         assert!(qwen.spec.ephemeral_default);
         assert_eq!(qwen.spec.new_chat_url, Some("https://chat.qwen.ai/c/new-chat"));
+    }
+
+    #[test]
+    fn gemini_account_scoped_app_urls_match_provider_prefix() {
+        assert!(target_url_matches_prefix(
+            "https://gemini.google.com/u/1/app/abc123",
+            "https://gemini.google.com/app"
+        ));
+        assert!(target_url_matches_prefix(
+            "https://gemini.google.com/gem/gem123/chat456",
+            "https://gemini.google.com/app"
+        ));
+        assert!(!target_url_matches_prefix(
+            "https://accounts.google.com/ServiceLogin",
+            "https://gemini.google.com/app"
+        ));
     }
 
     #[test]
