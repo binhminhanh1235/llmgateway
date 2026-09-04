@@ -1,8 +1,10 @@
 mod account_readiness;
 mod adaptive_scoring;
+mod task_aware;
 
 pub use account_readiness::AccountReadiness;
 pub use adaptive_scoring::AdaptiveRouteSnapshot;
+pub use task_aware::{TaskFitSnapshot, TaskKind, TaskProfile};
 
 use crate::{
     catalog::ModelCatalog,
@@ -13,6 +15,8 @@ use account_readiness::evaluate_base;
 use adaptive_scoring::AdaptiveRouteState;
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
+use serde_json::Value;
+use task_aware::{classify as classify_task, route_fit as evaluate_task_fit};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -41,6 +45,8 @@ pub struct RouteCandidateDecision {
     pub quota_penalty: Option<i32>,
     pub adaptive_penalty: i32,
     pub adaptive: AdaptiveRouteSnapshot,
+    pub task_adjustment: i32,
+    pub task_fit: TaskFitSnapshot,
     pub final_score: Option<i32>,
     pub rank: Option<usize>,
     pub selected: bool,
@@ -50,6 +56,7 @@ pub struct RouteCandidateDecision {
 pub struct RouteDecisionTrace {
     pub requested_model: String,
     pub resolved_model: String,
+    pub task: TaskProfile,
     pub selected_route: Option<String>,
     pub candidates: Vec<RouteCandidateDecision>,
 }
@@ -87,7 +94,15 @@ impl Router {
     }
 
     pub async fn plan(&self, requested_model: &str) -> Vec<RouteConfig> {
-        let evaluation = self.evaluate(requested_model).await;
+        self.plan_for_body(requested_model, None).await
+    }
+
+    pub async fn plan_for_body(
+        &self,
+        requested_model: &str,
+        body: Option<&Value>,
+    ) -> Vec<RouteConfig> {
+        let evaluation = self.evaluate(requested_model, body).await;
         let mut eligible = evaluation
             .candidates
             .into_iter()
@@ -98,7 +113,15 @@ impl Router {
     }
 
     pub async fn explain(&self, requested_model: &str) -> RouteDecisionTrace {
-        let evaluation = self.evaluate(requested_model).await;
+        self.explain_for_body(requested_model, None).await
+    }
+
+    pub async fn explain_for_body(
+        &self,
+        requested_model: &str,
+        body: Option<&Value>,
+    ) -> RouteDecisionTrace {
+        let evaluation = self.evaluate(requested_model, body).await;
         let selected_route = evaluation
             .candidates
             .iter()
@@ -107,6 +130,7 @@ impl Router {
         RouteDecisionTrace {
             requested_model: requested_model.to_string(),
             resolved_model: evaluation.resolved_model,
+            task: evaluation.task,
             selected_route,
             candidates: evaluation
                 .candidates
@@ -116,8 +140,9 @@ impl Router {
         }
     }
 
-    async fn evaluate(&self, requested_model: &str) -> RouteEvaluation {
+    async fn evaluate(&self, requested_model: &str, body: Option<&Value>) -> RouteEvaluation {
         let resolved_model = self.config.resolve_model_alias(requested_model).to_string();
+        let task = classify_task(body, &self.config.routing);
         let candidates = self.candidate_routes(&resolved_model).await;
         let now = Utc::now();
         let health_snapshot = self.health.read().await.clone();
@@ -141,11 +166,16 @@ impl Router {
                 .unwrap_or_default()
                 .snapshot(&self.config.routing);
             let adaptive_penalty = adaptive.penalty;
+            let task_fit = evaluate_task_fit(&task, &route, &self.config.routing);
+            let task_adjustment = task_fit.snapshot.adjustment;
             let mut exclusion_reasons = Vec::new();
             let mut warnings = Vec::new();
 
             if !route.enabled {
                 push_unique(&mut exclusion_reasons, "route_disabled");
+            }
+            if let Some(reason) = task_fit.exclusion_reason {
+                push_unique(&mut exclusion_reasons, reason);
             }
             if route_health
                 .cooldown_until
@@ -192,10 +222,16 @@ impl Router {
                             route
                                 .priority
                                 .saturating_add(penalty)
-                                .saturating_add(adaptive_penalty),
+                                .saturating_add(adaptive_penalty)
+                                .saturating_add(task_adjustment),
                         );
                         if adaptive.active && adaptive_penalty > 0 {
                             push_unique(&mut warnings, "adaptive_degraded");
+                        }
+                        if task_adjustment < 0 {
+                            push_unique(&mut warnings, "task_preferred");
+                        } else if task_adjustment > 0 {
+                            push_unique(&mut warnings, "task_mismatch");
                         }
                     }
                     QuotaEvaluation::Excluded => {
@@ -205,9 +241,19 @@ impl Router {
                         warn!(%error, account = %route.account, "quota scoring failed; keeping route");
                         push_unique(&mut warnings, "quota_scoring_unavailable");
                         quota_penalty = Some(0);
-                        final_score = Some(route.priority.saturating_add(adaptive_penalty));
+                        final_score = Some(
+                            route
+                                .priority
+                                .saturating_add(adaptive_penalty)
+                                .saturating_add(task_adjustment),
+                        );
                         if adaptive.active && adaptive_penalty > 0 {
                             push_unique(&mut warnings, "adaptive_degraded");
+                        }
+                        if task_adjustment < 0 {
+                            push_unique(&mut warnings, "task_preferred");
+                        } else if task_adjustment > 0 {
+                            push_unique(&mut warnings, "task_mismatch");
                         }
                     }
                 }
@@ -228,6 +274,8 @@ impl Router {
                     quota_penalty,
                     adaptive_penalty,
                     adaptive,
+                    task_adjustment,
+                    task_fit: task_fit.snapshot,
                     final_score,
                     rank: None,
                     selected: false,
@@ -258,6 +306,7 @@ impl Router {
 
         RouteEvaluation {
             resolved_model,
+            task,
             candidates: evaluated,
         }
     }
@@ -345,7 +394,16 @@ impl Router {
                 if let Some(configured) = self.config.routes.iter().find(|route| {
                     route.enabled && route.account == account.id && route.model == external_id
                 }) {
-                    routes.push(configured.clone());
+                    let mut configured = configured.clone();
+                    if configured.context_window.is_none() {
+                        configured.context_window = model.context_window;
+                    }
+                    for capability in &model.capabilities {
+                        if !configured.capabilities.iter().any(|value| value == capability) {
+                            configured.capabilities.push(capability.clone());
+                        }
+                    }
+                    routes.push(configured);
                     continue;
                 }
 
@@ -362,6 +420,7 @@ impl Router {
                     priority: 1000 + account_order,
                     enabled: true,
                     capabilities: model.capabilities.clone(),
+                    context_window: model.context_window,
                 });
             }
         }
@@ -460,6 +519,7 @@ impl Router {
 
 struct RouteEvaluation {
     resolved_model: String,
+    task: TaskProfile,
     candidates: Vec<EvaluatedRoute>,
 }
 
