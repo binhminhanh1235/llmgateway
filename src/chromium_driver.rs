@@ -1,10 +1,13 @@
-use crate::browser_session::{
-    BrowserSessionError, BrowserSessionStore, STATUS_DEGRADED, STATUS_FAILED,
-    STATUS_LOGIN_REQUIRED, STATUS_READY, STATUS_REQUIRES_ATTENTION, STATUS_STARTING,
-    STATUS_STOPPED,
+use crate::{
+    browser_auth::{BrowserAuthCookie, BrowserAuthMaterial, BrowserAuthVault},
+    browser_session::{
+        BrowserSessionError, BrowserSessionStore, STATUS_DEGRADED, STATUS_FAILED,
+        STATUS_LOGIN_REQUIRED, STATUS_READY, STATUS_REQUIRES_ATTENTION, STATUS_STARTING,
+        STATUS_STOPPED,
+    },
 };
 use chrono::{SecondsFormat, Utc};
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -164,6 +167,8 @@ pub struct ChromiumVerifyView {
     pub authenticated: bool,
     pub session_id: String,
     pub ready_match: Option<String>,
+    pub auth_material_captured: bool,
+    pub auth_material_error: Option<String>,
     pub status: ChromiumStatusView,
 }
 
@@ -179,6 +184,7 @@ struct ManagedProcess {
 pub struct ChromiumDriver {
     config: Arc<RwLock<ChromiumConfig>>,
     sessions: Arc<BrowserSessionStore>,
+    auth_vault: Arc<BrowserAuthVault>,
     client: Client,
     processes: Arc<Mutex<HashMap<String, ManagedProcess>>>,
 }
@@ -189,6 +195,18 @@ struct DevToolsTarget {
     kind: String,
     #[serde(default)]
     url: String,
+    #[serde(rename = "webSocketDebuggerUrl", default)]
+    websocket_debugger_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PageAuthSnapshot {
+    #[serde(default)]
+    user_agent: String,
+    #[serde(default)]
+    local_storage: BTreeMap<String, String>,
+    #[serde(default)]
+    session_storage: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +228,7 @@ impl ChromiumDriver {
     pub fn new(
         config: ChromiumConfig,
         sessions: Arc<BrowserSessionStore>,
+        auth_vault: Arc<BrowserAuthVault>,
     ) -> Result<Self, ChromiumDriverError> {
         validate_chromium_config(&config)?;
         let client = Client::builder()
@@ -220,6 +239,7 @@ impl ChromiumDriver {
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             sessions,
+            auth_vault,
             client,
             processes: Arc::new(Mutex::new(HashMap::new())),
         })
