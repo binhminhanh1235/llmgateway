@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04.3";
+  const ADAPTER_VERSION = "2026.09.04.4";
 
   const defaults = {
     input: [
@@ -33,10 +33,7 @@
     ],
     response: [
       "div.markdown.markdown-main-panel",
-      "model-response message-content",
-      "model-response .model-response-text",
-      "div.response-container",
-      "div.presented-response-container"
+      "model-response message-content"
     ],
     completion: [
       "button[aria-label='Stop response']",
@@ -289,31 +286,54 @@
     return desired;
   };
 
-  const responseTexts = (context) => {
-    const visible = queryAll(context, "response").filter(isVisible);
-    const markdown = visible.filter((node) => node.matches?.("div.markdown.markdown-main-panel"));
-    const messageContent = visible.filter((node) => node.matches?.("model-response message-content"));
-    const leaves = markdown.length ? markdown : messageContent;
-    return leaves.map(text).filter(Boolean);
-  };
-  const newResponseText = (before, responses) => {
-    const prior = new Set(before);
-    return responses.find((value) => !prior.has(value))
-      || responses.find((value, index) => value !== before[index])
-      || "";
-  };
+  const responseLeaves = (context) => queryAll(context, "response").filter(isVisible);
+  const responseSnapshotKey = (leaves) =>
+    leaves.map((node, index) => index + ":" + text(node)).join("\u241e");
 
   const captureResponseBaseline = async (context) => {
-    if (!context?.reuse_native_conversation) return responseTexts(context);
-    const hydrated = await waitFor(() => {
-      const responses = responseTexts(context);
-      return responses.length ? responses : null;
-    }, 10000);
-    if (!hydrated) {
+    if (!context?.reuse_native_conversation) {
+      const leaves = responseLeaves(context);
+      return { count: leaves.length, nodes: new Set(leaves) };
+    }
+
+    const timeoutMs = Number(context?.history_hydration_timeout_ms || 12000);
+    const stableMs = Number(context?.history_stable_ms || 1200);
+    const deadline = Date.now() + timeoutMs;
+    let lastKey = null;
+    let stableSince = 0;
+    let lastLeaves = [];
+
+    while (Date.now() < deadline) {
+      const leaves = responseLeaves(context);
+      const key = responseSnapshotKey(leaves);
+      if (leaves.length && key === lastKey) {
+        if (stableSince && Date.now() - stableSince >= stableMs) {
+          return { count: leaves.length, nodes: new Set(leaves) };
+        }
+      } else {
+        lastKey = key;
+        lastLeaves = leaves;
+        stableSince = leaves.length ? Date.now() : 0;
+      }
+      await sleep(120);
+    }
+
+    if (!lastLeaves.length) {
       throw new Error("ADAPTER_INCOMPATIBLE: Gemini conversation history did not load");
     }
-    await sleep(1000);
-    return responseTexts(context);
+    throw new Error("ADAPTER_INCOMPATIBLE: Gemini conversation history did not stabilize");
+  };
+
+  const newResponseText = (baseline, leaves) => {
+    if (!baseline || leaves.length <= baseline.count) return "";
+    for (let index = leaves.length - 1; index >= baseline.count; index -= 1) {
+      const node = leaves[index];
+      if (!baseline.nodes.has(node)) {
+        const value = text(node);
+        if (value) return value;
+      }
+    }
+    return "";
   };
 
   const freshChatLocation = () => {
@@ -409,7 +429,7 @@
           if (loginIndicator(context)) {
             throw new Error("LOGIN_REQUIRED: Gemini session expired while waiting for a response");
           }
-          const responses = responseTexts(context);
+          const responses = responseLeaves(context);
           const candidate = newResponseText(before, responses);
           const responseAdvanced = Boolean(candidate);
           const generating = Boolean(queryVisible(context, "completion"));
@@ -422,7 +442,7 @@
             answer = candidate;
             state.answer = candidate;
             stableSince = Date.now();
-          } else if (candidate && !generating && stableSince && Date.now() - stableSince >= 900) {
+          } else if (candidate && !generating && stableSince && Date.now() - stableSince >= Number(context?.response_stable_ms || 900)) {
             answer = candidate;
             state.answer = candidate;
             break;
@@ -587,7 +607,7 @@
         if (loginIndicator(context)) {
           throw new Error("LOGIN_REQUIRED: Gemini session expired while waiting for a response");
         }
-        const responses = responseTexts(context);
+        const responses = responseLeaves(context);
         const candidate = newResponseText(before, responses);
         const responseAdvanced = Boolean(candidate);
         const generating = Boolean(queryVisible(context, "completion"));
@@ -599,7 +619,7 @@
           last = candidate;
           answer = candidate;
           stableSince = Date.now();
-        } else if (candidate && !generating && stableSince && Date.now() - stableSince >= 1200) {
+        } else if (candidate && !generating && stableSince && Date.now() - stableSince >= Number(context?.response_stable_ms || 1200)) {
           answer = candidate;
           break;
         }
