@@ -299,7 +299,7 @@ pub fn apply_browser_account_setup(
     let current = AppConfig::parse(&raw)?;
     let preset = provider_preset(request.provider.trim()).ok_or_else(|| {
         BrowserAccountSetupError::Invalid(format!(
-            "unsupported browser provider '{}'; choose gemini or qwen",
+            "unsupported browser provider '{}'; choose chatgpt, gemini, or qwen",
             request.provider
         ))
     })?;
@@ -454,7 +454,9 @@ pub fn apply_browser_account_setup(
             let coding = ensure_table(virtual_models, "llmgateway-coding")?;
             append_unique_string(coding, "routes", &route_id)?;
         }
-        if preset.id == "gemini" && virtual_models.contains_key("llmgateway-best") {
+        if matches!(preset.id, "gemini" | "chatgpt")
+            && virtual_models.contains_key("llmgateway-best")
+        {
             let best = ensure_table(virtual_models, "llmgateway-best")?;
             append_unique_string(best, "routes", &route_id)?;
         }
@@ -485,6 +487,7 @@ pub fn apply_browser_account_setup(
 
 pub fn provider_presets() -> Vec<BrowserAccountProviderPreset> {
     vec![
+        provider_preset("chatgpt").expect("chatgpt preset"),
         provider_preset("gemini").expect("gemini preset"),
         provider_preset("qwen").expect("qwen preset"),
     ]
@@ -492,6 +495,16 @@ pub fn provider_presets() -> Vec<BrowserAccountProviderPreset> {
 
 fn provider_preset(id: &str) -> Option<BrowserAccountProviderPreset> {
     match id.trim().to_ascii_lowercase().as_str() {
+        "chatgpt" | "browser-chatgpt" => Some(BrowserAccountProviderPreset {
+            id: "chatgpt",
+            label: "ChatGPT Web",
+            provider_id: "chatgpt-web",
+            provider_kind: "browser-chatgpt",
+            login_url: "https://chatgpt.com/",
+            ready_url_prefix: "https://chatgpt.com/",
+            default_model_id: "chatgpt-web-default",
+            default_capabilities: &["chat", "coding", "reasoning"],
+        }),
         "gemini" | "browser-gemini" => Some(BrowserAccountProviderPreset {
             id: "gemini",
             label: "Gemini Web",
@@ -739,6 +752,54 @@ routes = ["api"]
         let path = dir.join("llmgateway.toml");
         fs::write(&path, minimal_config()).unwrap();
         path
+    }
+
+    #[test]
+    fn creates_complete_chatgpt_browser_account_config() {
+        let path = temp_config();
+        let result = apply_browser_account_setup(
+            &path,
+            CreateBrowserAccountRequest {
+                provider: "chatgpt".into(),
+                account_id: Some("chatgpt-a".into()),
+                label: Some("ChatGPT A".into()),
+                model_id: None,
+                model_label: None,
+                priority: Some(4),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.provider, "chatgpt");
+        assert_eq!(result.model_id, "chatgpt-web-default");
+        let raw = fs::read_to_string(&path).unwrap();
+        let parsed = AppConfig::parse(&raw).unwrap();
+        let provider = parsed.provider("chatgpt-web").unwrap();
+        assert_eq!(provider.kind, "browser-chatgpt");
+        let account = parsed.account("chatgpt-a").unwrap();
+        assert_eq!(account.provider, "chatgpt-web");
+        let route = parsed.route("chatgpt-a-route").unwrap();
+        assert_eq!(route.model, "chatgpt-web-default");
+        assert_eq!(route.priority, 4);
+        assert!(route.capabilities.iter().any(|capability| capability == "coding"));
+        assert!(parsed.virtual_models["llmgateway-auto"]
+            .routes
+            .contains(&"chatgpt-a-route".to_string()));
+        assert!(parsed.virtual_models["llmgateway-best"]
+            .routes
+            .contains(&"chatgpt-a-route".to_string()));
+
+        let browser: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(
+            browser["browser"]["sessions"]["chatgpt-a"]["login_url"].as_str(),
+            Some("https://chatgpt.com/")
+        );
+        assert_eq!(
+            browser["chromium"]["sessions"]["chatgpt-a"]["ready_url_prefixes"][0].as_str(),
+            Some("https://chatgpt.com/")
+        );
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

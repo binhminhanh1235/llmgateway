@@ -120,6 +120,41 @@ async function testGemini() {
   assert.equal(probe.code, "login_required");
 }
 
+async function testChatGPT() {
+  const input = new FakeElement();
+  installPage({
+    host: "chatgpt.com",
+    path: "/",
+    nodes: { "#prompt-textarea": input }
+  });
+  let adapter = loadAdapter("adapters/chatgpt-web.js");
+  assert.equal(adapter.meta.contract_version, 1);
+  assert.equal(adapter.meta.id, "chatgpt-web");
+  assert.equal(adapter.meta.provider, "chatgpt");
+  let probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, true, probe.message);
+  assert.equal(probe.page_signature, "chatgpt-composer-v1");
+
+  installPage({
+    host: "chatgpt.com",
+    path: "/",
+    nodes: {
+      "#prompt-textarea": input,
+      "a[href*='/auth/login']": new FakeElement("Log in")
+    }
+  });
+  adapter = loadAdapter("adapters/chatgpt-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "login_required");
+
+  installPage({ host: "example.test", path: "/", nodes: {} });
+  adapter = loadAdapter("adapters/chatgpt-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "wrong_page");
+}
+
 async function testQwen() {
   const input = new FakeTextAreaElement();
   installPage({
@@ -194,6 +229,172 @@ async function testGeminiToolBridge() {
     JSON.parse(choice.message.tool_calls[0].function.arguments),
     { path: "src/main.rs" }
   );
+}
+
+async function testChatGPTToolBridge() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "#prompt-textarea": input,
+    "#composer-submit-button": send
+  };
+  send.onClick = () => {
+    response.innerText = '[[LLMGATEWAY_TOOL_CALLS]]{"tool_calls":[{"name":"read_file","arguments":{"path":"README.md"}}]}[[/LLMGATEWAY_TOOL_CALLS]]';
+    response.textContent = response.innerText;
+    nodes["[data-message-author-role='assistant'] .markdown"] = [response];
+  };
+  installPage({ host: "chatgpt.com", path: "/", nodes });
+  const adapter = loadAdapter("adapters/chatgpt-web.js");
+  const result = await adapter.chat({
+    model: "chatgpt-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "Read README.md" }],
+    tools: [{
+      type: "function",
+      function: {
+        name: "read_file",
+        description: "Read a repository file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"]
+        }
+      }
+    }]
+  }, { response_timeout_ms: 2000, response_stable_ms: 60 });
+
+  assert.equal(result.status, 200);
+  const choice = result.body.choices[0];
+  assert.equal(choice.finish_reason, "tool_calls");
+  assert.equal(choice.message.tool_calls[0].function.name, "read_file");
+  assert.deepEqual(
+    JSON.parse(choice.message.tool_calls[0].function.arguments),
+    { path: "README.md" }
+  );
+}
+
+async function testChatGPTModelPickerFlow() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const trigger = new FakeElement("Instant");
+  const configure = new FakeElement("Configure...");
+  const modal = new FakeElement("Intelligence");
+  const thinking = new FakeElement("Thinking For complex questions");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "#prompt-textarea": input,
+    "button.__composer-pill": trigger,
+    "#composer-submit-button": send
+  };
+  let selected = false;
+  trigger.onClick = () => {
+    nodes["[data-testid='model-configure-modal']"] = configure;
+  };
+  configure.onClick = () => {
+    nodes["[data-testid='modal-intelligence-menu']"] = modal;
+    nodes["[data-testid='modal-intelligence-menu'] button[role='radio']"] = thinking;
+  };
+  thinking.onClick = () => { selected = true; };
+  send.onClick = () => {
+    response.innerText = "model-selected";
+    response.textContent = response.innerText;
+    nodes["[data-message-author-role='assistant'] .markdown"] = [response];
+  };
+
+  installPage({ host: "chatgpt.com", path: "/", nodes });
+  const adapter = loadAdapter("adapters/chatgpt-web.js");
+  const result = await adapter.chat({
+    model: "chatgpt-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "Use Thinking" }]
+  }, {
+    model_label: "Thinking",
+    response_timeout_ms: 2000,
+    response_stable_ms: 60
+  });
+
+  assert.equal(selected, true);
+  assert.equal(result.body.choices[0].message.content, "model-selected");
+}
+
+async function testChatGPTFreshThreadForcesNewChat() {
+  const input = new FakeElement();
+  const oldResponse = new FakeElement("stale restored response");
+  const newResponse = new FakeElement("fresh answer");
+  const newChat = new FakeElement("New chat");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "#prompt-textarea": input,
+    "#composer-submit-button": send,
+    "a[data-testid='create-new-chat-button']": newChat,
+    "[data-message-author-role='assistant'] .markdown": [oldResponse]
+  };
+  newChat.onClick = () => {
+    globalThis.location.pathname = "/";
+    nodes["[data-message-author-role='assistant'] .markdown"] = [];
+  };
+  send.onClick = () => {
+    nodes["[data-message-author-role='assistant'] .markdown"] = [newResponse];
+  };
+
+  installPage({ host: "chatgpt.com", path: "/c/restored", nodes });
+  const adapter = loadAdapter("adapters/chatgpt-web.js");
+  const result = await adapter.chat({
+    model: "chatgpt-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "fresh logical thread" }]
+  }, {
+    start_new_conversation: true,
+    response_timeout_ms: 1500,
+    response_stable_ms: 60
+  });
+
+  assert.equal(result.body.choices[0].message.content, "fresh answer");
+  assert.equal(globalThis.location.pathname, "/");
+}
+
+async function testChatGPTReopenWaitsForStableHistory() {
+  const input = new FakeElement();
+  const oldOne = new FakeElement("old one");
+  const oldTwo = new FakeElement("old two");
+  const answer = new FakeElement("new answer");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "#prompt-textarea": input,
+    "#composer-submit-button": send,
+    "[data-message-author-role='assistant'] .markdown": [oldOne]
+  };
+
+  setTimeout(() => {
+    nodes["[data-message-author-role='assistant'] .markdown"] = [oldOne, oldTwo];
+  }, 30);
+
+  send.onClick = () => {
+    setTimeout(() => {
+      oldOne.innerText = "old one with late citation";
+      oldOne.textContent = oldOne.innerText;
+    }, 20);
+    setTimeout(() => {
+      nodes["[data-message-author-role='assistant'] .markdown"] = [oldOne, oldTwo, answer];
+    }, 60);
+  };
+
+  installPage({ host: "chatgpt.com", path: "/c/native-thread", nodes });
+  const adapter = loadAdapter("adapters/chatgpt-web.js");
+  const result = await adapter.chat({
+    model: "chatgpt-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "continue native thread" }]
+  }, {
+    reuse_native_conversation: true,
+    history_hydration_timeout_ms: 1500,
+    history_stable_ms: 80,
+    response_timeout_ms: 1500,
+    response_stable_ms: 60
+  });
+
+  assert.equal(result.body.choices[0].message.content, "new answer");
 }
 
 async function testQwenToolBridgeStream() {
@@ -434,12 +635,17 @@ async function testMidRequestLoginExpiry() {
 }
 
 await testGemini();
+await testChatGPT();
 await testQwen();
 await testGeminiToolBridge();
+await testChatGPTToolBridge();
+await testChatGPTModelPickerFlow();
+await testChatGPTFreshThreadForcesNewChat();
+await testChatGPTReopenWaitsForStableHistory();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
 await testGeminiStreamCancellation();
 await testGeminiFreshThreadForcesNewChat();
 await testGeminiReopenWaitsForStableHistoryAndIgnoresRerenderedOldTurns();
 await testMidRequestLoginExpiry();
-console.log("built-in Gemini/Qwen fake-page adapter fixtures passed");
+console.log("built-in Gemini/ChatGPT/Qwen fake-page adapter fixtures passed");

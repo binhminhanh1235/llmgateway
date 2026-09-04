@@ -17,6 +17,12 @@ enabled = false
 profile_root = "data/browser-profiles"
 
 # Enable the browser section and one or more sessions when you are ready to use a browser adapter.
+# [browser.sessions.chatgpt-web-primary]
+# provider = "chatgpt-web"
+# label = "ChatGPT web primary"
+# login_url = "https://chatgpt.com/"
+# enabled = true
+#
 # [browser.sessions.gemini-web-primary]
 # provider = "gemini-web"
 # label = "Gemini web primary"
@@ -30,10 +36,24 @@ profile_root = "data/browser-profiles"
 # enabled = true
 #
 # Browser-backed gateway accounts are explicitly bound to one isolated browser session.
-# v0.28 has built-in first-class Gemini/Qwen adapters. Their scripts are embedded in the
+# Built-in first-class Gemini/ChatGPT/Qwen adapters have scripts embedded in the
 # binary, versioned by contract, and probed before routing; no adapter_script is required.
 # Provider UI model selection is optional. If model_labels is omitted, the adapter keeps
 # the model already selected in the provider UI.
+# [browser.bindings.chatgpt-web-account]
+# session = "chatgpt-web-primary"
+# adapter_contract_version = 1
+# models = ["chatgpt-web-default"]
+# # Optional mapping to a visible ChatGPT model label:
+# # model_labels = { "chatgpt-web-default" = "Thinking" }
+# ephemeral_chat = true
+# probe_timeout_ms = 3000
+# response_timeout_ms = 180000
+# first_byte_timeout_ms = 30000
+# idle_stream_timeout_ms = 30000
+# # Emergency DOM drift override example:
+# # selector_overrides = { input = ["#prompt-textarea"] }
+#
 # [browser.bindings.gemini-web-account]
 # session = "gemini-web-primary"
 # adapter_contract_version = 1
@@ -72,6 +92,10 @@ extra_args = []
 
 # Enable a driver mapping for each browser session you want llmgateway to launch/verify.
 # ready_url_prefixes are used only to decide whether normal interactive login reached an authenticated page.
+# [chromium.sessions.chatgpt-web-primary]
+# enabled = true
+# ready_url_prefixes = ["https://chatgpt.com/"]
+#
 # [chromium.sessions.gemini-web-primary]
 # enabled = true
 # ready_url_prefixes = ["https://gemini.google.com/app"]
@@ -191,8 +215,12 @@ kind = "openai-compatible"
 base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 models_path = "models"
 
-# v0.28 built-in browser providers execute the embedded, versioned adapter contract inside
+# Built-in browser providers execute the embedded, versioned adapter contract inside
 # an authenticated Chromium page. Browser providers do not require base_url or API keys.
+# [[providers]]
+# id = "chatgpt-web"
+# kind = "browser-chatgpt"
+#
 # [[providers]]
 # id = "gemini-web"
 # kind = "browser-gemini"
@@ -250,6 +278,11 @@ discover_models = true
 # v0.17 browser accounts are first-class: no dummy api_key_env/auth_style is required and
 # API model discovery is automatically disabled for every browser-* provider.
 # [[accounts]]
+# id = "chatgpt-web-account"
+# provider = "chatgpt-web"
+# enabled = true
+#
+# [[accounts]]
 # id = "gemini-web-account"
 # provider = "gemini-web"
 # enabled = true
@@ -296,6 +329,14 @@ enabled = true
 capabilities = ["chat", "tools", "coding", "reasoning", "long-context", "premium"]
 # context_window = 200000 # optional example; use the provider/model value you have verified
 
+# [[routes]]
+# id = "chatgpt-web-default"
+# account = "chatgpt-web-account"
+# model = "chatgpt-web-default"
+# priority = 5
+# enabled = true
+# capabilities = ["chat", "coding", "reasoning"]
+#
 # [[routes]]
 # id = "gemini-web-pro"
 # account = "gemini-web-account"

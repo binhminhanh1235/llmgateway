@@ -141,6 +141,10 @@
             <span class="browser-provider-option-mark">G</span>
             <span><strong>Gemini Web</strong><small>Google Gemini browser account</small></span>
           </button>
+          <button type="button" class="browser-provider-option" data-browser-provider="chatgpt" aria-pressed="false">
+            <span class="browser-provider-option-mark">C</span>
+            <span><strong>ChatGPT Web</strong><small>OpenAI ChatGPT browser account</small></span>
+          </button>
           <button type="button" class="browser-provider-option" data-browser-provider="qwen" aria-pressed="false">
             <span class="browser-provider-option-mark">Q</span>
             <span><strong>Qwen Web</strong><small>Qwen browser account</small></span>
@@ -150,12 +154,12 @@
         <div class="browser-wizard-grid">
           <label class="browser-wizard-field">
             <span>Account ID <em>optional</em></span>
-            <input id="browserAccountIdInput" class="search-input" type="text" autocomplete="off" placeholder="Auto-generate, e.g. gemini-web-a1b2c3d4" />
+            <input id="browserAccountIdInput" class="search-input" type="text" autocomplete="off" placeholder="Auto-generate, e.g. chatgpt-web-a1b2c3d4" />
             <small>Stable local ID. Leave blank to generate one.</small>
           </label>
           <label class="browser-wizard-field">
             <span>Display name <em>optional</em></span>
-            <input id="browserAccountLabelInput" class="search-input" type="text" autocomplete="off" placeholder="Personal Gemini" />
+            <input id="browserAccountLabelInput" class="search-input" type="text" autocomplete="off" placeholder="Personal browser account" />
             <small>Only used to make Accounts easier to scan.</small>
           </label>
           <label class="browser-wizard-field">
@@ -165,7 +169,7 @@
           </label>
           <label class="browser-wizard-field">
             <span>Provider UI model label <em>optional</em></span>
-            <input id="browserModelLabelInput" class="search-input" type="text" autocomplete="off" placeholder="Pro, Flash, Qwen3-Coder…" />
+            <input id="browserModelLabelInput" class="search-input" type="text" autocomplete="off" placeholder="Thinking, Pro, Flash, Qwen3-Coder…" />
             <small>If blank, keep the model already selected in the provider UI.</small>
           </label>
           <label class="browser-wizard-field">

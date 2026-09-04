@@ -17,12 +17,12 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 - Multi-provider and multi-account routing
 - Browser-first virtual-model routing with optional API fallback
 - Browser session startup reconciliation and automatic crash recovery
-- First-class `browser-gemini` and `browser-qwen` providers
-- Browser Accounts wizard for managed Gemini/Qwen account creation
+- First-class `browser-gemini`, `browser-chatgpt`, and `browser-qwen` providers
+- Browser Accounts wizard for managed Gemini/ChatGPT/Qwen account creation
 - Hot activation of new browser accounts, routes, sessions, and catalog entries without gateway restart
 - Browser account disable/re-enable, re-authenticate, restart, stop, and recovery controls
 - Request-pinned immutable config snapshots during hot reload
-- True incremental Gemini/Qwen browser streaming through CDP
+- True incremental Gemini/ChatGPT/Qwen browser streaming through CDP
 - Downstream disconnect cancellation with ephemeral-tab cleanup
 - Browser stream first-byte/idle timeouts and partial-response execution traces
 - OpenAI Chat, Responses, Anthropic Messages, and persistent-thread browser streaming
@@ -78,7 +78,7 @@ Local UI ───── Persistent Threads ─┤
                                   │
                  ┌────────────────┼────────────────┐
                  ▼                ▼                ▼
-            Gemini × N         Qwen × N       OpenRouter
+            Gemini × N       ChatGPT × N       Qwen × N       OpenRouter
                                              other APIs
 ```
 
@@ -114,12 +114,16 @@ http://127.0.0.1:7331/
 
 ## Built-in browser providers
 
-v0.28 includes first-class Gemini Web and Qwen Web providers:
+Built-in browser execution includes first-class Gemini Web, ChatGPT Web, and Qwen Web providers:
 
 ```toml
 [[providers]]
 id = "gemini-web"
 kind = "browser-gemini"
+
+[[providers]]
+id = "chatgpt-web"
+kind = "browser-chatgpt"
 
 [[providers]]
 id = "qwen-web"
@@ -128,23 +132,23 @@ kind = "browser-qwen"
 
 Bind each account to an isolated browser session, enable the corresponding Chromium session, sign in normally, and let the adapter probe decide whether the provider page is compatible before Router makes it eligible. No dummy upstream API key is required.
 
-In v0.29, the normal setup path is the **Accounts** UI: choose **Add browser account**, select Gemini Web or Qwen Web, and llmgateway safely writes the linked session/binding/Chromium/provider/account/route configuration and hot-activates it. The gateway process does not need to restart. From the same account card you can disable/re-enable routing, re-authenticate, restart Chromium, stop the browser, and inspect lifecycle/adapter state. Isolated Chromium profiles are preserved when an account is disabled or stopped.
+In v0.29, the normal setup path is the **Accounts** UI: choose **Add browser account**, select Gemini Web, ChatGPT Web, or Qwen Web, and llmgateway safely writes the linked session/binding/Chromium/provider/account/route configuration and hot-activates it. The gateway process does not need to restart. From the same account card you can disable/re-enable routing, re-authenticate, restart Chromium, stop the browser, and inspect lifecycle/adapter state. Isolated Chromium profiles are preserved when an account is disabled or stopped.
 
 See [Browser Accounts UX](docs/browser-accounts-ux.md) for the managed setup lifecycle and admin endpoints.
 
-v0.30 streams built-in Gemini/Qwen responses incrementally from the provider page rather than waiting for the full DOM answer. Browser stream polling is downstream-driven, so a slow client naturally applies backpressure. Disconnecting a client cancels the browser operation and closes the ephemeral provider tab. First-byte/idle timeouts and partial/cancelled stream metadata are visible through Execution Trace and Trace Console.
+v0.30 streaming primitives also power built-in Gemini/ChatGPT/Qwen responses incrementally from the provider page rather than waiting for the full DOM answer. Browser stream polling is downstream-driven, so a slow client naturally applies backpressure. Disconnecting a client cancels the browser operation and closes the ephemeral provider tab. First-byte/idle timeouts and partial/cancelled stream metadata are visible through Execution Trace and Trace Console.
 
 See [Browser streaming and cancellation](docs/browser-streaming.md) for the stream contract, timeout settings, cleanup guarantees, and compatibility behavior.
 
 v0.31 makes multiple browser accounts behave like a smart local pool. Equal-quality browser routes rotate by least-recent successful account use, persistent threads can keep a healthy browser session sticky, recently failed browser routes re-enter with a bounded recovery penalty, and execution policy can be expressed as `prefer-browser`, `browser-only`, `balanced`, `prefer-api`, or `api-only`. The old `browser-first` / `api-first` names remain accepted aliases.
 
-Persistent llmgateway threads can also keep a provider-native Gemini conversation: the first turn captures the native Gemini chat identity, later turns reuse the same open Gemini tab when available, and only reopen the persisted native conversation after tab/runtime loss. New llmgateway chats get separate Gemini tabs/threads, while llmgateway remains the canonical history store.
+Persistent llmgateway threads can also keep provider-native Gemini and ChatGPT conversations: the first turn captures the native chat identity, later turns reuse the same open provider tab when available, and only reopen the persisted native conversation after tab/runtime loss. New llmgateway chats get separate provider tabs/threads, while llmgateway remains the canonical history store.
 
 See [Browser-aware routing intelligence](docs/browser-aware-routing.md) for policy semantics, scoring order, fairness, recovery, context enforcement, and route-explain fields.
 
 Built-in adapters default to fresh provider chat tabs per request while reusing the authenticated Chromium profile. Optional `model_labels` select provider UI models explicitly; without a mapping, the current provider UI model is preserved.
 
-See [Browser provider adapters](docs/browser-provider-adapters.md) for complete Gemini/Qwen configuration, adapter diagnostics, page-drift recovery, and the coding-agent tool bridge.
+See [Browser provider adapters](docs/browser-provider-adapters.md) for complete Gemini/ChatGPT/Qwen configuration, adapter diagnostics, page-drift recovery, and the coding-agent tool bridge.
 
 ## Gateway APIs
 

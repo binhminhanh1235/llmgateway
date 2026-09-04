@@ -15,6 +15,7 @@ v0.28 adds two built-in browser provider kinds:
 
 ```text
 browser-gemini
+browser-chatgpt
 browser-qwen
 ```
 
@@ -25,7 +26,7 @@ browser-cdp    trusted local contract-v1 adapter script
 browser-http   local bridge/test transport
 ```
 
-Built-in Gemini/Qwen adapters are embedded into the llmgateway binary. They do not require an `adapter_script` path.
+Built-in Gemini/ChatGPT/Qwen adapters are embedded into the llmgateway binary. They do not require an `adapter_script` path.
 
 ## Example: Gemini Web
 
@@ -65,6 +66,47 @@ priority = 5
 enabled = true
 capabilities = ["chat", "reasoning", "long-context"]
 ```
+
+## Example: ChatGPT Web
+
+```toml
+[browser.sessions.chatgpt-web-primary]
+provider = "chatgpt-web"
+label = "ChatGPT web primary"
+login_url = "https://chatgpt.com/"
+enabled = true
+
+[browser.bindings.chatgpt-web-account]
+session = "chatgpt-web-primary"
+adapter_contract_version = 1
+models = ["chatgpt-web-default"]
+# Optional. If omitted, keep the model already selected in ChatGPT UI.
+# model_labels = { "chatgpt-web-default" = "Thinking" }
+ephemeral_chat = true
+
+[chromium.sessions.chatgpt-web-primary]
+enabled = true
+ready_url_prefixes = ["https://chatgpt.com/"]
+
+[[providers]]
+id = "chatgpt-web"
+kind = "browser-chatgpt"
+
+[[accounts]]
+id = "chatgpt-web-account"
+provider = "chatgpt-web"
+enabled = true
+
+[[routes]]
+id = "chatgpt-web-default"
+account = "chatgpt-web-account"
+model = "chatgpt-web-default"
+priority = 5
+enabled = true
+capabilities = ["chat", "coding", "reasoning"]
+```
+
+The adapter does not force a ChatGPT UI model unless `model_labels` maps the logical route model to a visible provider label. This keeps the integration resilient to account-, plan-, and UI-specific model names.
 
 ## Example: Qwen Web
 
@@ -217,7 +259,7 @@ The optional `models` list is an account binding allowlist. A route requesting a
 
 ## Stateless provider tabs
 
-Built-in Gemini/Qwen adapters default to:
+Built-in Gemini/ChatGPT/Qwen adapters default to:
 
 ```toml
 ephemeral_chat = true
@@ -249,7 +291,7 @@ This preserves llmgateway's core ownership rule:
 
 Set `ephemeral_chat = false` only when intentionally using a persistent provider page.
 
-Persistent llmgateway threads are a separate concept. Gemini thread requests use provider-native conversation affinity: the first turn creates and records the native Gemini conversation, later turns reuse the same open tab when possible, and a missing tab is reopened once from the persisted native URL. Only provider-missed/current turns are sent. See [Provider-native conversation affinity](provider-conversation-affinity.md).
+Persistent llmgateway threads are a separate concept. Gemini and ChatGPT thread requests use provider-native conversation affinity: the first turn creates and records the native provider conversation, later turns reuse the same open tab when possible, and a missing tab is reopened once from the persisted native URL. ChatGPT conversations are recognized by their `/c/<conversation-id>` URL identity. Only provider-missed/current turns are sent. See [Provider-native conversation affinity](provider-conversation-affinity.md).
 
 ## Coding-agent tool bridge
 
@@ -301,7 +343,7 @@ v0.28 does not depend on live Gemini/Qwen websites in CI.
 
 The suite includes:
 
-- Node fake-page fixtures for Gemini/Qwen probe behavior;
+- Node fake-page fixtures for Gemini/ChatGPT/Qwen probe behavior;
 - healthy composer detection;
 - login-required detection;
 - page-drift / missing-selector detection;
