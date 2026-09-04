@@ -10,7 +10,7 @@ class FakeElement {
     this.parentElement = null;
   }
   focus() {}
-  click() {}
+  click() { if (typeof this.onClick === "function") this.onClick(); }
   dispatchEvent() { return true; }
   getAttribute() { return null; }
   closest() { return this; }
@@ -112,6 +112,100 @@ async function testQwen() {
   assert.equal(probe.code, "login_required");
 }
 
+
+async function testGeminiToolBridge() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  send.onClick = () => {
+    response.innerText = '<LLMGATEWAY_TOOL_CALLS>{"tool_calls":[{"name":"read_file","arguments":{"path":"src/main.rs"}}]}</LLMGATEWAY_TOOL_CALLS>';
+    response.textContent = response.innerText;
+  };
+  installPage({
+    host: "gemini.google.com",
+    nodes: {
+      "div[aria-label='Enter a prompt for Gemini']": input,
+      "button[aria-label='Send message']": send,
+      "div.markdown.markdown-main-panel": response
+    }
+  });
+  const adapter = loadAdapter("adapters/gemini-web.js");
+  const result = await adapter.chat({
+    model: "gemini-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "Read src/main.rs" }],
+    tools: [{
+      type: "function",
+      function: {
+        name: "read_file",
+        description: "Read a repository file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"]
+        }
+      }
+    }]
+  }, { response_timeout_ms: 4000 });
+
+  assert.equal(result.status, 200);
+  const choice = result.body.choices[0];
+  assert.equal(choice.finish_reason, "tool_calls");
+  assert.equal(choice.message.tool_calls[0].function.name, "read_file");
+  assert.deepEqual(
+    JSON.parse(choice.message.tool_calls[0].function.arguments),
+    { path: "src/main.rs" }
+  );
+}
+
+async function testQwenToolBridgeStream() {
+  const input = new FakeTextAreaElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  send.onClick = () => {
+    response.innerText = '<LLMGATEWAY_TOOL_CALLS>{"tool_calls":[{"name":"run_tests","arguments":{"scope":"unit"}}]}</LLMGATEWAY_TOOL_CALLS>';
+    response.textContent = response.innerText;
+  };
+  installPage({
+    host: "chat.qwen.ai",
+    nodes: {
+      "textarea.message-input-textarea": input,
+      "button.send-button": send,
+      "div.response-message-content.phase-answer": response
+    }
+  });
+  const adapter = loadAdapter("adapters/qwen-web.js");
+  const result = await adapter.chat({
+    model: "qwen-web-test",
+    stream: true,
+    messages: [{ role: "user", content: "Run unit tests" }],
+    tools: [{
+      type: "function",
+      function: {
+        name: "run_tests",
+        description: "Run tests",
+        parameters: {
+          type: "object",
+          properties: { scope: { type: "string" } }
+        }
+      }
+    }]
+  }, { response_timeout_ms: 4000 });
+
+  assert.equal(result.content_type, "text/event-stream");
+  const dataLine = result.body.split("\n").find((line) => line.startsWith("data: {"));
+  const chunk = JSON.parse(dataLine.slice(6));
+  const choice = chunk.choices[0];
+  assert.equal(choice.finish_reason, "tool_calls");
+  assert.equal(choice.delta.tool_calls[0].function.name, "run_tests");
+  assert.deepEqual(
+    JSON.parse(choice.delta.tool_calls[0].function.arguments),
+    { scope: "unit" }
+  );
+}
+
 await testGemini();
 await testQwen();
+await testGeminiToolBridge();
+await testQwenToolBridgeStream();
 console.log("built-in Gemini/Qwen fake-page adapter fixtures passed");
