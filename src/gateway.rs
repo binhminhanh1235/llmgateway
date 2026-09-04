@@ -148,6 +148,8 @@ impl Gateway {
             match self.send_route_chat(provider, account, &route, body).await {
                 Ok(response) if response.status().is_success() => {
                     let status = response.status();
+                    let duration_ms = attempt_started.elapsed().as_millis();
+                    let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     self.record_execution_attempt(AttemptRecord {
                         request_id: &request_id,
                         attempt_index,
@@ -157,7 +159,7 @@ impl Gateway {
                         status_code: Some(status.as_u16()),
                         outcome: "success",
                         retryable: false,
-                        duration_ms: attempt_started.elapsed().as_millis(),
+                        duration_ms,
                         error: None,
                     })
                     .await;
@@ -179,7 +181,7 @@ impl Gateway {
                             warn!(%error, account = %account.id, "failed to clear quota cooldown");
                         }
                     }
-                    self.router.mark_success(&route.id).await;
+                    self.router.mark_success(&route.id, adaptive_latency_ms).await;
                     self.complete_execution(&request_id, "success", Some(&route.id), None)
                         .await;
                     return Ok(RoutedResponse {
@@ -191,6 +193,8 @@ impl Gateway {
                 }
                 Ok(response) => {
                     let status = response.status();
+                    let duration_ms = attempt_started.elapsed().as_millis();
+                    let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     let retry_after = QuotaUsageStore::retry_after_seconds(response.headers());
                     if let Some(usage) = quota_usage_runtime::get() {
                         if let Err(error) = usage.observe_headers(&account.id, response.headers()).await {
@@ -200,8 +204,16 @@ impl Gateway {
                     let body_text = response.text().await.unwrap_or_default();
                     let retryable = is_retryable_status(status);
                     let cooldown = cooldown_for(status);
+                    let adaptive_failure =
+                        status == StatusCode::REQUEST_TIMEOUT || status.is_server_error();
                     self.router
-                        .mark_failure(&route.id, format!("HTTP {status}: {body_text}"), cooldown)
+                        .mark_failure(
+                            &route.id,
+                            format!("HTTP {status}: {body_text}"),
+                            cooldown,
+                            adaptive_latency_ms,
+                            adaptive_failure,
+                        )
                         .await;
 
                     let outcome = if status == StatusCode::TOO_MANY_REQUESTS {
@@ -220,7 +232,7 @@ impl Gateway {
                         status_code: Some(status.as_u16()),
                         outcome,
                         retryable,
-                        duration_ms: attempt_started.elapsed().as_millis(),
+                        duration_ms,
                         error: Some(&body_text),
                     })
                     .await;
@@ -273,9 +285,17 @@ impl Gateway {
                     last_error = Some(error);
                 }
                 Err(error) => {
+                    let duration_ms = attempt_started.elapsed().as_millis();
+                    let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     let error_text = error.to_string();
                     self.router
-                        .mark_failure(&route.id, error_text.clone(), 10)
+                        .mark_failure(
+                            &route.id,
+                            error_text.clone(),
+                            10,
+                            adaptive_latency_ms,
+                            true,
+                        )
                         .await;
                     self.record_execution_attempt(AttemptRecord {
                         request_id: &request_id,
@@ -286,7 +306,7 @@ impl Gateway {
                         status_code: None,
                         outcome: "transport_error",
                         retryable: true,
-                        duration_ms: attempt_started.elapsed().as_millis(),
+                        duration_ms,
                         error: Some(&error_text),
                     })
                     .await;
