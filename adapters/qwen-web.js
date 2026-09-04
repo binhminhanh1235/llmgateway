@@ -79,7 +79,7 @@
   const waitForExpectedHost = async (expectedHost, timeoutMs) => {
     const matched = await waitFor(
       () => location.hostname === expectedHost,
-      Math.max(Number(timeoutMs || 0), 10000),
+      Number(timeoutMs || 8000),
       80
     );
     return Boolean(matched);
@@ -431,7 +431,7 @@
     },
 
     async probe(context) {
-      const probeTimeoutMs = Math.max(Number(context?.probe_timeout_ms || 8000), 10000);
+      const probeTimeoutMs = Number(context?.probe_timeout_ms || 8000);
       const hostOk = await waitForExpectedHost("chat.qwen.ai", probeTimeoutMs);
       if (!hostOk) {
         const currentHost = String(location.hostname || "").trim() || "<empty>";
