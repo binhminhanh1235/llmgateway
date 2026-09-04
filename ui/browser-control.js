@@ -13,6 +13,7 @@
   let loading = false;
   let sessions = [];
   let driverState = new Map();
+  let accountState = new Map();
   let refreshTimer = null;
   let loginPollTimer = null;
   let providerPresets = [];
@@ -54,8 +55,12 @@
     if (!apiKey() || loading || (!force && !isAccountsViewActive())) return;
     loading = true;
     try {
-      const summary = await request("/_llmgateway/browser-sessions");
+      const [summary, accounts] = await Promise.all([
+        request("/_llmgateway/browser-sessions"),
+        request("/_llmgateway/accounts"),
+      ]);
       sessions = summary?.sessions || [];
+      accountState = new Map((accounts?.data || []).map((account) => [account.id, account]));
       const states = await Promise.all(sessions.map(async (session) => [session.id, await loadDriverStatus(session.id)]));
       driverState = new Map(states);
       render(summary);
@@ -115,12 +120,14 @@
   }
 
   function browserSessionHtml(session, driver) {
-    const lifecycle = lifecycleView(session.status);
+    const account = accountState.get(session.id);
+    const accountEnabled = account?.enabled !== false;
+    const lifecycle = accountEnabled ? lifecycleView(session.status) : { tone: "idle", label: "Disabled" };
     const running = Boolean(driver?.status?.running);
     const driverReady = Boolean(driver?.status?.ready_match);
     const driverAvailable = Boolean(driver?.available);
-    const button = primaryAction(session, driver);
-    const detail = sessionDetail(session, driver);
+    const button = primaryAction(session, driver, accountEnabled);
+    const detail = sessionDetail(session, driver, accountEnabled);
     const providerMark = String(session.provider || "?").slice(0, 1).toUpperCase();
 
     return `
@@ -142,14 +149,18 @@
         ${driver?.error && !driverAvailable ? `<div class="browser-driver-note">${escapeHtml(shorten(driver.error, 150))}</div>` : ""}
         <div class="browser-session-actions">
           <button type="button" class="browser-primary-action" data-browser-action="${button.action}" data-session-id="${escapeAttr(session.id)}" ${button.disabled ? "disabled" : ""}>${escapeHtml(button.label)}</button>
+          ${account ? `<button type="button" class="browser-secondary-action" data-browser-action="${accountEnabled ? "disable-account" : "enable-account"}" data-session-id="${escapeAttr(session.id)}">${accountEnabled ? "Disable account" : "Enable account"}</button>` : ""}
+          ${accountEnabled ? `<button type="button" class="browser-secondary-action" data-browser-action="reauth" data-session-id="${escapeAttr(session.id)}">Re-authenticate</button>` : ""}
+          ${running && accountEnabled ? `<button type="button" class="browser-secondary-action" data-browser-action="restart" data-session-id="${escapeAttr(session.id)}">Restart browser</button>` : ""}
           ${running ? `<button type="button" class="browser-secondary-action" data-browser-action="stop" data-session-id="${escapeAttr(session.id)}">Stop browser</button>` : ""}
           ${["requires_attention", "failed"].includes(session.status) ? `<button type="button" class="browser-secondary-action" data-browser-action="reset" data-session-id="${escapeAttr(session.id)}">Reset</button>` : ""}
         </div>
       </article>`;
   }
 
-  function primaryAction(session, driver) {
-    if (!session.enabled) return { action: "none", label: "Disabled", disabled: true };
+  function primaryAction(session, driver, accountEnabled = true) {
+    if (!accountEnabled) return { action: "none", label: "Account disabled", disabled: true };
+    if (!session.enabled) return { action: "none", label: "Session disabled", disabled: true };
     if (!driver?.available) return { action: "none", label: "Driver unavailable", disabled: true };
     if (session.status === "starting" || (session.status === "login_required" && driver.status?.running)) return { action: "verify", label: "Check login", disabled: false };
     if (session.status === "ready") {
@@ -160,7 +171,8 @@
     return { action: "launch", label: "Login with browser", disabled: false };
   }
 
-  function sessionDetail(session, driver) {
+  function sessionDetail(session, driver, accountEnabled = true) {
+    if (!accountEnabled) return "Routing is disabled for this account. The isolated Chromium profile is preserved.";
     if (!session.enabled) return "This browser session is disabled in configuration.";
     if (session.status === "starting" || session.status === "login_required") {
       return driver?.status?.running
@@ -272,7 +284,8 @@
         body: JSON.stringify(payload),
       });
       showWizardResult(result);
-      browserToast(`${result.account_id} added to managed configuration`);
+      scheduleRefresh(40);
+      browserToast(`${result.account_id} added and activated`);
     } catch (error) {
       showWizardError(cleanError(error));
     } finally {
@@ -294,7 +307,7 @@
       <div class="browser-wizard-success-mark">✓</div>
       <div class="browser-wizard-success-copy">
         <div class="browser-wizard-eyebrow">Configuration created</div>
-        <h3>${escapeHtml(result?.account_id || "Browser account")} is ready for activation</h3>
+        <h3>${escapeHtml(result?.account_id || "Browser account")} is ready</h3>
         <p>llmgateway created one linked browser session, provider account, route, and isolated Chromium profile configuration.</p>
       </div>
       <div class="browser-wizard-summary">
@@ -311,7 +324,8 @@
       ${steps.length ? `<ol class="browser-wizard-next-steps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>` : ""}
       <div class="browser-wizard-actions">
         <button type="button" class="secondary-button" data-close-modal="browserAccountModal">Close</button>
-        <button type="button" class="primary-button" data-create-another-browser-account>Add another</button>
+        <button type="button" class="secondary-button" data-create-another-browser-account>Add another</button>
+        ${result?.restart_required ? "" : `<button type="button" class="primary-button" data-browser-action="launch" data-session-id="${escapeAttr(result?.session_id || result?.account_id || "")}">Login with browser</button>`}
       </div>`;
   }
 
@@ -370,6 +384,65 @@
       browserToast(`Browser stopped for ${sessionId}`);
     } catch (error) {
       browserToast(`Stop failed: ${cleanError(error)}`, true);
+    } finally {
+      clearBusy(button);
+      await loadBrowserSessions(true);
+    }
+  }
+
+  async function setAccountEnabled(sessionId, enabled, button) {
+    setBusy(button, enabled ? "Enabling…" : "Disabling…");
+    try {
+      if (!enabled && driverState.get(sessionId)?.status?.running) {
+        try {
+          await request(`/_llmgateway/browser-sessions/${encodeURIComponent(sessionId)}/driver/stop`, { method: "POST" });
+        } catch (_) {}
+      }
+      await request(`/_llmgateway/browser-account-setup/${encodeURIComponent(sessionId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      browserToast(`${sessionId} ${enabled ? "enabled" : "disabled"}`);
+    } catch (error) {
+      browserToast(`${enabled ? "Enable" : "Disable"} failed: ${cleanError(error)}`, true);
+    } finally {
+      clearBusy(button);
+      await loadBrowserSessions(true);
+    }
+  }
+
+  async function reauthenticate(sessionId, button) {
+    setBusy(button, "Opening login…");
+    try {
+      if (driverState.get(sessionId)?.status?.running) {
+        try {
+          await request(`/_llmgateway/browser-sessions/${encodeURIComponent(sessionId)}/driver/stop`, { method: "POST" });
+        } catch (_) {}
+      }
+      await request(`/_llmgateway/browser-sessions/${encodeURIComponent(sessionId)}/reset`, { method: "POST" });
+      await request(`/_llmgateway/browser-sessions/${encodeURIComponent(sessionId)}/driver/launch`, { method: "POST" });
+      browserToast(`Re-authentication opened for ${sessionId}`);
+      startLoginPolling();
+    } catch (error) {
+      browserToast(`Re-authentication failed: ${cleanError(error)}`, true);
+    } finally {
+      clearBusy(button);
+      await loadBrowserSessions(true);
+    }
+  }
+
+  async function restartBrowser(sessionId, button) {
+    setBusy(button, "Restarting…");
+    try {
+      if (driverState.get(sessionId)?.status?.running) {
+        await request(`/_llmgateway/browser-sessions/${encodeURIComponent(sessionId)}/driver/stop`, { method: "POST" });
+      }
+      await request(`/_llmgateway/browser-sessions/${encodeURIComponent(sessionId)}/driver/launch`, { method: "POST" });
+      browserToast(`Browser restarted for ${sessionId}`);
+      startLoginPolling();
+    } catch (error) {
+      browserToast(`Restart failed: ${cleanError(error)}`, true);
     } finally {
       clearBusy(button);
       await loadBrowserSessions(true);
@@ -539,6 +612,10 @@
         case "verify": verify(sessionId, actionButton); break;
         case "stop": stop(sessionId, actionButton); break;
         case "reset": reset(sessionId, actionButton); break;
+        case "disable-account": setAccountEnabled(sessionId, false, actionButton); break;
+        case "enable-account": setAccountEnabled(sessionId, true, actionButton); break;
+        case "reauth": reauthenticate(sessionId, actionButton); break;
+        case "restart": restartBrowser(sessionId, actionButton); break;
       }
       return;
     }
