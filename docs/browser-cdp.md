@@ -170,7 +170,17 @@ It returns:
 - `content_type`: response media type, default `application/json`;
 - `body`: JSON value or string.
 
-For the current browser streaming path, return `text/event-stream` and a complete OpenAI-compatible SSE string. It is still buffered before forwarding. True incremental CDP streaming is scheduled for v0.30.
+For custom `browser-cdp` adapters that only implement `chat(request, context)`, a `text/event-stream` result remains a compatibility path and may be returned as a complete SSE string.
+
+v0.30 adds true incremental streaming for the built-in Gemini/Qwen adapters through additive contract methods:
+
+```text
+streamStart(request, context)
+streamPoll({ stream_id })
+streamCancel({ stream_id })
+```
+
+These methods do not change `contract_version = 1`, so existing custom v1 adapters remain compatible. Custom adapters can adopt the same stream primitives in a future contract extension; llmgateway does not pretend that an old custom buffered SSE string is incremental.
 
 ## Context object
 
@@ -184,9 +194,24 @@ model_label
 selectors
 probe_timeout_ms
 response_timeout_ms
+first_byte_timeout_ms
+idle_stream_timeout_ms
 ```
 
 Custom adapters receive the route model as `model_label` by default. Built-in Gemini/Qwen adapters only receive a model label when the binding has an explicit `model_labels` mapping.
+
+## Streaming timeouts
+
+Browser bindings may configure:
+
+```toml
+first_byte_timeout_ms = 30000
+idle_stream_timeout_ms = 30000
+```
+
+The first-byte timeout applies until the first real upstream SSE event is observed. After streaming begins, the idle timeout applies between progress events. A downstream disconnect drops the lazy response body, triggering best-effort stream cancellation and ephemeral-target cleanup.
+
+See [Browser streaming and cancellation](browser-streaming.md) for the complete v0.30 behavior.
 
 ## Diagnostics and drift
 
