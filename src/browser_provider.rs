@@ -909,8 +909,6 @@ struct CdpStreamPoll {
     error: Option<AdapterContractError>,
     #[serde(default)]
     progress_seq: Option<u64>,
-    #[serde(default)]
-    progress_phase: Option<String>,
 }
 
 struct CdpStreamCleanup {
@@ -3023,7 +3021,6 @@ mod tests {
             done: false,
             error: None,
             progress_seq: Some(1),
-            progress_phase: Some("submitted".into()),
         };
         assert!(browser_stream_poll_advanced(&first, &mut last));
         assert_eq!(last, Some(1));
@@ -3031,7 +3028,6 @@ mod tests {
 
         let generating = CdpStreamPoll {
             progress_seq: Some(2),
-            progress_phase: Some("generating".into()),
             ..first
         };
         assert!(browser_stream_poll_advanced(&generating, &mut last));
@@ -3042,7 +3038,6 @@ mod tests {
             done: false,
             error: None,
             progress_seq: None,
-            progress_phase: None,
         };
         assert!(!browser_stream_poll_advanced(&legacy, &mut last));
     }
