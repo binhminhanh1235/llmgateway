@@ -473,7 +473,11 @@ impl AppConfig {
                         provider.id, provider.kind
                     )));
                 }
-                "openai-compatible" | "browser-http" | "browser-cdp" => {}
+                "openai-compatible"
+                | "browser-http"
+                | "browser-cdp"
+                | "browser-gemini"
+                | "browser-qwen" => {}
                 other => {
                     return Err(ConfigError::Invalid(format!(
                         "provider '{}' uses unsupported kind '{}'",
@@ -657,6 +661,31 @@ routes = ["route"]
     fn wildcard_alias_matches_prefix() {
         assert!(pattern_matches("claude-sonnet-*", "claude-sonnet-4-5"));
         assert!(!pattern_matches("claude-sonnet-*", "claude-opus-4-1"));
+    }
+
+    #[test]
+    fn built_in_browser_provider_kinds_are_valid_without_base_url_or_credentials() {
+        for kind in ["browser-gemini", "browser-qwen"] {
+            let providers = format!(
+                "[[providers]]\nid = \"browser\"\nkind = \"{kind}\""
+            );
+            let raw = minimal_config(
+                &providers,
+                r#"[[accounts]]
+id = "account"
+provider = "browser"
+enabled = true"#,
+            );
+            let mut config: AppConfig = toml::from_str(&raw).unwrap();
+            config.normalize();
+            config.validate().unwrap();
+            let account = config.account("account").unwrap();
+            let provider = config.provider("browser").unwrap();
+            assert!(provider.is_browser());
+            assert_eq!(provider.transport(), "browser");
+            assert!(!account.credential_required(provider));
+            assert!(!account.discover_models);
+        }
     }
 
     #[test]
