@@ -101,6 +101,7 @@ mod tests {
         RoutingConfig {
             adaptive_enabled: true,
             adaptive_min_samples: 3,
+            adaptive_history_samples: 100,
             adaptive_ewma_alpha: 0.5,
             adaptive_latency_target_ms: 100,
             adaptive_max_penalty: 30,
