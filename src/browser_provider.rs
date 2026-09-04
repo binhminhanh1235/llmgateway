@@ -1065,32 +1065,30 @@ impl CdpBrowserAdapter {
             .ok()
             .and_then(|url| url.host_str().map(str::to_string));
         let target_id = initial.id.clone();
-        let mut last_url = initial.url.clone();
+        let mut current = initial;
+        let mut last_url = current.url.clone();
         let mut last_runtime_host = String::new();
         let deadline = Instant::now() + timeout_duration;
 
         loop {
-            let targets = self.targets(profile_dir).await?;
-            if let Some(current) = targets.into_iter().find(|target| target.id == target_id) {
-                last_url = current.url.clone();
-                if current.kind == "page"
-                    && !current.websocket_debugger_url.is_empty()
-                    && current.url.starts_with(prefix)
-                {
-                    let runtime_host = timeout(
-                        Duration::from_secs(2),
-                        evaluate_cdp(
-                            &current.websocket_debugger_url,
-                            "String(globalThis.location?.hostname || '')",
-                        ),
-                    )
-                    .await;
+            last_url = current.url.clone();
+            if current.kind == "page"
+                && !current.websocket_debugger_url.is_empty()
+                && current.url.starts_with(prefix)
+            {
+                let runtime_host = timeout(
+                    Duration::from_secs(2),
+                    evaluate_cdp(
+                        &current.websocket_debugger_url,
+                        "String(globalThis.location?.hostname || '')",
+                    ),
+                )
+                .await;
 
-                    if let Ok(Ok(Value::String(host))) = runtime_host {
-                        last_runtime_host = host.clone();
-                        if expected_host.as_deref().is_none_or(|expected| host == expected) {
-                            return Ok(current);
-                        }
+                if let Ok(Ok(Value::String(host))) = runtime_host {
+                    last_runtime_host = host.clone();
+                    if expected_host.as_deref().is_none_or(|expected| host == expected) {
+                        return Ok(current);
                     }
                 }
             }
@@ -1109,6 +1107,11 @@ impl CdpBrowserAdapter {
                         diagnostic_target_location(&last_url)
                     ),
                 });
+            }
+
+            let targets = self.targets(profile_dir).await?;
+            if let Some(refreshed) = targets.into_iter().find(|target| target.id == target_id) {
+                current = refreshed;
             }
             sleep(Duration::from_millis(120)).await;
         }
