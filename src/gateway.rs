@@ -4,6 +4,7 @@ use crate::{
     catalog::ModelCatalog,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
     execution_trace::{AttemptRecord, ExecutionTraceError, ExecutionTraceStore},
+    live_config::LiveConfig,
     quota_usage::{QuotaUsageStore, UsageEvent},
     quota_usage_runtime,
     routing::Router,
@@ -25,6 +26,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct Gateway {
     pub config: Arc<AppConfig>,
+    pub live_config: LiveConfig,
     pub router: Router,
     pub execution_traces: Arc<ExecutionTraceStore>,
     client: Client,
@@ -68,6 +70,7 @@ pub enum GatewayError {
 impl Gateway {
     pub fn new(
         config: Arc<AppConfig>,
+        live_config: LiveConfig,
         catalog: Arc<ModelCatalog>,
         execution_traces: Arc<ExecutionTraceStore>,
     ) -> Result<Self, GatewayError> {
@@ -76,13 +79,18 @@ impl Gateway {
             .timeout(Duration::from_secs(600))
             .build()
             .map_err(|error| GatewayError::Transport(error.to_string()))?;
-        let router = Router::new(config.clone(), catalog);
+        let router = Router::new(config.clone(), live_config.clone(), catalog);
         Ok(Self {
             config,
+            live_config,
             router,
             execution_traces,
             client,
         })
+    }
+
+    pub fn config_snapshot(&self) -> Arc<AppConfig> {
+        self.live_config.snapshot()
     }
 
     pub async fn restore_adaptive_from_traces(&self) -> Result<usize, ExecutionTraceError> {
@@ -156,9 +164,10 @@ impl Gateway {
         let upstream_body = sanitized_upstream_body(body);
         let estimated_input_tokens = QuotaUsageStore::estimate_input_tokens(&upstream_body);
         let mut last_error: Option<GatewayError> = None;
+        let config = self.live_config.snapshot();
 
         for (attempt_index, route) in routes.into_iter().enumerate() {
-            let account = match self.config.account(&route.account) {
+            let account = match config.account(&route.account) {
                 Some(account) => account,
                 None => {
                     let error = GatewayError::InvalidConfig(format!(
@@ -171,7 +180,7 @@ impl Gateway {
             if !account.enabled {
                 continue;
             }
-            let provider = match self.config.provider(&account.provider) {
+            let provider = match config.provider(&account.provider) {
                 Some(provider) => provider,
                 None => {
                     let error = GatewayError::InvalidConfig(format!(
