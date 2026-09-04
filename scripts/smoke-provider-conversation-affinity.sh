@@ -129,11 +129,16 @@ profile = os.environ["PROFILE_DIR"]
 
 with open(os.path.join(profile, "opened-targets.log"), encoding="utf-8") as f:
     opened = [line.strip() for line in f if line.strip()]
+try:
+    with open(os.path.join(profile, "stream-debug.log"), encoding="utf-8") as f:
+        stream_debug = [line.strip() for line in f if line.strip()]
+except FileNotFoundError:
+    stream_debug = []
 assert opened[:2] == [
     "https://gemini.google.com/app",
     "https://gemini.google.com/app",
-], opened
-assert len(opened) == 2, opened
+], {"opened": opened, "stream_debug": stream_debug}
+assert len(opened) == 2, {"opened": opened, "stream_debug": stream_debug}
 
 with open(os.path.join(profile, "browser-requests.jsonl"), encoding="utf-8") as f:
     requests = [json.loads(line) for line in f if line.strip()]
