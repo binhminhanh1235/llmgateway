@@ -51,6 +51,10 @@ pub enum GatewayError {
     BrowserSessionUnavailable(String),
     #[error("browser transport failed: {0}")]
     BrowserTransport(String),
+    #[error("browser adapter incompatible: {0}")]
+    BrowserAdapterIncompatible(String),
+    #[error("browser model unavailable: {0}")]
+    BrowserModelUnavailable(String),
     #[error("upstream rejected request with {status}: {body}")]
     Upstream { status: StatusCode, body: String },
     #[error("{source}")]
@@ -337,6 +341,8 @@ impl Gateway {
                     let outcome = match &error {
                         GatewayError::BrowserSessionUnavailable(_) => "browser_session_unavailable",
                         GatewayError::BrowserTransport(_) => "browser_transport_error",
+                        GatewayError::BrowserAdapterIncompatible(_) => "browser_adapter_incompatible",
+                        GatewayError::BrowserModelUnavailable(_) => "browser_model_unavailable",
                         _ => "transport_error",
                     };
                     self.record_execution_attempt(AttemptRecord {
@@ -511,6 +517,12 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
         | BrowserProviderError::Toml(_) => GatewayError::InvalidConfig(error.to_string()),
         BrowserProviderError::SessionUnavailable { .. } => {
             GatewayError::BrowserSessionUnavailable(error.to_string())
+        }
+        BrowserProviderError::AdapterIncompatible { .. } => {
+            GatewayError::BrowserAdapterIncompatible(error.to_string())
+        }
+        BrowserProviderError::ModelUnavailable { .. } => {
+            GatewayError::BrowserModelUnavailable(error.to_string())
         }
         BrowserProviderError::Transport(_) => GatewayError::BrowserTransport(error.to_string())
     }
