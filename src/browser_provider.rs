@@ -276,13 +276,18 @@ impl BrowserProviderConfig {
 impl BrowserProviderRegistry {
     pub fn new(config: BrowserProviderConfig) -> Result<Self, BrowserProviderError> {
         let http = Arc::new(HttpBrowserAdapter::new()?);
-        let cdp = Arc::new(CdpBrowserAdapter::new()?);
+        let cdp = Arc::new(CdpBrowserAdapter::custom()?);
+        let gemini = Arc::new(CdpBrowserAdapter::gemini()?);
+        let qwen = Arc::new(CdpBrowserAdapter::qwen()?);
         let mut adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> = BTreeMap::new();
         adapters.insert(http.kind().to_string(), http);
         adapters.insert(cdp.kind().to_string(), cdp);
+        adapters.insert(gemini.kind().to_string(), gemini);
+        adapters.insert(qwen.kind().to_string(), qwen);
         Ok(Self {
             config: Arc::new(config),
             adapters,
+            adapter_health: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
@@ -303,6 +308,112 @@ impl BrowserProviderRegistry {
             .bindings
             .get(account_id)
             .map(|binding| binding.session.as_str())
+    }
+
+    pub async fn adapter_diagnostics(
+        &self,
+        provider_kind: &str,
+        account_id: &str,
+    ) -> BrowserAdapterDiagnostics {
+        if let Some(cached) = self.adapter_health.read().await.get(account_id).cloned() {
+            if cached.checked_at.elapsed() < Duration::from_secs(ADAPTER_HEALTH_TTL_SECONDS) {
+                return cached.diagnostics;
+            }
+        }
+
+        let Some(adapter) = self.adapters.get(provider_kind) else {
+            return self
+                .cache_diagnostics(BrowserAdapterDiagnostics {
+                    account_id: account_id.to_string(),
+                    provider_kind: provider_kind.to_string(),
+                    adapter_id: None,
+                    adapter_version: None,
+                    contract_version: None,
+                    expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+                    status: "unsupported".into(),
+                    message: format!("browser adapter kind '{provider_kind}' is not registered"),
+                    page_signature: None,
+                    target_url_prefix: None,
+                    configured_models: Vec::new(),
+                })
+                .await;
+        };
+        let Some(binding) = self.config.bindings.get(account_id) else {
+            return self
+                .cache_diagnostics(BrowserAdapterDiagnostics {
+                    account_id: account_id.to_string(),
+                    provider_kind: provider_kind.to_string(),
+                    adapter_id: Some(adapter.adapter_id().to_string()),
+                    adapter_version: None,
+                    contract_version: None,
+                    expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+                    status: "unconfigured".into(),
+                    message: "browser account has no binding".into(),
+                    page_signature: None,
+                    target_url_prefix: None,
+                    configured_models: Vec::new(),
+                })
+                .await;
+        };
+        let Some(store) = browser_session_runtime::get() else {
+            return self
+                .cache_diagnostics(unavailable_diagnostics(
+                    account_id,
+                    provider_kind,
+                    adapter.adapter_id(),
+                    binding,
+                    "browser session runtime is not initialized",
+                ))
+                .await;
+        };
+        let session = match store.session(&binding.session).await {
+            Ok(session) => session,
+            Err(error) => {
+                return self
+                    .cache_diagnostics(unavailable_diagnostics(
+                        account_id,
+                        provider_kind,
+                        adapter.adapter_id(),
+                        binding,
+                        &error.to_string(),
+                    ))
+                    .await;
+            }
+        };
+        if !session.enabled || session.status != "ready" {
+            return self
+                .cache_diagnostics(unavailable_diagnostics(
+                    account_id,
+                    provider_kind,
+                    adapter.adapter_id(),
+                    binding,
+                    &format!("browser session is {}", session.status),
+                ))
+                .await;
+        }
+
+        let diagnostics = adapter
+            .diagnose(account_id, &session.profile_dir, binding)
+            .await;
+        self.cache_diagnostics(diagnostics).await
+    }
+
+    async fn cache_diagnostics(
+        &self,
+        diagnostics: BrowserAdapterDiagnostics,
+    ) -> BrowserAdapterDiagnostics {
+        self.adapter_health.write().await.insert(
+            diagnostics.account_id.clone(),
+            CachedAdapterDiagnostics {
+                checked_at: Instant::now(),
+                diagnostics: diagnostics.clone(),
+            },
+        );
+        diagnostics
+    }
+
+    async fn invalidate_diagnostics(&self, account_id: &str) {
+        self.adapter_health.write().await.remove(account_id);
     }
 
     pub async fn route_available(&self, provider_kind: &str, account_id: &str) -> bool {
@@ -326,11 +437,15 @@ impl BrowserProviderRegistry {
             return false;
         }
 
-        if provider_kind == "browser-cdp" {
+        let adapter = match self.adapters.get(provider_kind) {
+            Some(adapter) => adapter,
+            None => return false,
+        };
+        if adapter.is_cdp() {
             let Some(driver) = chromium_driver_runtime::get() else {
                 return false;
             };
-            return driver
+            let live = driver
                 .status(&binding.session)
                 .await
                 .is_ok_and(|status| {
@@ -338,6 +453,11 @@ impl BrowserProviderRegistry {
                         && status.debugger_reachable
                         && status.ready_match.is_some()
                 });
+            if !live {
+                return false;
+            }
+            let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
+            return diagnostics.status == "ready";
         }
 
         true
@@ -348,6 +468,7 @@ impl BrowserProviderRegistry {
         account_id: &str,
         error: &str,
     ) -> Result<(), BrowserProviderError> {
+        self.invalidate_diagnostics(account_id).await;
         let binding = self
             .config
             .bindings
@@ -374,6 +495,7 @@ impl BrowserProviderRegistry {
         account_id: &str,
         error: &str,
     ) -> Result<(), BrowserProviderError> {
+        self.invalidate_diagnostics(account_id).await;
         let binding = self
             .config
             .bindings
@@ -411,6 +533,14 @@ impl BrowserProviderRegistry {
             .bindings
             .get(&account.id)
             .ok_or_else(|| BrowserProviderError::MissingBinding(account.id.clone()))?;
+
+        if !binding.models.is_empty() && !binding.models.iter().any(|model| model == &route.model) {
+            return Err(BrowserProviderError::ModelUnavailable {
+                account_id: account.id.clone(),
+                model: route.model.clone(),
+            });
+        }
+
         let Some(store) = browser_session_runtime::get() else {
             return Err(BrowserProviderError::SessionUnavailable {
                 account_id: account.id.clone(),
@@ -442,23 +572,44 @@ impl BrowserProviderRegistry {
                 binding: binding.clone(),
             })
             .await;
-        if provider.kind == "browser-cdp"
-            && matches!(
-                &result,
-                Err(BrowserProviderError::SessionUnavailable { .. })
-                    | Err(BrowserProviderError::Transport(_))
-            )
-        {
-            let error_text = result
-                .as_ref()
-                .err()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "browser CDP runtime unavailable".into());
-            let _ = self.mark_degraded(&account.id, &error_text).await;
+
+        match &result {
+            Ok(_) => {
+                self.invalidate_diagnostics(&account.id).await;
+            }
+            Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
+                self.cache_diagnostics(BrowserAdapterDiagnostics {
+                    account_id: account.id.clone(),
+                    provider_kind: provider.kind.clone(),
+                    adapter_id: Some(adapter.adapter_id().to_string()),
+                    adapter_version: None,
+                    contract_version: None,
+                    expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+                    status: "adapter_incompatible".into(),
+                    message: format!("{code}: {message}"),
+                    page_signature: None,
+                    target_url_prefix: effective_target_url_prefix(&provider.kind, binding),
+                    configured_models: binding.models.clone(),
+                })
+                .await;
+            }
+            Err(BrowserProviderError::SessionUnavailable { .. })
+            | Err(BrowserProviderError::Transport(_))
+                if adapter.is_cdp() =>
+            {
+                let error_text = result
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "browser CDP runtime unavailable".into());
+                let _ = self.mark_degraded(&account.id, &error_text).await;
+            }
+            _ => {}
         }
         result
     }
 }
+
 
 #[derive(Clone)]
 struct HttpBrowserAdapter {
