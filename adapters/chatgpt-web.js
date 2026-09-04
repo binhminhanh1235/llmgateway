@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04.2";
+  const ADAPTER_VERSION = "2026.09.04.3";
 
   const defaults = {
     input: [
@@ -419,6 +419,16 @@
     return { code, message };
   };
 
+  const STREAM_REWRITE_GUARD_CHARS = 128;
+
+  const guardedStreamPrefix = (value, done = false) => {
+    const text = String(value || "");
+    if (done) return text;
+    const chars = Array.from(text);
+    if (chars.length <= STREAM_REWRITE_GUARD_CHARS) return "";
+    return chars.slice(0, chars.length - STREAM_REWRITE_GUARD_CHARS).join("");
+  };
+
   const streamChunk = (state, delta, finishReason = null) => ({
     id: state.completionId,
     object: "chat.completion.chunk",
@@ -564,23 +574,26 @@
     const events = [];
     if (!state.toolCalls) {
       const current = String(state.answer || "");
-      if (current.startsWith(state.delivered)) {
-        const delta = current.slice(state.delivered.length);
+      if (state.delivered && !current.startsWith(state.delivered)) {
+        state.error = {
+          code: "stream_rewrite_detected",
+          message: "provider rewrote text inside the committed stream prefix after " + Array.from(state.delivered).length + " emitted characters"
+        };
+        streamJobs.delete(state.streamId);
+        return { events: [], done: true, error: state.error };
+      }
+
+      const streamable = guardedStreamPrefix(current, state.done);
+      if (streamable.startsWith(state.delivered)) {
+        const delta = streamable.slice(state.delivered.length);
         if (delta) {
           const payload = state.roleEmitted
             ? { content: delta }
             : { role: "assistant", content: delta };
           state.roleEmitted = true;
-          state.delivered = current;
+          state.delivered = streamable;
           events.push(streamChunk(state, payload));
         }
-      } else if (state.delivered) {
-        state.error = {
-          code: "stream_rewrite_detected",
-          message: "provider rewrote text that was already emitted"
-        };
-        streamJobs.delete(state.streamId);
-        return { events: [], done: true, error: state.error };
       }
     }
 
