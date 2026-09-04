@@ -487,7 +487,12 @@ impl Gateway {
             }
         }
 
-        let error = last_error.unwrap_or_else(|| GatewayError::NoRoute(requested_model.to_string()));
+        let error = last_error.unwrap_or_else(|| {
+            GatewayError::NoRoute(format!(
+                "model '{}' had eligible routes, but none could be attempted",
+                requested_model
+            ))
+        });
         Err(self.finish_execution_error(&request_id, error).await)
     }
 
