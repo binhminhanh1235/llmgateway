@@ -296,7 +296,6 @@ impl BrowserProviderRegistry {
     }
 
     pub fn reload(&self, config: BrowserProviderConfig) -> Result<(), BrowserProviderError> {
-        validate_browser_provider_config(&config)?;
         let mut guard = self
             .config
             .write()
