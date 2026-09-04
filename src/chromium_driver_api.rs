@@ -98,7 +98,6 @@ fn driver_error(error: ChromiumDriverError) -> Response<Body> {
         | ChromiumDriverError::SessionNotConfigured(_)
         | ChromiumDriverError::ExecutableNotFound
         | ChromiumDriverError::AlreadyRunning(_)
-        | ChromiumDriverError::NotRunning(_)
         | ChromiumDriverError::StartupTimeout
         | ChromiumDriverError::InvalidDevToolsPort(_)
         | ChromiumDriverError::InvalidConfig(_) => {
