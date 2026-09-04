@@ -82,6 +82,18 @@ balance_weight = 1
 # daily_request_limit = 1000
 # monthly_request_limit = 20000
 
+# Adaptive routing is conservative: readiness/quota/cooldown still decide eligibility first.
+# Once a route has enough runtime samples, slower or less reliable routes receive a bounded
+# positive penalty. Configured priority remains part of the final score, and max_penalty caps
+# how far telemetry may move a route.
+[routing]
+adaptive_enabled = true
+adaptive_min_samples = 3
+adaptive_ewma_alpha = 0.25
+adaptive_latency_target_ms = 1200
+adaptive_max_penalty = 30
+adaptive_failure_weight = 0.70
+
 # Context is compiled before persistent-thread requests are sent upstream.
 # Full transcripts remain in SQLite; checkpoints only replace older turns in the model input.
 [context]
