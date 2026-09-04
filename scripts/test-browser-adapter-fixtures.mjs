@@ -69,6 +69,14 @@ async function testGemini() {
   assert.equal(probe.page_signature, "gemini-composer-v1");
 
   installPage({
+    host: "gemini.google.com",
+    nodes: { "[aria-label='Enter a prompt here']": input }
+  });
+  adapter = loadAdapter("adapters/gemini-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, true, probe.message);
+
+  installPage({
     host: "",
     nodes: { "div[aria-label='Enter a prompt for Gemini']": input }
   });
