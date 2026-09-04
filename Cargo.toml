@@ -1,6 +1,6 @@
 [package]
 name = "llmgateway"
-version = "0.28.0"
+version = "0.29.0"
 edition = "2021"
 description = "Local-first universal LLM gateway with multi-account routing and failover"
 license = "MIT"
