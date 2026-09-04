@@ -116,6 +116,22 @@ impl Router {
         self.explain_for_body(requested_model, None).await
     }
 
+    pub fn sticky_route_matches_best_task_fit(
+        &self,
+        body: &Value,
+        preferred: &RouteConfig,
+        best: &RouteConfig,
+    ) -> bool {
+        if !self.config.routing.task_aware_enabled {
+            return true;
+        }
+        let task = classify_task(Some(body), &self.config.routing);
+        let preferred_fit = evaluate_task_fit(&task, preferred, &self.config.routing);
+        let best_fit = evaluate_task_fit(&task, best, &self.config.routing);
+        preferred_fit.exclusion_reason.is_none()
+            && preferred_fit.snapshot.adjustment == best_fit.snapshot.adjustment
+    }
+
     pub async fn explain_for_body(
         &self,
         requested_model: &str,
