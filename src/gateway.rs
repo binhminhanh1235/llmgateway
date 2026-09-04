@@ -130,8 +130,14 @@ impl Gateway {
             .await;
         if let Some(preferred_route) = preferred_route {
             if let Some(index) = routes.iter().position(|route| route.id == preferred_route) {
-                let preferred = routes.remove(index);
-                routes.insert(0, preferred);
+                let keep_sticky = index == 0
+                    || self
+                        .router
+                        .sticky_route_matches_best_task_fit(body, &routes[index], &routes[0]);
+                if keep_sticky {
+                    let preferred = routes.remove(index);
+                    routes.insert(0, preferred);
+                }
             }
         }
         if routes.is_empty() {
