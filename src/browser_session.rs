@@ -544,8 +544,72 @@ fn default_profile_root() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_browser_config, BrowserConfig, BrowserSessionSpec};
-    use std::collections::BTreeMap;
+    use super::*;
+
+    #[tokio::test]
+    async fn migrates_only_legacy_adapter_login_attention() {
+        let mut sessions = BTreeMap::new();
+        sessions.insert(
+            "gemini-old".into(),
+            BrowserSessionSpec {
+                provider: "gemini-web".into(),
+                login_url: "https://gemini.google.com/app".into(),
+                enabled: true,
+                label: None,
+            },
+        );
+        let config = BrowserConfig {
+            enabled: true,
+            profile_root: std::env::temp_dir()
+                .join("llmgateway-browser-session-migration-test")
+                .display()
+                .to_string(),
+            sessions,
+        };
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = BrowserSessionStore {
+            browser_config: Arc::new(RwLock::new(config)),
+            pool,
+        };
+        store.migrate().await.unwrap();
+        store.seed().await.unwrap();
+
+        store
+            .require_attention(
+                "gemini-old",
+                "browser adapter login required: Gemini login is required before the adapter can run.",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.session("gemini-old").await.unwrap().status,
+            STATUS_REQUIRES_ATTENTION
+        );
+
+        store.migrate().await.unwrap();
+        assert_eq!(
+            store.session("gemini-old").await.unwrap().status,
+            STATUS_DEGRADED
+        );
+
+        store
+            .require_attention("gemini-old", "HTTP 403: provider requires user attention")
+            .await
+            .unwrap();
+        store.migrate().await.unwrap();
+        assert_eq!(
+            store.session("gemini-old").await.unwrap().status,
+            STATUS_REQUIRES_ATTENTION
+        );
+
+        let _ = fs::remove_dir_all(
+            std::env::temp_dir().join("llmgateway-browser-session-migration-test"),
+        );
+    }
 
     #[test]
     fn missing_browser_section_is_opt_in_disabled() {
