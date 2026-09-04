@@ -86,20 +86,30 @@ def remove_target(target_id):
 
 def ensure_native_conversation(target_id, provider):
     global conversation_seq
-    if provider != "gemini":
-        return
     current = target_url_for(target_id)
     parsed = urlparse(current)
-    if parsed.hostname != "gemini.google.com" or parsed.path.rstrip("/") != "/app":
+    if provider == "gemini":
+        if parsed.hostname != "gemini.google.com" or parsed.path.rstrip("/") != "/app":
+            return
+        with target_lock:
+            conversation_seq += 1
+            native = f"https://gemini.google.com/app/ci-thread-{conversation_seq}"
+            target_urls[target_id] = native
+    elif provider == "chatgpt":
+        if parsed.hostname != "chatgpt.com" or parsed.path.rstrip("/") != "":
+            return
+        with target_lock:
+            conversation_seq += 1
+            native = f"https://chatgpt.com/c/ci-thread-{conversation_seq}"
+            target_urls[target_id] = native
+    else:
         return
-    with target_lock:
-        conversation_seq += 1
-        native = f"https://gemini.google.com/app/ci-thread-{conversation_seq}"
-        target_urls[target_id] = native
     append_marker("native-conversations.log", native)
 
 def adapter_identity(expression, target_id):
     target_host = urlparse(target_url_for(target_id)).hostname or ""
+    if target_host == "chatgpt.com" or "chatgpt-web" in expression or '"provider":"chatgpt"' in expression:
+        return "chatgpt-web", "chatgpt", "chatgpt-web-default"
     if target_host == "gemini.google.com" or "gemini-web" in expression or '"provider":"gemini"' in expression:
         return "gemini-web", "gemini", "gemini-web-default"
     return "qwen-web", "qwen", "qwen-web-default"
