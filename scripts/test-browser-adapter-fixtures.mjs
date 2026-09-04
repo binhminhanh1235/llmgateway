@@ -33,7 +33,7 @@ globalThis.KeyboardEvent = class {
 };
 
 function installPage({ host, nodes = {} }) {
-  globalThis.location = { hostname: host };
+  globalThis.location = { hostname: host, pathname: "/" };
   globalThis.document = {
     querySelector(selector) {
       return nodes[selector] ?? null;
@@ -120,6 +120,39 @@ async function testGemini() {
   assert.equal(probe.code, "login_required");
 }
 
+async function testChatGPT() {
+  const input = new FakeElement();
+  installPage({
+    host: "chatgpt.com",
+    nodes: { "#prompt-textarea": input }
+  });
+  let adapter = loadAdapter("adapters/chatgpt-web.js");
+  assert.equal(adapter.meta.contract_version, 1);
+  assert.equal(adapter.meta.id, "chatgpt-web");
+  assert.equal(adapter.meta.provider, "chatgpt");
+  let probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, true, probe.message);
+  assert.equal(probe.page_signature, "chatgpt-composer-v1");
+
+  installPage({
+    host: "chatgpt.com",
+    nodes: {
+      "#prompt-textarea": input,
+      "a[href*='/auth/login']": new FakeElement("Log in")
+    }
+  });
+  adapter = loadAdapter("adapters/chatgpt-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "login_required");
+
+  installPage({ host: "example.test", nodes: {} });
+  adapter = loadAdapter("adapters/chatgpt-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "wrong_page");
+}
+
 async function testQwen() {
   const input = new FakeTextAreaElement();
   installPage({
@@ -192,6 +225,51 @@ async function testGeminiToolBridge() {
   assert.deepEqual(
     JSON.parse(choice.message.tool_calls[0].function.arguments),
     { path: "src/main.rs" }
+  );
+}
+
+async function testChatGPTToolBridge() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  send.onClick = () => {
+    response.innerText = '[[LLMGATEWAY_TOOL_CALLS]]{"tool_calls":[{"name":"read_file","arguments":{"path":"README.md"}}]}[[/LLMGATEWAY_TOOL_CALLS]]';
+    response.textContent = response.innerText;
+  };
+  installPage({
+    host: "chatgpt.com",
+    nodes: {
+      "#prompt-textarea": input,
+      "button[data-testid='send-button']": send,
+      "[data-message-author-role='assistant'] .markdown": response
+    }
+  });
+  const adapter = loadAdapter("adapters/chatgpt-web.js");
+  const result = await adapter.chat({
+    model: "chatgpt-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "Read README.md" }],
+    tools: [{
+      type: "function",
+      function: {
+        name: "read_file",
+        description: "Read a repository file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"]
+        }
+      }
+    }]
+  }, { response_timeout_ms: 4000 });
+
+  assert.equal(result.status, 200);
+  const choice = result.body.choices[0];
+  assert.equal(choice.finish_reason, "tool_calls");
+  assert.equal(choice.message.tool_calls[0].function.name, "read_file");
+  assert.deepEqual(
+    JSON.parse(choice.message.tool_calls[0].function.arguments),
+    { path: "README.md" }
   );
 }
 
@@ -353,10 +431,12 @@ async function testMidRequestLoginExpiry() {
 }
 
 await testGemini();
+await testChatGPT();
 await testQwen();
 await testGeminiToolBridge();
+await testChatGPTToolBridge();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
 await testGeminiStreamCancellation();
 await testMidRequestLoginExpiry();
-console.log("built-in Gemini/Qwen fake-page adapter fixtures passed");
+console.log("built-in Gemini/ChatGPT/Qwen fake-page adapter fixtures passed");
