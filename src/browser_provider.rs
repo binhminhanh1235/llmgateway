@@ -1205,9 +1205,11 @@ impl CdpBrowserAdapter {
             return false;
         }
         let Some(thread_id) = request.thread_id.as_deref() else {
+            warn!(account = %request.account.id, "native conversation persistence skipped because logical thread id is missing");
             return false;
         };
         let Some(store) = conversation_runtime::get() else {
+            warn!(thread_id, account = %request.account.id, "native conversation persistence skipped because conversation runtime is unavailable");
             return false;
         };
         let Some(conversation_url) = self
@@ -1216,6 +1218,12 @@ impl CdpBrowserAdapter {
         else {
             return false;
         };
+        warn!(
+            thread_id,
+            account = %request.account.id,
+            url = %diagnostic_target_location(&conversation_url),
+            "observed Gemini native conversation URL"
+        );
         match store
             .upsert_provider_conversation(
                 thread_id,
@@ -1225,7 +1233,14 @@ impl CdpBrowserAdapter {
             )
             .await
         {
-            Ok(()) => true,
+            Ok(()) => {
+                warn!(
+                    thread_id,
+                    account = %request.account.id,
+                    "persisted Gemini native conversation affinity"
+                );
+                true
+            },
             Err(error) => {
                 warn!(
                     %error,
