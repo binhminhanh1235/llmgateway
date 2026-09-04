@@ -120,7 +120,7 @@ impl Drop for ExecutionStreamGuard {
 
 #[derive(Debug, Error)]
 pub enum GatewayError {
-    #[error("unknown or unavailable model '{0}'")]
+    #[error("{0}")]
     NoRoute(String),
     #[error("missing credential environment variable '{0}'")]
     MissingCredential(String),
@@ -487,7 +487,12 @@ impl Gateway {
             }
         }
 
-        let error = last_error.unwrap_or_else(|| GatewayError::NoRoute(requested_model.to_string()));
+        let error = last_error.unwrap_or_else(|| {
+            GatewayError::NoRoute(format!(
+                "model '{}' had eligible routes, but none could be attempted",
+                requested_model
+            ))
+        });
         Err(self.finish_execution_error(&request_id, error).await)
     }
 
