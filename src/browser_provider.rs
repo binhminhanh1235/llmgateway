@@ -1,6 +1,7 @@
 use crate::{
     browser_auth_runtime, browser_session_runtime, chromium_driver_runtime, conversation_runtime,
     config::{AccountConfig, ProviderConfig, RouteConfig},
+    gemini_web_transport::GeminiWebHttpAdapter,
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
@@ -212,6 +213,7 @@ pub trait BrowserProviderAdapter: Send + Sync {
 pub struct BrowserProviderRegistry {
     config: Arc<StdRwLock<BrowserProviderConfig>>,
     adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>>,
+    direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>>,
     adapter_health: Arc<RwLock<BTreeMap<String, CachedAdapterDiagnostics>>>,
 }
 
@@ -323,15 +325,21 @@ impl BrowserProviderRegistry {
         let gemini = Arc::new(CdpBrowserAdapter::gemini()?);
         let chatgpt = Arc::new(CdpBrowserAdapter::chatgpt()?);
         let qwen = Arc::new(CdpBrowserAdapter::qwen()?);
+        let gemini_http = Arc::new(GeminiWebHttpAdapter::new()?);
         let mut adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> = BTreeMap::new();
         adapters.insert(http.kind().to_string(), http);
         adapters.insert(cdp.kind().to_string(), cdp);
         adapters.insert(gemini.kind().to_string(), gemini);
         adapters.insert(chatgpt.kind().to_string(), chatgpt);
         adapters.insert(qwen.kind().to_string(), qwen);
+
+        let mut direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> =
+            BTreeMap::new();
+        direct_adapters.insert("browser-gemini".into(), gemini_http);
         Ok(Self {
             config: Arc::new(StdRwLock::new(config)),
             adapters,
+            direct_adapters,
             adapter_health: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
@@ -387,6 +395,16 @@ impl BrowserProviderRegistry {
     fn auth_material_available(&self, session_id: &str) -> bool {
         browser_auth_runtime::get()
             .is_some_and(|vault| vault.contains(session_id))
+    }
+
+    fn direct_adapter(
+        &self,
+        provider_kind: &str,
+        binding: &BrowserAccountBinding,
+    ) -> Option<&Arc<dyn BrowserProviderAdapter>> {
+        (binding.transport_mode == BrowserTransportMode::HttpPreferred)
+            .then(|| self.direct_adapters.get(provider_kind))
+            .flatten()
     }
 
     pub async fn adapter_diagnostics(
