@@ -2,6 +2,12 @@
   const LOCAL_KEY = "llmgateway.apiKey.local";
   const SESSION_KEY = "llmgateway.apiKey.session";
   const accountsContent = document.getElementById("accountsContent");
+  const addButton = document.getElementById("addBrowserAccountButton");
+  const wizardModal = document.getElementById("browserAccountModal");
+  const wizardBody = document.getElementById("browserAccountWizardBody");
+  const wizardResult = document.getElementById("browserAccountWizardResult");
+  const wizardError = document.getElementById("browserAccountWizardError");
+  const createButton = document.getElementById("createBrowserAccountButton");
   if (!accountsContent) return;
 
   let loading = false;
@@ -9,6 +15,8 @@
   let driverState = new Map();
   let refreshTimer = null;
   let loginPollTimer = null;
+  let providerPresets = [];
+  let selectedProvider = "gemini";
 
   function apiKey() {
     return localStorage.getItem(LOCAL_KEY) || sessionStorage.getItem(SESSION_KEY) || "";
@@ -48,11 +56,6 @@
     try {
       const summary = await request("/_llmgateway/browser-sessions");
       sessions = summary?.sessions || [];
-      if (!sessions.length) {
-        removePanel();
-        stopLoginPolling();
-        return;
-      }
       const states = await Promise.all(sessions.map(async (session) => [session.id, await loadDriverStatus(session.id)]));
       driverState = new Map(states);
       render(summary);
@@ -86,15 +89,29 @@
         </div>
         <div class="browser-security-chip" title="Browser DevTools is loopback-only and page URLs are sanitized before they reach this UI">Local session</div>
       </div>
-      <div class="browser-session-grid">
-        ${sessions.map((session) => browserSessionHtml(session, driverState.get(session.id))).join("")}
-      </div>`;
+      ${sessions.length
+        ? `<div class="browser-session-grid">${sessions.map((session) => browserSessionHtml(session, driverState.get(session.id))).join("")}</div>`
+        : browserEmptyHtml(summary)}
+    `;
 
     const usage = accountsContent.querySelector(".usage-overview");
     const grid = accountsContent.querySelector(".account-grid");
     if (usage) accountsContent.insertBefore(panel, usage);
     else if (grid) accountsContent.insertBefore(panel, grid);
     else accountsContent.prepend(panel);
+  }
+
+  function browserEmptyHtml(summary) {
+    return `
+      <div class="browser-empty-state">
+        <div class="browser-empty-icon">◎</div>
+        <div>
+          <strong>No browser accounts yet</strong>
+          <p>Create a Gemini or Qwen browser account. llmgateway will generate the linked session, provider, route, and isolated profile configuration for you.</p>
+          <button type="button" class="browser-primary-action" data-open-browser-wizard>+ Add browser account</button>
+        </div>
+        <span class="browser-empty-meta">${summary?.profile_root ? `Profiles: ${escapeHtml(summary.profile_root)}` : "Isolated profiles"}</span>
+      </div>`;
   }
 
   function browserSessionHtml(session, driver) {
@@ -148,7 +165,7 @@
     if (session.status === "starting" || session.status === "login_required") {
       return driver?.status?.running
         ? "Finish the normal login flow in the Chromium window. This page will detect completion automatically."
-        : "The login browser is no longer running. Check the session or start login again.";
+        : "Start the isolated Chromium profile and finish the normal provider login.";
     }
     if (session.status === "ready") {
       return session.last_verified_at
@@ -158,9 +175,7 @@
     if (session.status === "degraded") return "The saved browser session is temporarily unavailable; llmgateway will try safe automatic recovery.";
     if (session.status === "stopped") return "The browser was stopped intentionally. The isolated profile is preserved for the next launch.";
     if (session.status === "failed") return "Automatic recovery failed. Reset the session, then launch the isolated profile again.";
-    if (session.status === "requires_attention") {
-      return "The session needs attention. Reset it, then start a normal browser login again.";
-    }
+    if (session.status === "requires_attention") return "The session needs attention. Reset it, then start a normal browser login again.";
     return "Start a dedicated Chromium profile and sign in normally. CAPTCHA and 2FA stay interactive.";
   }
 
@@ -175,6 +190,141 @@
       case "requires_attention": return { tone: "attention", label: "Needs attention" };
       default: return { tone: "idle", label: "Not connected" };
     }
+  }
+
+  async function openWizard() {
+    if (!wizardModal) return;
+    resetWizard();
+    wizardModal.classList.remove("hidden");
+    try {
+      const result = await request("/_llmgateway/browser-account-setup/providers");
+      providerPresets = result?.providers || [];
+      renderProviderPresets();
+    } catch (error) {
+      showWizardError(cleanError(error));
+    }
+    requestAnimationFrame(() => document.getElementById("browserAccountIdInput")?.focus());
+  }
+
+  function resetWizard() {
+    selectedProvider = "gemini";
+    providerPresets = [];
+    wizardBody?.classList.remove("hidden");
+    wizardResult?.classList.add("hidden");
+    if (wizardResult) wizardResult.innerHTML = "";
+    hideWizardError();
+    const values = {
+      browserAccountIdInput: "",
+      browserAccountLabelInput: "",
+      browserModelIdInput: "",
+      browserModelLabelInput: "",
+      browserPriorityInput: "10",
+    };
+    for (const [id, value] of Object.entries(values)) {
+      const input = document.getElementById(id);
+      if (input) input.value = value;
+    }
+    renderProviderPresets();
+  }
+
+  function renderProviderPresets() {
+    const picker = document.getElementById("browserProviderPicker");
+    if (!picker) return;
+    const fallback = [
+      { id: "gemini", label: "Gemini Web", default_model_id: "gemini-web-default" },
+      { id: "qwen", label: "Qwen Web", default_model_id: "qwen-web-default" },
+    ];
+    const presets = providerPresets.length ? providerPresets : fallback;
+    picker.innerHTML = presets.map((preset) => `
+      <button type="button" class="browser-provider-option ${preset.id === selectedProvider ? "selected" : ""}" data-browser-provider="${escapeAttr(preset.id)}" aria-pressed="${preset.id === selectedProvider}">
+        <span class="browser-provider-option-mark">${escapeHtml(String(preset.label || preset.id).slice(0, 1).toUpperCase())}</span>
+        <span><strong>${escapeHtml(preset.label || preset.id)}</strong><small>${escapeHtml(preset.default_model_id || "Browser-backed model")}</small></span>
+      </button>`).join("");
+  }
+
+  function selectProvider(provider) {
+    selectedProvider = provider;
+    renderProviderPresets();
+    const preset = providerPresets.find((item) => item.id === provider);
+    const modelInput = document.getElementById("browserModelIdInput");
+    if (modelInput && !modelInput.value.trim() && preset?.default_model_id) {
+      modelInput.placeholder = preset.default_model_id;
+    }
+  }
+
+  async function createBrowserAccount() {
+    if (!createButton) return;
+    hideWizardError();
+    setBusy(createButton, "Creating…");
+    try {
+      const priorityValue = document.getElementById("browserPriorityInput")?.value;
+      const payload = {
+        provider: selectedProvider,
+        account_id: optionalValue("browserAccountIdInput"),
+        label: optionalValue("browserAccountLabelInput"),
+        model_id: optionalValue("browserModelIdInput"),
+        model_label: optionalValue("browserModelLabelInput"),
+        priority: priorityValue === "" ? null : Number(priorityValue),
+      };
+      const result = await request("/_llmgateway/browser-account-setup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      showWizardResult(result);
+      browserToast(`${result.account_id} added to managed configuration`);
+    } catch (error) {
+      showWizardError(cleanError(error));
+    } finally {
+      clearBusy(createButton);
+    }
+  }
+
+  function optionalValue(id) {
+    const value = document.getElementById(id)?.value?.trim() || "";
+    return value || null;
+  }
+
+  function showWizardResult(result) {
+    wizardBody?.classList.add("hidden");
+    wizardResult?.classList.remove("hidden");
+    if (!wizardResult) return;
+    const steps = Array.isArray(result?.next_steps) ? result.next_steps : [];
+    wizardResult.innerHTML = `
+      <div class="browser-wizard-success-mark">✓</div>
+      <div class="browser-wizard-success-copy">
+        <div class="browser-wizard-eyebrow">Configuration created</div>
+        <h3>${escapeHtml(result?.account_id || "Browser account")} is ready for activation</h3>
+        <p>llmgateway created one linked browser session, provider account, route, and isolated Chromium profile configuration.</p>
+      </div>
+      <div class="browser-wizard-summary">
+        <div><span>Provider</span><strong>${escapeHtml(result?.provider || selectedProvider)}</strong></div>
+        <div><span>Model</span><strong>${escapeHtml(result?.model_id || "")}</strong></div>
+        <div><span>Route</span><strong>${escapeHtml(result?.route_id || "")}</strong></div>
+        <div><span>Config</span><strong title="${escapeAttr(result?.config_path || "")}">${escapeHtml(shorten(result?.config_path || "", 42))}</strong></div>
+      </div>
+      ${result?.restart_required ? `
+        <div class="browser-restart-notice">
+          <strong>One restart required in this v0.29 phase</strong>
+          <span>The config is already saved and validated. Restart llmgateway once, then open Accounts and click Login with browser. Hot activation is the next implementation slice.</span>
+        </div>` : ""}
+      ${steps.length ? `<ol class="browser-wizard-next-steps">${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>` : ""}
+      <div class="browser-wizard-actions">
+        <button type="button" class="secondary-button" data-close-modal="browserAccountModal">Close</button>
+        <button type="button" class="primary-button" data-create-another-browser-account>Add another</button>
+      </div>`;
+  }
+
+  function showWizardError(message) {
+    if (!wizardError) return;
+    wizardError.textContent = message;
+    wizardError.classList.remove("hidden");
+  }
+
+  function hideWizardError() {
+    if (!wizardError) return;
+    wizardError.textContent = "";
+    wizardError.classList.add("hidden");
   }
 
   async function launch(sessionId, button) {
@@ -302,7 +452,6 @@
 
   function renderError(error) {
     removePanel();
-    if (!accountsContent.querySelector(".account-grid")) return;
     const panel = document.createElement("section");
     panel.className = "browser-control-panel browser-control-error";
     panel.innerHTML = `
@@ -364,6 +513,24 @@
   }
 
   document.addEventListener("click", (event) => {
+    if (event.target.closest?.("#addBrowserAccountButton") || event.target.closest?.("[data-open-browser-wizard]")) {
+      openWizard();
+      return;
+    }
+    const provider = event.target.closest?.("[data-browser-provider]");
+    if (provider) {
+      selectProvider(provider.dataset.browserProvider);
+      return;
+    }
+    if (event.target.closest?.("#createBrowserAccountButton")) {
+      createBrowserAccount();
+      return;
+    }
+    if (event.target.closest?.("[data-create-another-browser-account]")) {
+      resetWizard();
+      return;
+    }
+
     const actionButton = event.target.closest?.("[data-browser-action]");
     if (actionButton) {
       const sessionId = actionButton.dataset.sessionId;
@@ -379,11 +546,19 @@
     if (event.target.closest?.("#refreshAccountsButton")) scheduleRefresh(220);
   });
 
+  wizardModal?.addEventListener("click", (event) => {
+    if (event.target === wizardModal) wizardModal.classList.add("hidden");
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && wizardModal && !wizardModal.classList.contains("hidden")) {
+      wizardModal.classList.add("hidden");
+    }
+  });
+
   const observer = new MutationObserver(() => {
     if (!isAccountsViewActive()) return;
-    if (accountsContent.querySelector(".account-grid") && !accountsContent.querySelector(".browser-control-panel")) {
-      scheduleRefresh(60);
-    }
+    if (!accountsContent.querySelector(".browser-control-panel")) scheduleRefresh(60);
   });
   observer.observe(accountsContent, { childList: true });
 
@@ -393,5 +568,10 @@
 
   if (isAccountsViewActive()) scheduleRefresh();
 
-  globalThis.llmgatewayBrowserUi = { loadBrowserSessions, lifecycleView };
+  globalThis.llmgatewayBrowserUi = {
+    loadBrowserSessions,
+    lifecycleView,
+    openWizard,
+    createBrowserAccount,
+  };
 })();
