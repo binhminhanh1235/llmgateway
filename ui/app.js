@@ -404,7 +404,18 @@
     renderChat();
   }
 
-  function openModelModal() { if (!state.apiKey) return openAuthModal(); elements.modelModal.classList.remove("hidden"); elements.modelSearch.value = ""; renderModelPicker(); requestAnimationFrame(() => elements.modelSearch.focus()); }
+  async function openModelModal() {
+    if (!state.apiKey) return openAuthModal();
+    elements.modelModal.classList.remove("hidden");
+    elements.modelSearch.value = "";
+    renderModelPicker();
+    try {
+      await loadModels();
+    } catch (error) {
+      toast(`Could not refresh models: ${error.message || String(error)}`);
+    }
+    requestAnimationFrame(() => elements.modelSearch.focus());
+  }
 
   function renderModelPicker() {
     const query = (elements.modelSearch.value || "").trim().toLowerCase();
@@ -412,7 +423,8 @@
     const visible = state.models.filter((model) => {
       const kind = model.llmgateway?.kind;
       if (kind === "route") return false;
-      return !query || `${model.id} ${model.owned_by || ""} ${model.llmgateway?.display_name || ""} ${model.llmgateway?.provider || ""}`.toLowerCase().includes(query);
+      const provider = model.llmgateway?.provider || model.owned_by || "";
+      return !query || `${model.id} ${model.owned_by || ""} ${model.llmgateway?.display_name || ""} ${provider} ${displayProvider(provider)}`.toLowerCase().includes(query);
     });
     const virtual = visible.filter((model) => model.llmgateway?.kind === "virtual");
     const groups = new Map();
@@ -422,13 +434,22 @@
       groups.get(provider).push(model);
     }
     let html = modelGroupHtml("Smart routing", virtual, thread.model);
-    for (const [provider, models] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) html += modelGroupHtml(provider, models, thread.model);
+    for (const [provider, models] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      html += modelGroupHtml(displayProvider(provider), models, thread.model);
+    }
     elements.modelPickerContent.innerHTML = html || '<div class="loading-box">No matching models</div>';
     elements.modelPickerContent.querySelectorAll(".model-choice").forEach((button) => button.addEventListener("click", () => {
       thread.model = button.dataset.modelId;
       elements.modelModal.classList.add("hidden");
       renderChat();
     }));
+  }
+
+  function displayProvider(provider) {
+    if (provider === "chatgpt-web") return "ChatGPT Web";
+    if (provider === "gemini-web") return "Gemini Web";
+    if (provider === "qwen-web") return "Qwen Web";
+    return provider || "Other";
   }
 
   function modelGroupHtml(title, models, selectedId) {
