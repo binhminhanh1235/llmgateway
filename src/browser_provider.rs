@@ -1200,28 +1200,23 @@ impl CdpBrowserAdapter {
         request: &BrowserAdapterRequest,
         target: &CdpTarget,
         wait: Duration,
-    ) {
+    ) -> bool {
         if !self.supports_native_conversation_affinity() {
-            return;
+            return false;
         }
         let Some(thread_id) = request.thread_id.as_deref() else {
-            return;
+            return false;
         };
         let Some(store) = conversation_runtime::get() else {
-            return;
+            return false;
         };
         let Some(conversation_url) = self
             .discover_native_conversation_url(&request.profile_dir, target, wait)
             .await
         else {
-            warn!(
-                thread_id,
-                account = %request.account.id,
-                "Gemini conversation URL was not observed after sending the turn"
-            );
-            return;
+            return false;
         };
-        if let Err(error) = store
+        match store
             .upsert_provider_conversation(
                 thread_id,
                 &request.provider.id,
@@ -1230,12 +1225,16 @@ impl CdpBrowserAdapter {
             )
             .await
         {
-            warn!(
-                %error,
-                thread_id,
-                account = %request.account.id,
-                "failed to persist Gemini native conversation affinity"
-            );
+            Ok(()) => true,
+            Err(error) => {
+                warn!(
+                    %error,
+                    thread_id,
+                    account = %request.account.id,
+                    "failed to persist Gemini native conversation affinity"
+                );
+                false
+            }
         }
     }
 
@@ -1538,10 +1537,15 @@ impl CdpBrowserAdapter {
             });
         }
 
-        if request.thread_id.is_some() && self.supports_native_conversation_affinity() {
-            self.persist_native_conversation(request, &target, Duration::from_secs(2))
-                .await;
-        }
+        let native_affinity_request =
+            (request.thread_id.is_some() && self.supports_native_conversation_affinity())
+                .then(|| request.clone());
+        let native_conversation_persisted = if let Some(native_request) = native_affinity_request.as_ref() {
+            self.persist_native_conversation(native_request, &target, Duration::from_millis(250))
+                .await
+        } else {
+            false
+        };
 
         let status = match reqwest::StatusCode::from_u16(start.status) {
             Ok(status) => status,
@@ -1565,8 +1569,10 @@ impl CdpBrowserAdapter {
             request.binding.idle_stream_timeout_ms.unwrap_or(30_000),
         );
         let stream_target = target.clone();
+        let stream_native_request = native_affinity_request.clone();
 
         let stream = async_stream::stream! {
+            let mut native_conversation_persisted = native_conversation_persisted;
             let mut cleanup = CdpStreamCleanup {
                 adapter: adapter.clone(),
                 target: stream_target.clone(),
@@ -1652,6 +1658,18 @@ impl CdpBrowserAdapter {
                     break;
                 }
 
+                if !native_conversation_persisted {
+                    if let Some(native_request) = stream_native_request.as_ref() {
+                        native_conversation_persisted = adapter
+                            .persist_native_conversation(
+                                native_request,
+                                &stream_target,
+                                Duration::from_millis(250),
+                            )
+                            .await;
+                    }
+                }
+
                 if !poll.events.is_empty() {
                     saw_event = true;
                     last_progress = Instant::now();
@@ -1669,6 +1687,24 @@ impl CdpBrowserAdapter {
                 }
 
                 if poll.done {
+                    if !native_conversation_persisted {
+                        if let Some(native_request) = stream_native_request.as_ref() {
+                            native_conversation_persisted = adapter
+                                .persist_native_conversation(
+                                    native_request,
+                                    &stream_target,
+                                    Duration::from_secs(5),
+                                )
+                                .await;
+                            if !native_conversation_persisted {
+                                warn!(
+                                    thread_id = native_request.thread_id.as_deref().unwrap_or("<unknown>"),
+                                    account = %native_request.account.id,
+                                    "Gemini native conversation URL was still unavailable when the stream completed"
+                                );
+                            }
+                        }
+                    }
                     yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
                     cleanup.complete().await;
                     break;
@@ -2012,7 +2048,8 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
             )
             .await;
         if result.is_ok() && thread_affinity.is_some() {
-            self.persist_native_conversation(&request, &target, Duration::from_secs(2))
+            let _ = self
+                .persist_native_conversation(&request, &target, Duration::from_secs(5))
                 .await;
         }
         if ephemeral {
