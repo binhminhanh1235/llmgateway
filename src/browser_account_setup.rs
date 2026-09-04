@@ -226,6 +226,7 @@ async fn activate_browser_account_setup(
     browser_providers
         .reload(provider_config)
         .map_err(|error| BrowserAccountSetupError::Activation(error.to_string()))?;
+    browser_providers.clear_diagnostics().await;
 
     state
         .catalog
