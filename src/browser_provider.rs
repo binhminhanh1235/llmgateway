@@ -1127,16 +1127,32 @@ impl CdpBrowserAdapter {
     async fn discover_native_conversation_url(
         &self,
         profile_dir: &str,
-        target_id: &str,
+        target: &CdpTarget,
         timeout_duration: Duration,
     ) -> Option<String> {
         let new_chat_url = self.spec.new_chat_url?;
         let deadline = Instant::now() + timeout_duration;
         loop {
+            if !target.websocket_debugger_url.is_empty() {
+                let runtime_href = timeout(
+                    Duration::from_secs(2),
+                    evaluate_cdp(
+                        &target.websocket_debugger_url,
+                        "String(globalThis.location?.href || '')",
+                    ),
+                )
+                .await;
+                if let Ok(Ok(Value::String(href))) = runtime_href {
+                    if is_native_conversation_url(new_chat_url, &href) {
+                        return Some(href);
+                    }
+                }
+            }
+
             if let Ok(targets) = self.targets(profile_dir).await {
-                if let Some(target) = targets.into_iter().find(|target| target.id == target_id) {
-                    if is_native_conversation_url(new_chat_url, &target.url) {
-                        return Some(target.url);
+                if let Some(refreshed) = targets.into_iter().find(|item| item.id == target.id) {
+                    if is_native_conversation_url(new_chat_url, &refreshed.url) {
+                        return Some(refreshed.url);
                     }
                 }
             }
@@ -1145,6 +1161,38 @@ impl CdpBrowserAdapter {
             }
             sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    async fn find_open_conversation_target(
+        &self,
+        profile_dir: &str,
+        conversation_url: &str,
+    ) -> Result<Option<CdpTarget>, BrowserProviderError> {
+        let targets = self.targets(profile_dir).await?;
+        for target in targets.into_iter().filter(|target| {
+            target.kind == "page" && !target.websocket_debugger_url.is_empty()
+        }) {
+            if same_conversation_url(&target.url, conversation_url) {
+                return Ok(Some(target));
+            }
+            let runtime_href = timeout(
+                Duration::from_secs(1),
+                evaluate_cdp(
+                    &target.websocket_debugger_url,
+                    "String(globalThis.location?.href || '')",
+                ),
+            )
+            .await;
+            if let Ok(Ok(Value::String(href))) = runtime_href {
+                if same_conversation_url(&href, conversation_url) {
+                    return Ok(Some(CdpTarget {
+                        url: href,
+                        ..target
+                    }));
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn persist_native_conversation(
@@ -1163,7 +1211,7 @@ impl CdpBrowserAdapter {
             return;
         };
         let Some(conversation_url) = self
-            .discover_native_conversation_url(&request.profile_dir, &target.id, wait)
+            .discover_native_conversation_url(&request.profile_dir, target, wait)
             .await
         else {
             warn!(
@@ -1222,7 +1270,7 @@ impl CdpBrowserAdapter {
             last_url = current.url.clone();
             if current.kind == "page"
                 && !current.websocket_debugger_url.is_empty()
-                && current.url.starts_with(prefix)
+                && target_url_matches_prefix(&current.url, prefix)
             {
                 let runtime_host = timeout(
                     Duration::from_secs(2),
@@ -1321,7 +1369,7 @@ impl CdpBrowserAdapter {
             for target in targets.into_iter().filter(|target| {
                 target.kind == "page"
                     && !target.websocket_debugger_url.is_empty()
-                    && target.url.starts_with(prefix)
+                    && target_url_matches_prefix(&target.url, prefix)
             }) {
                 saw_matching_target = true;
                 last_url = target.url.clone();
@@ -1834,47 +1882,56 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         let persistent_url = existing_conversation
             .as_ref()
             .map(|conversation| conversation.conversation_url.as_str());
-        let ephemeral = thread_affinity.is_some() || self.use_ephemeral_chat(&request.binding);
+        let ephemeral = thread_affinity.is_none() && self.use_ephemeral_chat(&request.binding);
         let target = if let Some(url) = persistent_url {
-            let Some(prefix) = self.target_url_prefix(&request.binding) else {
-                return Err(BrowserProviderError::InvalidConfig(
-                    "native browser conversation affinity requires a target URL prefix".into(),
-                ));
-            };
-            if !url.starts_with(prefix) {
+            let new_chat_url = self.spec.new_chat_url.ok_or_else(|| {
+                BrowserProviderError::InvalidConfig(
+                    "native browser conversation affinity requires a new-chat URL".into(),
+                )
+            })?;
+            if !is_native_conversation_url(new_chat_url, url) {
                 return Err(BrowserProviderError::InvalidConfig(format!(
-                    "stored provider conversation URL does not match configured target prefix: {}",
+                    "stored provider conversation URL is not a recognized {} conversation: {}",
+                    self.spec.provider,
                     diagnostic_target_location(url)
                 )));
             }
-            let opened = self.open_target_url(&request.profile_dir, url).await?;
-            let navigation_timeout = Duration::from_millis(
-                request.binding.probe_timeout_ms.unwrap_or(8_000).max(15_000),
-            );
-            match self
-                .wait_for_target_navigation(
-                    &request.profile_dir,
-                    opened.clone(),
-                    self.target_url_prefix(&request.binding),
-                    navigation_timeout,
-                )
-                .await
+
+            if let Some(target) = self
+                .find_open_conversation_target(&request.profile_dir, url)
+                .await?
             {
-                Ok(target) => target,
-                Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
-                    self.close_target(&request.profile_dir, &opened.id).await;
-                    return Err(BrowserProviderError::AdapterIncompatible {
-                        account_id: request.account.id.clone(),
-                        code,
-                        message,
-                    });
-                }
-                Err(error) => {
-                    self.close_target(&request.profile_dir, &opened.id).await;
-                    return Err(error);
+                target
+            } else {
+                let opened = self.open_target_url(&request.profile_dir, url).await?;
+                let navigation_timeout = Duration::from_millis(
+                    request.binding.probe_timeout_ms.unwrap_or(8_000).max(15_000),
+                );
+                match self
+                    .wait_for_target_navigation(
+                        &request.profile_dir,
+                        opened.clone(),
+                        self.target_url_prefix(&request.binding),
+                        navigation_timeout,
+                    )
+                    .await
+                {
+                    Ok(target) => target,
+                    Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
+                        self.close_target(&request.profile_dir, &opened.id).await;
+                        return Err(BrowserProviderError::AdapterIncompatible {
+                            account_id: request.account.id.clone(),
+                            code,
+                            message,
+                        });
+                    }
+                    Err(error) => {
+                        self.close_target(&request.profile_dir, &opened.id).await;
+                        return Err(error);
+                    }
                 }
             }
-        } else if ephemeral {
+        } else if thread_affinity.is_some() || ephemeral {
             let opened = self.open_ephemeral_target(&request.profile_dir).await?;
             let navigation_timeout = Duration::from_millis(
                 request.binding.probe_timeout_ms.unwrap_or(8_000).max(15_000),
@@ -1998,6 +2055,26 @@ fn incremental_browser_body(body: &Value, unsynced_messages: &[Value]) -> Value 
     incremental
 }
 
+fn target_url_matches_prefix(candidate: &str, prefix: &str) -> bool {
+    if candidate.starts_with(prefix) {
+        return true;
+    }
+    let (Ok(candidate), Ok(prefix)) = (Url::parse(candidate), Url::parse(prefix)) else {
+        return false;
+    };
+    if candidate.scheme() != prefix.scheme() || candidate.host_str() != prefix.host_str() {
+        return false;
+    }
+    if prefix.host_str() == Some("gemini.google.com") {
+        let segments = candidate
+            .path_segments()
+            .map(|segments| segments.filter(|segment| !segment.is_empty()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        return segments.iter().any(|segment| *segment == "app" || *segment == "gem");
+    }
+    false
+}
+
 fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
     let Ok(base) = Url::parse(new_chat_url) else {
         return false;
@@ -2008,11 +2085,50 @@ fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
     if base.scheme() != url.scheme() || base.host_str() != url.host_str() {
         return false;
     }
-    let base_path = base.path().trim_end_matches('/');
-    let candidate_path = url.path().trim_end_matches('/');
-    candidate_path
-        .strip_prefix(base_path)
-        .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
+
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let app_index = segments.iter().position(|segment| *segment == "app");
+    if let Some(index) = app_index {
+        return segments.get(index + 1).is_some_and(|value| !value.is_empty());
+    }
+
+    if let Some(index) = segments.iter().position(|segment| *segment == "gem") {
+        return segments.get(index + 2).is_some_and(|value| !value.is_empty());
+    }
+
+    false
+}
+
+fn native_conversation_id(raw: &str) -> Option<String> {
+    let url = Url::parse(raw).ok()?;
+    let segments = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if let Some(index) = segments.iter().position(|segment| *segment == "app") {
+        return segments.get(index + 1).map(|value| (*value).to_string());
+    }
+    if let Some(index) = segments.iter().position(|segment| *segment == "gem") {
+        return segments.get(index + 2).map(|value| (*value).to_string());
+    }
+    None
+}
+
+fn same_conversation_url(left: &str, right: &str) -> bool {
+    let (Ok(left_url), Ok(right_url)) = (Url::parse(left), Url::parse(right)) else {
+        return left == right;
+    };
+    if left_url.scheme() != right_url.scheme() || left_url.host_str() != right_url.host_str() {
+        return false;
+    }
+    match (native_conversation_id(left), native_conversation_id(right)) {
+        (Some(left_id), Some(right_id)) => left_id == right_id,
+        _ => left_url.path().trim_end_matches('/') == right_url.path().trim_end_matches('/'),
+    }
 }
 
 fn diagnostic_target_location(raw: &str) -> String {
@@ -2564,6 +2680,22 @@ mod tests {
     }
 
     #[test]
+    fn gemini_account_scoped_app_urls_match_provider_prefix() {
+        assert!(target_url_matches_prefix(
+            "https://gemini.google.com/u/1/app/abc123",
+            "https://gemini.google.com/app"
+        ));
+        assert!(target_url_matches_prefix(
+            "https://gemini.google.com/gem/gem123/chat456",
+            "https://gemini.google.com/app"
+        ));
+        assert!(!target_url_matches_prefix(
+            "https://accounts.google.com/ServiceLogin",
+            "https://gemini.google.com/app"
+        ));
+    }
+
+    #[test]
     fn gemini_native_conversation_url_is_distinct_from_new_chat() {
         assert!(!is_native_conversation_url(
             "https://gemini.google.com/app",
@@ -2573,9 +2705,33 @@ mod tests {
             "https://gemini.google.com/app",
             "https://gemini.google.com/app/abc123"
         ));
+        assert!(is_native_conversation_url(
+            "https://gemini.google.com/app",
+            "https://gemini.google.com/u/1/app/abc123"
+        ));
+        assert!(is_native_conversation_url(
+            "https://gemini.google.com/app",
+            "https://gemini.google.com/gem/gem123/chat456"
+        ));
         assert!(!is_native_conversation_url(
             "https://gemini.google.com/app",
             "https://example.test/app/abc123"
+        ));
+    }
+
+    #[test]
+    fn conversation_url_comparison_uses_native_chat_identity() {
+        assert!(same_conversation_url(
+            "https://gemini.google.com/u/1/app/abc123?foo=bar",
+            "https://gemini.google.com/app/abc123#answer"
+        ));
+        assert!(same_conversation_url(
+            "https://gemini.google.com/gem/gem123/abc123",
+            "https://gemini.google.com/u/1/app/abc123"
+        ));
+        assert!(!same_conversation_url(
+            "https://gemini.google.com/u/1/app/abc123",
+            "https://gemini.google.com/u/1/app/other"
         ));
     }
 
