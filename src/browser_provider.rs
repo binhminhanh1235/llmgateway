@@ -1037,6 +1037,59 @@ impl CdpBrowserAdapter {
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))
     }
 
+    async fn wait_for_target_navigation(
+        &self,
+        profile_dir: &str,
+        initial: CdpTarget,
+        prefix: Option<&str>,
+        timeout_duration: Duration,
+    ) -> Result<CdpTarget, BrowserProviderError> {
+        let Some(prefix) = prefix else {
+            return Ok(initial);
+        };
+        if initial.id.trim().is_empty() {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: "<unknown>".into(),
+                code: "invalid_target".into(),
+                message: "DevTools created a browser target without an id".into(),
+            });
+        }
+        if initial.kind == "page"
+            && !initial.websocket_debugger_url.is_empty()
+            && initial.url.starts_with(prefix)
+        {
+            return Ok(initial);
+        }
+
+        let target_id = initial.id.clone();
+        let mut last_url = initial.url.clone();
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            let targets = self.targets(profile_dir).await?;
+            if let Some(current) = targets.into_iter().find(|target| target.id == target_id) {
+                last_url = current.url.clone();
+                if current.kind == "page"
+                    && !current.websocket_debugger_url.is_empty()
+                    && current.url.starts_with(prefix)
+                {
+                    return Ok(current);
+                }
+            }
+
+            if Instant::now() >= deadline {
+                return Err(BrowserProviderError::AdapterIncompatible {
+                    account_id: "<unknown>".into(),
+                    code: "target_navigation_timeout".into(),
+                    message: format!(
+                        "new browser tab did not navigate to '{prefix}' before adapter injection (last page: {})",
+                        diagnostic_target_location(&last_url)
+                    ),
+                });
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn close_target(&self, profile_dir: &str, target_id: &str) {
         if target_id.trim().is_empty() {
             return;
@@ -1464,7 +1517,33 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         let context = self.context(&request.binding, Some(&request.route.model));
         let ephemeral = self.use_ephemeral_chat(&request.binding);
         let target = if ephemeral {
-            self.open_ephemeral_target(&request.profile_dir).await?
+            let opened = self.open_ephemeral_target(&request.profile_dir).await?;
+            let navigation_timeout = Duration::from_millis(
+                request.binding.probe_timeout_ms.unwrap_or(8_000).max(15_000),
+            );
+            match self
+                .wait_for_target_navigation(
+                    &request.profile_dir,
+                    opened.clone(),
+                    self.target_url_prefix(&request.binding),
+                    navigation_timeout,
+                )
+                .await
+            {
+                Ok(target) => target,
+                Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
+                    self.close_target(&request.profile_dir, &opened.id).await;
+                    return Err(BrowserProviderError::AdapterIncompatible {
+                        account_id: request.account.id.clone(),
+                        code,
+                        message,
+                    });
+                }
+                Err(error) => {
+                    self.close_target(&request.profile_dir, &opened.id).await;
+                    return Err(error);
+                }
+            }
         } else {
             let targets = self.targets(&request.profile_dir).await?;
             self.select_target(&targets, self.target_url_prefix(&request.binding))
@@ -1521,6 +1600,22 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
 }
 
 
+
+fn diagnostic_target_location(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "<empty>".into();
+    }
+    let without_query = trimmed
+        .split_once('?')
+        .map(|(head, _)| head)
+        .unwrap_or(trimmed);
+    without_query
+        .split_once('#')
+        .map(|(head, _)| head)
+        .unwrap_or(without_query)
+        .to_string()
+}
 
 fn effective_target_url_prefix(
     provider_kind: &str,
@@ -2230,6 +2325,16 @@ mod tests {
         .await;
         assert_eq!(diagnostics.status, "adapter_incompatible");
         assert!(diagnostics.message.contains("prompt composer missing"));
+    }
+
+    #[test]
+    fn diagnostic_target_location_redacts_query_and_fragment() {
+        assert_eq!(
+            diagnostic_target_location("https://gemini.google.com/app?token=secret#fragment"),
+            "https://gemini.google.com/app"
+        );
+        assert_eq!(diagnostic_target_location("about:blank"), "about:blank");
+        assert_eq!(diagnostic_target_location(""), "<empty>");
     }
 
     #[test]
