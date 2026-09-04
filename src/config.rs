@@ -122,6 +122,10 @@ pub struct RoutingConfig {
     pub task_long_context_threshold_tokens: usize,
     #[serde(default = "default_routing_task_simple_max_input_tokens")]
     pub task_simple_max_input_tokens: usize,
+    #[serde(default = "default_routing_execution_preference")]
+    pub execution_preference: String,
+    #[serde(default = "default_true")]
+    pub api_fallback: bool,
 }
 
 impl Default for RoutingConfig {
@@ -141,6 +145,8 @@ impl Default for RoutingConfig {
             task_long_context_threshold_tokens:
                 default_routing_task_long_context_threshold_tokens(),
             task_simple_max_input_tokens: default_routing_task_simple_max_input_tokens(),
+            execution_preference: default_routing_execution_preference(),
+            api_fallback: true,
         }
     }
 }
@@ -379,6 +385,15 @@ impl AppConfig {
                 "routing.task_simple_max_input_tokens must be greater than zero and smaller than routing.task_long_context_threshold_tokens".into(),
             ));
         }
+        if !matches!(
+            self.routing.execution_preference.as_str(),
+            "browser-first" | "balanced" | "api-first"
+        ) {
+            return Err(ConfigError::Invalid(
+                "routing.execution_preference must be 'browser-first', 'balanced', or 'api-first'"
+                    .into(),
+            ));
+        }
 
         if !(0.5..=1.0).contains(&self.context.compaction_trigger_ratio) {
             return Err(ConfigError::Invalid(
@@ -601,6 +616,7 @@ fn default_routing_task_fit_max_bonus() -> i32 { 20 }
 fn default_routing_task_mismatch_penalty() -> i32 { 12 }
 fn default_routing_task_long_context_threshold_tokens() -> usize { 12_000 }
 fn default_routing_task_simple_max_input_tokens() -> usize { 800 }
+fn default_routing_execution_preference() -> String { "browser-first".into() }
 
 #[cfg(test)]
 mod tests {
@@ -737,5 +753,7 @@ enabled = true"#,
         assert_eq!(config.routing.task_mismatch_penalty, 12);
         assert_eq!(config.routing.task_long_context_threshold_tokens, 12_000);
         assert_eq!(config.routing.task_simple_max_input_tokens, 800);
+        assert_eq!(config.routing.execution_preference, "browser-first");
+        assert!(config.routing.api_fallback);
     }
 }
