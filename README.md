@@ -6,7 +6,7 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 
 > One conversation. Any model. Context intact.
 
-## v0.7 highlights
+## Current highlights (v0.26)
 
 - OpenAI-compatible `POST /v1/chat/completions`
 - OpenAI-compatible `POST /v1/responses`
@@ -345,13 +345,18 @@ A future retriever can add local/remote embeddings and reranking behind the same
 
 ## Roadmap
 
-1. Embedding/reranking backend for deeper paraphrase retrieval.
-2. Memory provenance, confidence, pinning, and deterministic conflict handling.
-3. Persistent quota-domain and usage tracking.
-4. Browser-session accounts with isolated persistent profiles.
-5. Cost, latency, capability, quota, and context-aware route scoring.
-6. Per-client API keys, budgets, and routing policies.
-7. Context/memory/route explanations and usage dashboards in the local UI.
+The roadmap is now **browser-first** because authenticated browser accounts are the primary local execution path. API-key accounts remain supported as optional fallbacks.
+
+Next milestones:
+
+1. **v0.27 Browser Account Reliability** - startup reconciliation, reconnect/recovery, explicit lifecycle states, browser-first preference, and failover/recovery E2E.
+2. **v0.28 Production-grade Browser Provider Adapters** - harden Gemini Web and Qwen Web adapters with diagnostics and regression fixtures.
+3. **v0.29 Browser Accounts UX** - add/login/verify/re-auth/restart/disable accounts from the local UI without hand-authoring several TOML sections.
+4. **v0.30 True Browser Streaming and Cancellation** - incremental CDP streaming, cancellation, backpressure, disconnect handling, and streaming compatibility tests.
+5. **v0.31 Browser-aware Routing Intelligence** - multi-account fairness, session-aware affinity, browser-specific recovery, and deterministic browser-to-API fallback.
+6. **v0.32+** - per-client policies, usage/cost intelligence, model/cost intelligence, production hardening, and distribution.
+
+See the detailed [browser-first roadmap](docs/roadmap.md), including release gates for v1.0.
 
 ## License
 
