@@ -494,7 +494,7 @@ impl ChromiumDriver {
             };
         }
 
-        let status = match self.status(session_id).await {
+        let mut status = match self.status(session_id).await {
             Ok(status) => status,
             Err(error) => {
                 let _ = self.sessions.mark_failed(session_id, &error.to_string()).await;
@@ -508,6 +508,68 @@ impl ChromiumDriver {
                 };
             }
         };
+
+        // A managed Chromium process can still be unhealthy when its loopback
+        // DevTools endpoint has disappeared. Do not confuse an OS process handle with
+        // a usable browser runtime. Previously-active sessions are restarted safely;
+        // an in-progress login is left alone to avoid racing launch startup.
+        if status.running
+            && !status.debugger_reachable
+            && matches!(session.status.as_str(), STATUS_READY | STATUS_DEGRADED)
+        {
+            if !self.config.auto_recover {
+                let current = self
+                    .sessions
+                    .mark_degraded(session_id, "Chromium process is running but CDP is unreachable")
+                    .await
+                    .unwrap_or(session.clone());
+                return ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: "recovery_disabled".into(),
+                    session_status: current.status,
+                    running: true,
+                    ready: false,
+                    error: current.last_error,
+                };
+            }
+
+            if let Err(error) = self.stop(session_id).await {
+                let current = self
+                    .sessions
+                    .mark_failed(
+                        session_id,
+                        &format!("Failed to stop unhealthy Chromium runtime: {error}"),
+                    )
+                    .await
+                    .unwrap_or(session.clone());
+                return ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: "recovery_failed".into(),
+                    session_status: current.status,
+                    running: true,
+                    ready: false,
+                    error: Some(error.to_string()),
+                };
+            }
+            status = match self.status(session_id).await {
+                Ok(status) => status,
+                Err(error) => {
+                    let current = self
+                        .sessions
+                        .mark_failed(session_id, &error.to_string())
+                        .await
+                        .unwrap_or(session.clone());
+                    return ChromiumReconcileView {
+                        session_id: session_id.to_string(),
+                        action: "recovery_failed".into(),
+                        session_status: current.status,
+                        running: false,
+                        ready: false,
+                        error: Some(error.to_string()),
+                    };
+                }
+            };
+        }
 
         if status.running {
             if status.ready_match.is_some() {
