@@ -919,6 +919,7 @@ struct CdpStreamCleanup {
     thread_id: Option<String>,
     stream_id: String,
     profile_dir: String,
+    adapter_script: String,
     ephemeral: bool,
     armed: bool,
 }
@@ -946,12 +947,14 @@ impl Drop for CdpStreamCleanup {
         let thread_id = self.thread_id.clone();
         let stream_id = self.stream_id.clone();
         let profile_dir = self.profile_dir.clone();
+        let adapter_script = self.adapter_script.clone();
         let ephemeral = self.ephemeral;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let _ = adapter
                     .evaluate_stream_control(
                         &target,
+                        &adapter_script,
                         "chat_stream_cancel",
                         &json!({"stream_id": stream_id}),
                         &account_id,
@@ -1500,11 +1503,12 @@ impl CdpBrowserAdapter {
     async fn evaluate_stream_control(
         &self,
         target: &CdpTarget,
+        script: &str,
         operation: &str,
         request: &Value,
         account_id: &str,
     ) -> Result<AdapterContractEnvelope, BrowserProviderError> {
-        let expression = build_stream_control_expression(operation, request)?;
+        let expression = build_stream_control_expression(script, operation, request)?;
         let value = evaluate_cdp(&target.websocket_debugger_url, &expression).await?;
         let envelope: AdapterContractEnvelope = serde_json::from_value(value).map_err(|error| {
             BrowserProviderError::AdapterIncompatible {
@@ -1637,6 +1641,7 @@ impl CdpBrowserAdapter {
                 thread_id: stream_thread_id,
                 stream_id: stream_id.clone(),
                 profile_dir,
+                adapter_script: script.clone(),
                 ephemeral,
                 armed: true,
             };
@@ -1666,6 +1671,7 @@ impl CdpBrowserAdapter {
                     remaining,
                     adapter.evaluate_stream_control(
                         &stream_target,
+                        &script,
                         "chat_stream_poll",
                         &json!({"stream_id": stream_id}),
                         &account_id,
@@ -2461,6 +2467,7 @@ try {
 }
 
 fn build_stream_control_expression(
+    script: &str,
     operation: &str,
     request: &Value,
 ) -> Result<String, BrowserProviderError> {
@@ -2470,6 +2477,7 @@ fn build_stream_control_expression(
         .map_err(|error| BrowserProviderError::InvalidConfig(error.to_string()))?;
     Ok(format!(
         r#"(async () => {{
+{script}
 const __adapter = globalThis.__LLMGATEWAY_ADAPTER__;
 const __operation = {operation_json};
 const __request = {request_json};
@@ -3056,6 +3064,21 @@ mod tests {
         assert!(browser_stream_event_has_assistant_output(&json!({
             "choices": [{"delta": {"tool_calls": [{"id": "call_1"}]}}]
         })));
+    }
+
+    #[test]
+    fn stream_control_expression_reinjects_adapter_contract() {
+        let expression = build_stream_control_expression(
+            "globalThis.__LLMGATEWAY_ADAPTER__ = {meta:{contract_version:1,id:'x',provider:'x'},streamPoll:async()=>({events:[],done:false})};",
+            "chat_stream_poll",
+            &json!({"stream_id":"stream-1"}),
+        )
+        .unwrap();
+        assert!(expression.contains("globalThis.__LLMGATEWAY_ADAPTER__ ="));
+        assert!(expression.contains("streamPoll"));
+        let injected = expression.find("globalThis.__LLMGATEWAY_ADAPTER__ =").unwrap();
+        let read = expression.find("const __adapter = globalThis.__LLMGATEWAY_ADAPTER__;").unwrap();
+        assert!(injected < read);
     }
 
     #[test]

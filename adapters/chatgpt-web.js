@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04.3";
+  const ADAPTER_VERSION = "2026.09.04.4";
 
   const defaults = {
     input: [
@@ -389,6 +389,7 @@
 
   const startNewConversation = async (context) => {
     if (!context?.start_new_conversation) return;
+    if (freshChatLocation() && responseLeaves(context).length === 0) return;
     const newChat = await waitFor(() => queryVisible(context, "newChat"), 8000);
     if (!newChat) {
       throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT New chat control was not found");
@@ -447,7 +448,7 @@
     state.lastProgressAt = now;
   };
 
-  const startStreamJob = (request, context) => {
+  const startStreamJob = async (request, context) => {
     const streamId = "chatgpt_stream_" + Date.now() + "_" + Math.random().toString(36).slice(2);
     const state = {
       streamId,
@@ -469,31 +470,43 @@
     };
     streamJobs.set(streamId, state);
 
+    let before;
+    try {
+      await selectModel(context);
+      markStreamProgress(state, "model-ready");
+      await startNewConversation(context);
+      markStreamProgress(state, "conversation-ready");
+      const composer = await waitFor(() => queryVisible(context, "input"), 15000);
+      if (!composer) throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT prompt composer disappeared");
+      markStreamProgress(state, "composer-ready");
+
+      before = await captureResponseBaseline(context);
+      markStreamProgress(state, "history-ready");
+      const prompt = formatMessages(request);
+      if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
+      setComposer(composer, prompt);
+      markStreamProgress(state, "prompt-ready");
+
+      const send = await waitFor(() => queryVisible(context, "send"), 5000);
+      if (!send) {
+        if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: ChatGPT session expired");
+        throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT send control was not found");
+      }
+      send.click();
+      markStreamProgress(state, "submitted");
+    } catch (error) {
+      state.error = classifyStreamError(error);
+      state.done = true;
+      markStreamProgress(state, "failed");
+      return {
+        stream_id: streamId,
+        status: 200,
+        content_type: "text/event-stream"
+      };
+    }
+
     Promise.resolve().then(async () => {
       try {
-        await selectModel(context);
-        markStreamProgress(state, "model-ready");
-        await startNewConversation(context);
-        markStreamProgress(state, "conversation-ready");
-        const composer = await waitFor(() => queryVisible(context, "input"), 15000);
-        if (!composer) throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT prompt composer disappeared");
-        markStreamProgress(state, "composer-ready");
-
-        const before = await captureResponseBaseline(context);
-        markStreamProgress(state, "history-ready");
-        const prompt = formatMessages(request);
-        if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
-        setComposer(composer, prompt);
-        markStreamProgress(state, "prompt-ready");
-
-        const send = await waitFor(() => queryVisible(context, "send"), 5000);
-        if (!send) {
-          if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: ChatGPT session expired");
-          throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT send control was not found");
-        }
-        send.click();
-        markStreamProgress(state, "submitted");
-
         const startedAt = Date.now();
         let last = "";
         let stableSince = 0;
