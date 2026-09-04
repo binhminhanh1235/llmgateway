@@ -96,7 +96,7 @@ pub fn classify(body: Option<&Value>, config: &RoutingConfig) -> TaskProfile {
         Some(TaskKind::Coding) => (TaskKind::Coding, true, reasoning, long_context, false),
         Some(TaskKind::Reasoning) => (TaskKind::Reasoning, coding, true, long_context, false),
         Some(TaskKind::LongContext) => (TaskKind::LongContext, coding, reasoning, true, false),
-        Some(TaskKind::SimpleChat) => (TaskKind::SimpleChat, false, false, false, true),
+        Some(TaskKind::SimpleChat) => (TaskKind::SimpleChat, false, false, long_context, true),
         Some(TaskKind::General) => (TaskKind::General, false, false, long_context, false),
         None if long_context => (TaskKind::LongContext, coding, reasoning, true, false),
         None if coding => (TaskKind::Coding, true, reasoning, false, false),
@@ -441,6 +441,20 @@ mod tests {
         let fit = route_fit(&profile, &route(&["chat"], Some(4_096)), &config());
         assert_eq!(fit.exclusion_reason, Some("context_window_too_small"));
         assert_eq!(fit.snapshot.context_sufficient, Some(false));
+    }
+
+    #[test]
+    fn explicit_simple_chat_cannot_bypass_context_window_safety() {
+        let body = json!({
+            "llmgateway_task": "simple_chat",
+            "max_tokens": 10_000,
+            "messages": [{"role":"user","content":"hello"}]
+        });
+        let profile = classify(Some(&body), &config());
+        assert_eq!(profile.kind, TaskKind::SimpleChat);
+        assert!(profile.long_context);
+        let fit = route_fit(&profile, &route(&["chat", "cheap"], Some(4_096)), &config());
+        assert_eq!(fit.exclusion_reason, Some("context_window_too_small"));
     }
 
     #[test]
