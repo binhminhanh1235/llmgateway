@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, Row, SqlitePool};
 use std::{path::Path, str::FromStr, sync::Arc};
@@ -60,6 +60,7 @@ pub struct AdaptiveTraceSample {
     pub route_id: String,
     pub success: bool,
     pub duration_ms: u64,
+    pub observed_at_ms: i64,
 }
 
 pub struct AttemptRecord<'a> {
@@ -244,9 +245,9 @@ impl ExecutionTraceStore {
         per_route_limit: usize,
     ) -> Result<Vec<AdaptiveTraceSample>, ExecutionTraceError> {
         let rows = sqlx::query(
-            "SELECT id, route_id, outcome, duration_ms
+            "SELECT id, route_id, outcome, duration_ms, created_at
              FROM (
-                 SELECT id, route_id, outcome, duration_ms,
+                 SELECT id, route_id, outcome, duration_ms, created_at,
                         ROW_NUMBER() OVER (PARTITION BY route_id ORDER BY id DESC) AS route_rank
                  FROM execution_attempts
                  WHERE outcome = 'success'
@@ -266,10 +267,15 @@ impl ExecutionTraceStore {
             .map(|row| {
                 let outcome: String = row.get("outcome");
                 let duration_ms: i64 = row.get("duration_ms");
+                let created_at: String = row.get("created_at");
+                let observed_at_ms = DateTime::parse_from_rfc3339(&created_at)
+                    .map(|value| value.timestamp_millis())
+                    .unwrap_or(0);
                 AdaptiveTraceSample {
                     route_id: row.get("route_id"),
                     success: outcome == "success",
                     duration_ms: duration_ms.max(0) as u64,
+                    observed_at_ms,
                 }
             })
             .collect())
