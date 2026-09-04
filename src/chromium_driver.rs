@@ -83,8 +83,6 @@ pub enum ChromiumDriverError {
     ExecutableNotFound,
     #[error("chromium process for session '{0}' is already running")]
     AlreadyRunning(String),
-    #[error("chromium process for session '{0}' is not running")]
-    NotRunning(String),
     #[error("failed to launch Chromium: {0}")]
     Launch(#[source] std::io::Error),
     #[error("Chromium did not expose DevTools before the startup timeout")]
