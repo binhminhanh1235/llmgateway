@@ -182,6 +182,15 @@ impl Router {
         body: Option<&Value>,
     ) -> RouteDecisionTrace {
         let config = self.live_config.snapshot();
+        self.explain_for_body_with_config(config, requested_model, body).await
+    }
+
+    pub async fn explain_for_body_with_config(
+        &self,
+        config: Arc<AppConfig>,
+        requested_model: &str,
+        body: Option<&Value>,
+    ) -> RouteDecisionTrace {
         let evaluation = self
             .evaluate_with_config(config.clone(), requested_model, body)
             .await;
