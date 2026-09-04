@@ -55,6 +55,13 @@ pub struct ExecutionTrace {
     pub attempts: Vec<ExecutionAttempt>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AdaptiveTraceSample {
+    pub route_id: String,
+    pub success: bool,
+    pub duration_ms: u64,
+}
+
 pub struct AttemptRecord<'a> {
     pub request_id: &'a str,
     pub attempt_index: usize,
@@ -127,6 +134,12 @@ impl ExecutionTraceStore {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_execution_attempts_request
              ON execution_attempts(request_id, attempt_index)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_execution_attempts_route
+             ON execution_attempts(route_id, id DESC)",
         )
         .execute(&self.pool)
         .await?;
@@ -224,6 +237,42 @@ impl ExecutionTraceStore {
             })
             .collect();
         Ok(ExecutionTrace { summary, attempts })
+    }
+
+    pub async fn adaptive_samples(
+        &self,
+        per_route_limit: usize,
+    ) -> Result<Vec<AdaptiveTraceSample>, ExecutionTraceError> {
+        let rows = sqlx::query(
+            "SELECT id, route_id, outcome, duration_ms
+             FROM (
+                 SELECT id, route_id, outcome, duration_ms,
+                        ROW_NUMBER() OVER (PARTITION BY route_id ORDER BY id DESC) AS route_rank
+                 FROM execution_attempts
+                 WHERE outcome = 'success'
+                    OR outcome = 'transport_error'
+                    OR status_code = 408
+                    OR status_code >= 500
+             )
+             WHERE route_rank <= ?
+             ORDER BY id ASC",
+        )
+        .bind(per_route_limit.clamp(1, 10_000) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let outcome: String = row.get("outcome");
+                let duration_ms: i64 = row.get("duration_ms");
+                AdaptiveTraceSample {
+                    route_id: row.get("route_id"),
+                    success: outcome == "success",
+                    duration_ms: duration_ms.max(0) as u64,
+                }
+            })
+            .collect())
     }
 
     pub async fn list(&self, limit: usize) -> Result<Vec<ExecutionTraceSummary>, ExecutionTraceError> {
