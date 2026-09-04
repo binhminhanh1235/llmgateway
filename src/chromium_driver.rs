@@ -214,6 +214,10 @@ impl ChromiumDriver {
         self.config.enabled
     }
 
+    pub fn reconcile_interval_seconds(&self) -> u64 {
+        self.config.reconcile_interval_seconds
+    }
+
     pub async fn launch(&self, session_id: &str) -> Result<ChromiumLaunchView, ChromiumDriverError> {
         let driver_session = self.driver_session(session_id)?.clone();
         if !driver_session.enabled {
@@ -223,18 +227,17 @@ impl ChromiumDriver {
         if !session.enabled {
             return Err(ChromiumDriverError::SessionDisabled(session_id.to_string()));
         }
+
         self.remove_finished_process(session_id).await;
-        {
-            let processes = self.processes.lock().await;
-            if processes.contains_key(session_id) {
-                return Err(ChromiumDriverError::AlreadyRunning(session_id.to_string()));
-            }
+        let existing = self.status(session_id).await?;
+        if existing.running {
+            return Err(ChromiumDriverError::AlreadyRunning(session_id.to_string()));
         }
 
         let executable = resolve_executable(self.config.executable.as_deref())?;
         let profile_dir = PathBuf::from(&session.profile_dir);
         let devtools_file = profile_dir.join("DevToolsActivePort");
-        if devtools_file.exists() {
+        if existing.debugger_port.is_some() && !existing.debugger_reachable {
             let _ = fs::remove_file(&devtools_file);
         }
 
@@ -262,7 +265,7 @@ impl ChromiumDriver {
             Err(error) => {
                 let _ = self
                     .sessions
-                    .require_attention(session_id, &format!("Chromium launch failed: {error}"))
+                    .mark_failed(session_id, &format!("Chromium launch failed: {error}"))
                     .await;
                 return Err(ChromiumDriverError::Launch(error));
             }
@@ -290,10 +293,7 @@ impl ChromiumDriver {
             Ok(port) => port,
             Err(error) => {
                 let _ = self.stop(session_id).await;
-                let _ = self
-                    .sessions
-                    .require_attention(session_id, &error.to_string())
-                    .await;
+                let _ = self.sessions.mark_failed(session_id, &error.to_string()).await;
                 return Err(error);
             }
         };
@@ -327,21 +327,26 @@ impl ChromiumDriver {
 
         let profile_dir = PathBuf::from(&session.profile_dir);
         let debugger_port = read_debugger_port(&profile_dir.join("DevToolsActivePort")).ok();
-        let pages = if let Some(port) = debugger_port {
-            self.devtools_pages(port).await.unwrap_or_default()
+        let (debugger_reachable, pages) = if let Some(port) = debugger_port {
+            match self.devtools_pages(port).await {
+                Ok(pages) => (true, pages),
+                Err(_) => (false, Vec::new()),
+            }
         } else {
-            Vec::new()
+            (false, Vec::new())
         };
         let ready_match = self.match_ready_url(session_id, &pages)?;
-        let debugger_alive = debugger_port.is_some() && !pages.is_empty();
+        let managed = process_meta.is_some();
 
         Ok(ChromiumStatusView {
             session_id: session_id.to_string(),
-            running: process_meta.is_some() || debugger_alive,
+            running: managed || debugger_reachable,
+            managed,
             pid: process_meta.as_ref().and_then(|meta| meta.0),
             executable: process_meta.as_ref().map(|meta| meta.1.clone()),
             started_at: process_meta.as_ref().map(|meta| meta.2.clone()),
             debugger_port,
+            debugger_reachable,
             pages,
             ready_match,
         })
@@ -350,17 +355,33 @@ impl ChromiumDriver {
     pub async fn verify(&self, session_id: &str) -> Result<ChromiumVerifyView, ChromiumDriverError> {
         let status = self.status(session_id).await?;
         let authenticated = status.ready_match.is_some();
+        let session = self.sessions.session(session_id).await?;
+
         if authenticated {
             self.sessions.mark_ready(session_id).await?;
-        } else if !status.running {
-            let session = self.sessions.session(session_id).await?;
-            if session.status == "login_in_progress" {
-                let _ = self
-                    .sessions
-                    .require_attention(session_id, "Chromium exited before login was verified")
-                    .await;
+        } else if status.running {
+            if matches!(
+                session.status.as_str(),
+                STATUS_STARTING | STATUS_DEGRADED | STATUS_FAILED
+            ) {
+                self.sessions.mark_login_required(session_id, None).await?;
+            }
+        } else {
+            match session.status.as_str() {
+                STATUS_READY | STATUS_DEGRADED => {
+                    self.sessions
+                        .mark_degraded(session_id, "Chromium runtime is not reachable")
+                        .await?;
+                }
+                STATUS_STARTING => {
+                    self.sessions
+                        .mark_failed(session_id, "Chromium exited before login was verified")
+                        .await?;
+                }
+                _ => {}
             }
         }
+
         Ok(ChromiumVerifyView {
             authenticated,
             session_id: session_id.to_string(),
@@ -378,14 +399,260 @@ impl ChromiumDriver {
         if let Some(ref mut managed) = process {
             let _ = managed.child.kill().await;
             let _ = managed.child.wait().await;
-        } else {
-            let session = self.sessions.session(session_id).await?;
-            let profile_dir = PathBuf::from(session.profile_dir);
-            if read_debugger_port(&profile_dir.join("DevToolsActivePort")).is_err() {
-                return Err(ChromiumDriverError::NotRunning(session_id.to_string()));
-            }
         }
+
+        let session = self.sessions.session(session_id).await?;
+        let devtools_file = PathBuf::from(&session.profile_dir).join("DevToolsActivePort");
+        if devtools_file.exists() {
+            let _ = fs::remove_file(&devtools_file);
+        }
+        self.sessions.mark_stopped(session_id).await?;
         self.status(session_id).await
+    }
+
+    pub async fn reconcile_all(&self) -> ChromiumReconcileSummary {
+        if !self.enabled() {
+            return ChromiumReconcileSummary {
+                checked: 0,
+                ready: 0,
+                recovered: 0,
+                attention: 0,
+                sessions: Vec::new(),
+            };
+        }
+
+        let session_ids = self.config.sessions.keys().cloned().collect::<Vec<_>>();
+        let mut results = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            results.push(self.reconcile_session(&session_id).await);
+        }
+
+        ChromiumReconcileSummary {
+            checked: results.len(),
+            ready: results.iter().filter(|item| item.ready).count(),
+            recovered: results.iter().filter(|item| item.action == "recovered").count(),
+            attention: results
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item.session_status.as_str(),
+                        STATUS_LOGIN_REQUIRED | STATUS_REQUIRES_ATTENTION | STATUS_FAILED
+                    )
+                })
+                .count(),
+            sessions: results,
+        }
+    }
+
+    async fn reconcile_session(&self, session_id: &str) -> ChromiumReconcileView {
+        let session = match self.sessions.session(session_id).await {
+            Ok(session) => session,
+            Err(error) => {
+                return ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: "error".into(),
+                    session_status: STATUS_FAILED.into(),
+                    running: false,
+                    ready: false,
+                    error: Some(error.to_string()),
+                }
+            }
+        };
+
+        if !session.enabled {
+            return ChromiumReconcileView {
+                session_id: session_id.to_string(),
+                action: "disabled".into(),
+                session_status: session.status,
+                running: false,
+                ready: false,
+                error: None,
+            };
+        }
+
+        let status = match self.status(session_id).await {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = self.sessions.mark_failed(session_id, &error.to_string()).await;
+                return ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: "status_error".into(),
+                    session_status: STATUS_FAILED.into(),
+                    running: false,
+                    ready: false,
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+
+        if status.running {
+            if status.ready_match.is_some() {
+                let action = if session.status == STATUS_READY {
+                    "verified"
+                } else {
+                    "reconnected"
+                };
+                let current = self
+                    .sessions
+                    .mark_ready(session_id)
+                    .await
+                    .unwrap_or(session.clone());
+                return ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: action.into(),
+                    session_status: current.status,
+                    running: true,
+                    ready: true,
+                    error: None,
+                };
+            }
+
+            let current = if session.status == STATUS_READY {
+                self.sessions
+                    .mark_degraded(session_id, "Authenticated provider page is not visible")
+                    .await
+                    .unwrap_or(session.clone())
+            } else if matches!(
+                session.status.as_str(),
+                STATUS_STARTING | STATUS_DEGRADED | STATUS_FAILED
+            ) {
+                self.sessions
+                    .mark_login_required(session_id, None)
+                    .await
+                    .unwrap_or(session.clone())
+            } else {
+                session.clone()
+            };
+            return ChromiumReconcileView {
+                session_id: session_id.to_string(),
+                action: "login_required".into(),
+                session_status: current.status,
+                running: true,
+                ready: false,
+                error: current.last_error,
+            };
+        }
+
+        if status.debugger_port.is_some() && !status.debugger_reachable {
+            let devtools_file = PathBuf::from(&session.profile_dir).join("DevToolsActivePort");
+            let _ = fs::remove_file(devtools_file);
+        }
+
+        if matches!(
+            session.status.as_str(),
+            STATUS_STOPPED | STATUS_LOGIN_REQUIRED | STATUS_REQUIRES_ATTENTION
+        ) {
+            return ChromiumReconcileView {
+                session_id: session_id.to_string(),
+                action: "idle".into(),
+                session_status: session.status,
+                running: false,
+                ready: false,
+                error: session.last_error,
+            };
+        }
+
+        if !self.config.auto_recover {
+            let current = self
+                .sessions
+                .mark_degraded(session_id, "Chromium runtime is not reachable")
+                .await
+                .unwrap_or(session.clone());
+            return ChromiumReconcileView {
+                session_id: session_id.to_string(),
+                action: "recovery_disabled".into(),
+                session_status: current.status,
+                running: false,
+                ready: false,
+                error: current.last_error,
+            };
+        }
+
+        if !matches!(
+            session.status.as_str(),
+            STATUS_READY | STATUS_DEGRADED | STATUS_STARTING
+        ) {
+            return ChromiumReconcileView {
+                session_id: session_id.to_string(),
+                action: "idle".into(),
+                session_status: session.status,
+                running: false,
+                ready: false,
+                error: session.last_error,
+            };
+        }
+
+        if let Err(error) = self.launch(session_id).await {
+            let current = self
+                .sessions
+                .mark_failed(session_id, &format!("Automatic browser recovery failed: {error}"))
+                .await
+                .unwrap_or(session.clone());
+            return ChromiumReconcileView {
+                session_id: session_id.to_string(),
+                action: "recovery_failed".into(),
+                session_status: current.status,
+                running: false,
+                ready: false,
+                error: Some(error.to_string()),
+            };
+        }
+
+        let wait = Duration::from_secs(self.config.startup_timeout_seconds.min(5).max(1));
+        let deadline = Instant::now() + wait;
+        loop {
+            match self.verify(session_id).await {
+                Ok(verification) if verification.authenticated => {
+                    let current = self
+                        .sessions
+                        .session(session_id)
+                        .await
+                        .unwrap_or(session.clone());
+                    return ChromiumReconcileView {
+                        session_id: session_id.to_string(),
+                        action: "recovered".into(),
+                        session_status: current.status,
+                        running: true,
+                        ready: true,
+                        error: None,
+                    };
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let current = self
+                        .sessions
+                        .mark_failed(session_id, &format!("Automatic verification failed: {error}"))
+                        .await
+                        .unwrap_or(session.clone());
+                    return ChromiumReconcileView {
+                        session_id: session_id.to_string(),
+                        action: "recovery_failed".into(),
+                        session_status: current.status,
+                        running: false,
+                        ready: false,
+                        error: Some(error.to_string()),
+                    };
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        let current = self
+            .sessions
+            .mark_login_required(session_id, None)
+            .await
+            .unwrap_or(session);
+        ChromiumReconcileView {
+            session_id: session_id.to_string(),
+            action: "login_required".into(),
+            session_status: current.status,
+            running: true,
+            ready: false,
+            error: current.last_error,
+        }
     }
 
     fn driver_session(&self, session_id: &str) -> Result<&ChromiumSessionConfig, ChromiumDriverError> {
