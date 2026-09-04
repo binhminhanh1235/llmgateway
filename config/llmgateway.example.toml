@@ -15,6 +15,9 @@ database_url = "sqlite://data/llmgateway.db"
 [browser]
 enabled = false
 profile_root = "data/browser-profiles"
+# Auth material captured after successful browser login is encrypted at rest here.
+# The browser profile remains the interactive re-auth source; adapters never expose raw cookies via API.
+auth_vault_root = "data/browser-auth"
 
 # Enable the browser section and one or more sessions when you are ready to use a browser adapter.
 # [browser.sessions.chatgpt-web-primary]
