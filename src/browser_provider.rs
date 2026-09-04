@@ -1552,6 +1552,12 @@ impl CdpBrowserAdapter {
             });
         }
 
+        warn!(
+            thread_id = ?request.thread_id,
+            provider_kind = self.spec.kind,
+            account = %request.account.id,
+            "evaluating streaming native conversation affinity"
+        );
         let native_affinity_request =
             (request.thread_id.is_some() && self.supports_native_conversation_affinity())
                 .then(|| request.clone());
