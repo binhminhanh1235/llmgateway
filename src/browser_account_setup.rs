@@ -40,6 +40,11 @@ pub struct BrowserAccountProviderPreset {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct BrowserAccountEnabledRequest {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateBrowserAccountRequest {
     pub provider: String,
     #[serde(default)]
@@ -99,6 +104,48 @@ pub async fn browser_account_setup_presets(
         }),
         None,
     )
+}
+
+pub async fn set_browser_account_enabled(
+    State(state): State<AppState>,
+    axum::extract::Path(account_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<BrowserAccountEnabledRequest>,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+
+    let config_path =
+        env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
+    match apply_browser_account_enabled(&config_path, &account_id, body.enabled) {
+        Ok(()) => match activate_browser_account_setup(&state, &config_path).await {
+            Ok(()) => json_response(
+                StatusCode::OK,
+                json!({
+                    "account_id": account_id,
+                    "enabled": body.enabled,
+                    "restart_required": false
+                }),
+                None,
+            ),
+            Err(error) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "browser_account_hot_activation_error",
+                &error.to_string(),
+            ),
+        },
+        Err(BrowserAccountSetupError::Invalid(message)) => json_error(
+            StatusCode::BAD_REQUEST,
+            "browser_account_setup_error",
+            &message,
+        ),
+        Err(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "browser_account_setup_error",
+            &error.to_string(),
+        ),
+    }
 }
 
 pub async fn create_browser_account_setup(
@@ -187,6 +234,58 @@ async fn activate_browser_account_setup(
         .map_err(|error| BrowserAccountSetupError::Activation(error.to_string()))?;
 
     state.gateway.live_config.replace(app_config);
+    Ok(())
+}
+
+pub fn apply_browser_account_enabled(
+    path: impl AsRef<Path>,
+    account_id: &str,
+    enabled: bool,
+) -> Result<(), BrowserAccountSetupError> {
+    validate_id("account_id", account_id)?;
+    let path = path.as_ref();
+    let raw = fs::read_to_string(path)?;
+    let current = AppConfig::parse(&raw)?;
+    let account = current.account(account_id).ok_or_else(|| {
+        BrowserAccountSetupError::Invalid(format!("unknown account '{account_id}'"))
+    })?;
+    let provider = current.provider(&account.provider).ok_or_else(|| {
+        BrowserAccountSetupError::Invalid(format!(
+            "account '{account_id}' references unknown provider '{}'",
+            account.provider
+        ))
+    })?;
+    if !provider.is_browser() {
+        return Err(BrowserAccountSetupError::Invalid(format!(
+            "account '{account_id}' is not a browser account"
+        )));
+    }
+
+    let mut doc = raw.parse::<DocumentMut>()?;
+    let managed = doc
+        .get("browser")
+        .and_then(Item::as_table)
+        .and_then(|browser| browser.get("bindings"))
+        .and_then(Item::as_table)
+        .is_some_and(|bindings| bindings.contains_key(account_id));
+    if !managed {
+        return Err(BrowserAccountSetupError::Invalid(format!(
+            "browser account '{account_id}' is not managed by the browser account wizard"
+        )));
+    }
+
+    let accounts = ensure_aot(doc.as_table_mut(), "accounts")?;
+    let table = accounts
+        .iter_mut()
+        .find(|table| table.get("id").and_then(Item::as_str) == Some(account_id))
+        .ok_or_else(|| {
+            BrowserAccountSetupError::Invalid(format!("unknown account '{account_id}'"))
+        })?;
+    table["enabled"] = value(enabled);
+
+    let rendered = doc.to_string();
+    AppConfig::parse(&rendered)?;
+    write_validated_config(path, &rendered)?;
     Ok(())
 }
 
