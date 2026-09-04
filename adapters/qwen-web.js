@@ -2,7 +2,7 @@
 // Contract v1. Runs inside an authenticated chat.qwen.ai page through loopback CDP.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04";
+  const ADAPTER_VERSION = "2026.09.5";
 
   const defaults = {
     input: [
@@ -269,6 +269,17 @@
     choices: [{ index: 0, delta, finish_reason: finishReason }]
   });
 
+  const markStreamProgress = (state, phase, heartbeat = false) => {
+    const nextPhase = String(phase || "active");
+    const now = Date.now();
+    const phaseChanged = state.progressPhase !== nextPhase;
+    const heartbeatDue = heartbeat && now - Number(state.lastProgressAt || 0) >= 1000;
+    if (!phaseChanged && !heartbeatDue) return;
+    state.progressPhase = nextPhase;
+    state.progressSeq = Number(state.progressSeq || 0) + 1;
+    state.lastProgressAt = now;
+  };
+
   const startStreamJob = (request, context) => {
     const streamId = "qwen_stream_" + Date.now() + "_" + Math.random().toString(36).slice(2);
     const state = {
@@ -284,21 +295,28 @@
       roleEmitted: false,
       cancelled: false,
       error: null,
-      toolCalls: null
+      toolCalls: null,
+      progressSeq: 1,
+      progressPhase: "starting",
+      lastProgressAt: Date.now()
     };
     streamJobs.set(streamId, state);
 
     Promise.resolve().then(async () => {
       try {
         await selectModel(context);
+        markStreamProgress(state, "model-ready");
         const composer = await waitFor(() => queryFirst(context, "input"), 15000);
         if (!composer) throw new Error("ADAPTER_INCOMPATIBLE: Qwen prompt composer disappeared");
+        markStreamProgress(state, "composer-ready");
 
         const before = responseTexts(context);
         const baselineText = before[before.length - 1] || "";
+        markStreamProgress(state, "history-ready");
         const prompt = formatMessages(request);
         if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
         setComposer(composer, prompt);
+        markStreamProgress(state, "prompt-ready");
 
         const send = await waitFor(() => queryFirst(context, "send"), 5000);
         if (!send) {
@@ -306,6 +324,7 @@
           throw new Error("ADAPTER_INCOMPATIBLE: Qwen send control was not found");
         }
         send.click();
+        markStreamProgress(state, "submitted");
 
         const startedAt = Date.now();
         let last = "";
@@ -324,6 +343,10 @@
           const candidate = responses[responses.length - 1] || "";
           const responseAdvanced = responses.length > before.length || (candidate && candidate !== baselineText);
           const generating = Boolean(queryFirst(context, "completion"));
+          const submittedAndWaiting = generating || !queryFirst(context, "send");
+          if (submittedAndWaiting) {
+            markStreamProgress(state, generating ? "generating" : "submitted-wait", true);
+          }
           if (!responseAdvanced) {
             await sleep(120);
             continue;
@@ -333,6 +356,7 @@
             answer = candidate;
             state.answer = candidate;
             stableSince = Date.now();
+            markStreamProgress(state, "response-advanced", true);
           } else if (candidate && !generating && stableSince && Date.now() - stableSince >= 900) {
             answer = candidate;
             state.answer = candidate;
@@ -345,9 +369,11 @@
         state.answer = answer;
         state.toolCalls = parseToolCalls(answer, request);
         state.done = true;
+        markStreamProgress(state, "completed");
       } catch (error) {
         state.error = classifyStreamError(error);
         state.done = true;
+        markStreamProgress(state, "failed");
       } finally {
         const cleanupTimer = setTimeout(() => {
           if (streamJobs.get(streamId) === state) streamJobs.delete(streamId);
@@ -410,8 +436,15 @@
     }
 
     const done = state.done && state.finalEmitted;
+    const result = {
+      events,
+      done,
+      error: null,
+      progress_seq: state.progressSeq,
+      progress_phase: state.progressPhase
+    };
     if (done) streamJobs.delete(state.streamId);
-    return { events, done, error: null };
+    return result;
   };
 
   const cancelStreamJob = (streamId) => {
