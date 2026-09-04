@@ -1,6 +1,6 @@
 # llmgateway roadmap
 
-This roadmap tracks the path from the current v0.27 browser-first beta to a stable v1.0.
+This roadmap tracks the path from the current v0.28 browser-first beta to a stable v1.0.
 
 ## Product direction
 
@@ -38,7 +38,7 @@ The security boundary stays unchanged:
 - CAPTCHA/2FA and normal authentication are completed interactively by the user;
 - browser integrations must respect provider terms, anti-abuse controls and quota limits.
 
-## Current baseline: v0.27
+## Current baseline: v0.28
 
 Already implemented:
 
@@ -65,9 +65,18 @@ Already implemented:
 - stale CDP detection and safe profile relaunch after an unexpected browser crash;
 - explicit browser lifecycle states and browser-specific Account Readiness reasons;
 - browser-first virtual-model routing with configurable API fallback;
-- live CDP readiness checks before browser-CDP routes are selected.
+- live CDP readiness checks before browser-CDP routes are selected;
+- versioned browser adapter contract v1;
+- first-class `browser-gemini` and `browser-qwen` providers;
+- embedded Gemini/Qwen adapter scripts with selector fallbacks;
+- adapter health/version/page-signature diagnostics;
+- explicit provider-page drift detection;
+- configurable route-model to provider-UI model labels;
+- stateless per-request provider tabs using the authenticated profile;
+- prompt-mediated OpenAI tool-call bridge for coding-agent clients;
+- deterministic fake-page and fake-CDP adapter fixtures.
 
-The remaining browser work is therefore mostly **provider completeness, setup UX, streaming and deeper multi-browser intelligence**, rather than inventing a second routing architecture.
+The remaining browser work is therefore mostly **setup UX, true streaming and deeper multi-browser intelligence**, rather than inventing a second routing architecture.
 
 ---
 
@@ -117,11 +126,13 @@ A normal browser-account user should not need to inspect process IDs, DevTools p
 
 ---
 
-## v0.28 - Production-grade Browser Provider Adapters
+## v0.28 - Production-grade Browser Provider Adapters ✅
 
-**Priority: P0**
+**Status: shipped**
 
-Goal: Gemini Web and Qwen Web should be usable as real first-class execution providers rather than experimental adapter examples.
+Gemini Web and Qwen Web now have first-class provider kinds behind a versioned adapter contract. The release adds pre-route probes, drift diagnostics, model mapping, stateless provider tabs, coding-agent tool bridging, and deterministic fake-page/CDP regression fixtures.
+
+Original scope and acceptance criteria are retained below as the release contract.
 
 ### Scope
 
