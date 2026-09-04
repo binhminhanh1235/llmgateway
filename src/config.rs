@@ -102,6 +102,8 @@ pub struct RoutingConfig {
     pub adaptive_min_samples: u64,
     #[serde(default = "default_routing_adaptive_history_samples")]
     pub adaptive_history_samples: usize,
+    #[serde(default = "default_routing_adaptive_stale_after_seconds")]
+    pub adaptive_stale_after_seconds: u64,
     #[serde(default = "default_routing_adaptive_ewma_alpha")]
     pub adaptive_ewma_alpha: f64,
     #[serde(default = "default_routing_adaptive_latency_target_ms")]
@@ -118,6 +120,7 @@ impl Default for RoutingConfig {
             adaptive_enabled: true,
             adaptive_min_samples: default_routing_adaptive_min_samples(),
             adaptive_history_samples: default_routing_adaptive_history_samples(),
+            adaptive_stale_after_seconds: default_routing_adaptive_stale_after_seconds(),
             adaptive_ewma_alpha: default_routing_adaptive_ewma_alpha(),
             adaptive_latency_target_ms: default_routing_adaptive_latency_target_ms(),
             adaptive_max_penalty: default_routing_adaptive_max_penalty(),
@@ -303,6 +306,11 @@ impl AppConfig {
         if self.routing.adaptive_history_samples == 0 {
             return Err(ConfigError::Invalid(
                 "routing.adaptive_history_samples must be greater than zero".into(),
+            ));
+        }
+        if self.routing.adaptive_stale_after_seconds == 0 {
+            return Err(ConfigError::Invalid(
+                "routing.adaptive_stale_after_seconds must be greater than zero".into(),
             ));
         }
         if !(0.0..=1.0).contains(&self.routing.adaptive_ewma_alpha)
@@ -537,6 +545,7 @@ fn default_context_retrieval_min_similarity() -> f64 { 0.15 }
 fn default_context_retrieval_embedding_batch_size() -> usize { 64 }
 fn default_routing_adaptive_min_samples() -> u64 { 3 }
 fn default_routing_adaptive_history_samples() -> usize { 100 }
+fn default_routing_adaptive_stale_after_seconds() -> u64 { 3_600 }
 fn default_routing_adaptive_ewma_alpha() -> f64 { 0.25 }
 fn default_routing_adaptive_latency_target_ms() -> u64 { 1_200 }
 fn default_routing_adaptive_max_penalty() -> i32 { 30 }
@@ -668,6 +677,7 @@ enabled = true"#,
         assert!(config.routing.adaptive_enabled);
         assert_eq!(config.routing.adaptive_min_samples, 3);
         assert_eq!(config.routing.adaptive_history_samples, 100);
+        assert_eq!(config.routing.adaptive_stale_after_seconds, 3_600);
         assert_eq!(config.routing.adaptive_max_penalty, 30);
         assert!((config.routing.adaptive_ewma_alpha - 0.25).abs() < f64::EPSILON);
         assert!((config.routing.adaptive_failure_weight - 0.70).abs() < f64::EPSILON);
