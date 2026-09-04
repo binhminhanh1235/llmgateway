@@ -457,12 +457,22 @@ impl ChromiumDriver {
         let status = self.status(session_id).await?;
         let authenticated = status.ready_match.is_some();
         let session = self.sessions.session(session_id).await?;
+        let mut auth_material_captured = false;
+        let mut auth_material_error = None;
 
         if authenticated {
             if session.status == STATUS_READY {
                 self.sessions.mark_verified(session_id).await?;
             } else {
                 self.sessions.mark_ready(session_id).await?;
+            }
+
+            match self.capture_auth_material(session_id, &status).await {
+                Ok(material) => match self.auth_vault.store(&material) {
+                    Ok(()) => auth_material_captured = true,
+                    Err(error) => auth_material_error = Some(error.to_string()),
+                },
+                Err(error) => auth_material_error = Some(error.to_string()),
             }
         } else if status.running {
             if matches!(
@@ -491,8 +501,196 @@ impl ChromiumDriver {
             authenticated,
             session_id: session_id.to_string(),
             ready_match: status.ready_match.clone(),
+            auth_material_captured,
+            auth_material_error,
             status,
         })
+    }
+
+    async fn capture_auth_material(
+        &self,
+        session_id: &str,
+        status: &ChromiumStatusView,
+    ) -> Result<BrowserAuthMaterial, ChromiumDriverError> {
+        let port = status.debugger_port.ok_or_else(|| {
+            ChromiumDriverError::DevToolsResponse(
+                "authenticated Chromium session did not expose a debugger port".into(),
+            )
+        })?;
+        let driver_session = self.driver_session(session_id)?;
+        let target = self
+            .devtools_targets(port)
+            .await?
+            .into_iter()
+            .find(|target| {
+                target.kind == "page"
+                    && !target.websocket_debugger_url.trim().is_empty()
+                    && driver_session
+                        .ready_url_prefixes
+                        .iter()
+                        .any(|prefix| target.url.starts_with(prefix))
+            })
+            .ok_or_else(|| {
+                ChromiumDriverError::DevToolsResponse(
+                    "authenticated provider page did not expose a page websocket".into(),
+                )
+            })?;
+
+        let cookie_result = self
+            .cdp_command(
+                &target.websocket_debugger_url,
+                1,
+                "Network.getAllCookies",
+                serde_json::json!({}),
+            )
+            .await?;
+        let cookies = cookie_result
+            .get("cookies")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|cookie| {
+                let name = cookie.get("name")?.as_str()?.to_string();
+                let value = cookie.get("value")?.as_str()?.to_string();
+                Some(BrowserAuthCookie {
+                    name,
+                    value,
+                    domain: cookie
+                        .get("domain")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    path: cookie
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("/")
+                        .to_string(),
+                    expires: cookie
+                        .get("expires")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or_default(),
+                    http_only: cookie
+                        .get("httpOnly")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    secure: cookie
+                        .get("secure")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    same_site: cookie
+                        .get("sameSite")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let expression = r#"(() => {
+            const readStorage = (storage) => {
+                const out = {};
+                for (let index = 0; index < storage.length; index += 1) {
+                    const key = storage.key(index);
+                    if (key !== null) out[key] = storage.getItem(key) ?? "";
+                }
+                return out;
+            };
+            return JSON.stringify({
+                user_agent: navigator.userAgent || "",
+                local_storage: readStorage(localStorage),
+                session_storage: readStorage(sessionStorage)
+            });
+        })()"#;
+        let page_result = self
+            .cdp_command(
+                &target.websocket_debugger_url,
+                2,
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                    "awaitPromise": true
+                }),
+            )
+            .await?;
+        let encoded_snapshot = page_result
+            .get("result")
+            .and_then(|value| value.get("value"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                ChromiumDriverError::DevToolsResponse(
+                    "authenticated page did not return browser auth storage".into(),
+                )
+            })?;
+        let snapshot: PageAuthSnapshot = serde_json::from_str(encoded_snapshot)
+            .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))?;
+
+        if cookies.is_empty()
+            && snapshot.local_storage.is_empty()
+            && snapshot.session_storage.is_empty()
+        {
+            return Err(ChromiumDriverError::DevToolsResponse(
+                "authenticated page exposed no reusable auth material".into(),
+            ));
+        }
+
+        let session = self.sessions.session(session_id).await?;
+        Ok(BrowserAuthMaterial::new(
+            session_id,
+            session.provider,
+            sanitize_url(&target.url),
+            snapshot.user_agent,
+            cookies,
+            snapshot.local_storage,
+            snapshot.session_storage,
+        ))
+    }
+
+    async fn cdp_command(
+        &self,
+        websocket_url: &str,
+        request_id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ChromiumDriverError> {
+        let (mut socket, _) = connect_async(websocket_url)
+            .await
+            .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))?;
+        let request = serde_json::json!({
+            "id": request_id,
+            "method": method,
+            "params": params,
+        });
+        socket
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))?;
+
+        while let Some(message) = socket.next().await {
+            let message = message
+                .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))?;
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let envelope: serde_json::Value = serde_json::from_str(text.as_ref())
+                .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))?;
+            if envelope.get("id").and_then(serde_json::Value::as_u64) != Some(request_id) {
+                continue;
+            }
+            let _ = socket.close(None).await;
+            if let Some(error) = envelope.get("error") {
+                return Err(ChromiumDriverError::DevToolsResponse(format!(
+                    "{method}: {error}"
+                )));
+            }
+            return Ok(envelope
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
+        }
+
+        Err(ChromiumDriverError::DevToolsResponse(format!(
+            "{method}: DevTools websocket closed before returning a response"
+        )))
     }
 
     pub async fn stop(&self, session_id: &str) -> Result<ChromiumStatusView, ChromiumDriverError> {
