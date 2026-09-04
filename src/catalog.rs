@@ -165,6 +165,10 @@ impl ModelCatalog {
 
     pub async fn seed_from_config(&self) -> Result<(), CatalogError> {
         let config = self.config.snapshot();
+        self.seed_from_app_config(config.as_ref()).await
+    }
+
+    pub async fn seed_from_app_config(&self, config: &crate::config::AppConfig) -> Result<(), CatalogError> {
         let mut capabilities_by_model: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for route in config.routes.iter().filter(|route| route.enabled) {
             let account = config.account(&route.account).ok_or_else(|| {
