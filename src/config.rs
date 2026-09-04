@@ -521,6 +521,7 @@ impl AppConfig {
                 | "browser-http"
                 | "browser-cdp"
                 | "browser-gemini"
+                | "browser-chatgpt"
                 | "browser-qwen" => {}
                 other => {
                     return Err(ConfigError::Invalid(format!(
@@ -711,7 +712,7 @@ routes = ["route"]
 
     #[test]
     fn built_in_browser_provider_kinds_are_valid_without_base_url_or_credentials() {
-        for kind in ["browser-gemini", "browser-qwen"] {
+        for kind in ["browser-gemini", "browser-chatgpt", "browser-qwen"] {
             let providers = format!(
                 "[[providers]]\nid = \"browser\"\nkind = \"{kind}\""
             );
