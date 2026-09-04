@@ -10,6 +10,7 @@ use crate::{
     browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AppConfig, RouteConfig},
+    live_config::LiveConfig,
     quota_usage_runtime,
 };
 use account_readiness::evaluate_base;
@@ -82,14 +83,14 @@ enum QuotaEvaluation {
 
 #[derive(Clone)]
 pub struct Router {
-    config: Arc<AppConfig>,
+    config: LiveConfig,
     catalog: Arc<ModelCatalog>,
     health: Arc<RwLock<HashMap<String, RouteHealth>>>,
     adaptive: Arc<RwLock<HashMap<String, AdaptiveRouteState>>>,
 }
 
 impl Router {
-    pub fn new(config: Arc<AppConfig>, catalog: Arc<ModelCatalog>) -> Self {
+    pub fn new(config: LiveConfig, catalog: Arc<ModelCatalog>) -> Self {
         Self {
             config,
             catalog,
