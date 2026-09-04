@@ -118,7 +118,7 @@ async function testGeminiToolBridge() {
   const response = new FakeElement("");
   const send = new FakeElement("Send");
   send.onClick = () => {
-    response.innerText = '<LLMGATEWAY_TOOL_CALLS>{"tool_calls":[{"name":"read_file","arguments":{"path":"src/main.rs"}}]}</LLMGATEWAY_TOOL_CALLS>';
+    response.innerText = '[[LLMGATEWAY_TOOL_CALLS]]{"tool_calls":[{"name":"read_file","arguments":{"path":"src/main.rs"}}]}[[/LLMGATEWAY_TOOL_CALLS]]';
     response.textContent = response.innerText;
   };
   installPage({
@@ -163,7 +163,7 @@ async function testQwenToolBridgeStream() {
   const response = new FakeElement("");
   const send = new FakeElement("Send");
   send.onClick = () => {
-    response.innerText = '<LLMGATEWAY_TOOL_CALLS>{"tool_calls":[{"name":"run_tests","arguments":{"scope":"unit"}}]}</LLMGATEWAY_TOOL_CALLS>';
+    response.innerText = '[[LLMGATEWAY_TOOL_CALLS]]{"tool_calls":[{"name":"run_tests","arguments":{"scope":"unit"}}]}[[/LLMGATEWAY_TOOL_CALLS]]';
     response.textContent = response.innerText;
   };
   installPage({
