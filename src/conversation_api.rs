@@ -360,8 +360,14 @@ pub async fn send_thread_message(
     }
 
     if body.stream {
+        let response = state.gateway.trace_stream_response(
+            routed.response,
+            routed.request_id.clone(),
+            routed.route.id.clone(),
+            routed.started_at,
+        );
         let (tx, rx) = oneshot::channel();
-        let stream = openai_stream_with_capture(routed.response, tx);
+        let stream = openai_stream_with_capture(response, tx);
         let conversations = state.conversations.clone();
         let thread_id_for_task = thread_id.clone();
         let model_for_task = requested_model.clone();
