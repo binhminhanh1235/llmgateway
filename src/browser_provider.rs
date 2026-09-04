@@ -147,6 +147,13 @@ impl BrowserProviderRegistry {
         self.adapters.contains_key(kind)
     }
 
+    pub fn session_id_for_account(&self, account_id: &str) -> Option<&str> {
+        self.config
+            .bindings
+            .get(account_id)
+            .map(|binding| binding.session.as_str())
+    }
+
     pub async fn route_available(&self, provider_kind: &str, account_id: &str) -> bool {
         if !Self::is_browser_kind(provider_kind) || !self.supports(provider_kind) {
             return false;
