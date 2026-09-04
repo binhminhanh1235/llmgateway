@@ -4,7 +4,7 @@ mod task_aware;
 
 pub use account_readiness::AccountReadiness;
 pub use adaptive_scoring::AdaptiveRouteSnapshot;
-pub use task_aware::{TaskFitSnapshot, TaskKind, TaskProfile};
+pub use task_aware::{TaskFitSnapshot, TaskProfile};
 
 use crate::{
     catalog::ModelCatalog,
