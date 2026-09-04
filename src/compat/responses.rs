@@ -164,6 +164,7 @@ pub fn openai_stream_to_responses(
         let mut tools: BTreeMap<usize, ToolState> = BTreeMap::new();
         let mut input_tokens = 0u64;
         let mut output_tokens = 0u64;
+        let mut saw_done = false;
 
         yield Ok(event("response.created", with_sequence(json!({
             "type":"response.created",
@@ -178,8 +179,24 @@ pub fn openai_stream_to_responses(
                         let frame = buffer[..pos].to_string();
                         buffer.drain(..pos + 2);
                         let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) else { continue; };
-                        if data == "[DONE]" { continue; }
+                        if data == "[DONE]" {
+                            saw_done = true;
+                            continue;
+                        }
                         let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue; };
+
+                        if let Some((code, message)) = openai_stream_error_details(&chunk) {
+                            yield Ok(event("response.failed", with_sequence(json!({
+                                "type":"response.failed",
+                                "response":{
+                                    "id":response_id,
+                                    "object":"response",
+                                    "status":"failed",
+                                    "error":{"code":code,"message":message}
+                                }
+                            }), &mut sequence)));
+                            return;
+                        }
 
                         if let Some(usage) = chunk.get("usage") {
                             input_tokens = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(input_tokens);
@@ -299,6 +316,22 @@ pub fn openai_stream_to_responses(
             }
         }
 
+        if !saw_done {
+            yield Ok(event("response.failed", with_sequence(json!({
+                "type":"response.failed",
+                "response":{
+                    "id":response_id,
+                    "object":"response",
+                    "status":"failed",
+                    "error":{
+                        "code":"upstream_stream_incomplete",
+                        "message":"upstream stream ended before terminal [DONE] frame"
+                    }
+                }
+            }), &mut sequence)));
+            return;
+        }
+
         let mut completed_output = Vec::new();
 
         if let Some(state) = text {
@@ -386,6 +419,23 @@ pub fn openai_stream_to_responses(
             "response":completed
         }), &mut sequence)));
     }
+}
+
+fn openai_stream_error_details(chunk: &Value) -> Option<(String, String)> {
+    let error = chunk.get("error")?;
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("upstream_stream_error")
+        .to_string();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("upstream stream failed")
+        .to_string();
+    Some((code, message))
 }
 
 fn translate_input_item(item: &Value, out: &mut Vec<Value>) -> Result<(), String> {
@@ -595,6 +645,24 @@ fn copy_if_present(source: &Value, target: &mut Map<String, Value>, from: &str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_openai_style_stream_error_frames() {
+        let chunk = json!({
+            "error": {
+                "code": "upstream_stream_error",
+                "message": "browser idle stream timeout"
+            }
+        });
+        assert_eq!(
+            openai_stream_error_details(&chunk),
+            Some((
+                "upstream_stream_error".to_string(),
+                "browser idle stream timeout".to_string()
+            ))
+        );
+        assert_eq!(openai_stream_error_details(&json!({"choices":[]})), None);
+    }
 
     #[test]
     fn translates_codex_style_function_call_output() {
