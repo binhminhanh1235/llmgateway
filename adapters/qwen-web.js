@@ -341,9 +341,10 @@
         state.error = classifyStreamError(error);
         state.done = true;
       } finally {
-        setTimeout(() => {
+        const cleanupTimer = setTimeout(() => {
           if (streamJobs.get(streamId) === state) streamJobs.delete(streamId);
         }, 60000);
+        cleanupTimer?.unref?.();
       }
     });
 
