@@ -2320,6 +2320,106 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn runtime_ready_target_skips_stale_matching_page() {
+        async fn serve_runtime_host(listener: TcpListener, host: &'static str) {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let message = socket.next().await.unwrap().unwrap();
+            let command: Value =
+                serde_json::from_str(message.into_text().unwrap().as_ref()).unwrap();
+            assert_eq!(command["method"], "Runtime.evaluate");
+            assert_eq!(
+                command["params"]["expression"].as_str(),
+                Some("String(globalThis.location?.hostname || '')")
+            );
+            let id = command["id"].as_u64().unwrap();
+            let response = json!({
+                "id": id,
+                "result": {
+                    "result": {
+                        "type": "string",
+                        "value": host
+                    }
+                }
+            });
+            socket
+                .send(Message::Text(response.to_string().into()))
+                .await
+                .unwrap();
+        }
+
+        let stale_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stale_address = stale_listener.local_addr().unwrap();
+        let stale_task = tokio::spawn(serve_runtime_host(stale_listener, ""));
+
+        let ready_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ready_address = ready_listener.local_addr().unwrap();
+        let ready_task = tokio::spawn(serve_runtime_host(
+            ready_listener,
+            "gemini.google.com",
+        ));
+
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_address = http_listener.local_addr().unwrap();
+        let stale_ws = format!("ws://{stale_address}/devtools/page/stale");
+        let ready_ws = format!("ws://{ready_address}/devtools/page/ready");
+        let app = Router::new().route(
+            "/json/list",
+            get(move || {
+                let stale_ws = stale_ws.clone();
+                let ready_ws = ready_ws.clone();
+                async move {
+                    Json(json!([
+                        {
+                            "id": "stale-target",
+                            "type": "page",
+                            "url": "https://gemini.google.com/app",
+                            "webSocketDebuggerUrl": stale_ws
+                        },
+                        {
+                            "id": "ready-target",
+                            "type": "page",
+                            "url": "https://gemini.google.com/app",
+                            "webSocketDebuggerUrl": ready_ws
+                        }
+                    ]))
+                }
+            }),
+        );
+        let http_task = tokio::spawn(async move {
+            axum::serve(http_listener, app).await.unwrap();
+        });
+
+        let profile_dir = std::env::temp_dir().join(format!(
+            "llmgateway-runtime-ready-target-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&profile_dir).unwrap();
+        fs::write(
+            profile_dir.join("DevToolsActivePort"),
+            format!("{}\n/devtools/browser/fixture\n", http_address.port()),
+        )
+        .unwrap();
+
+        let adapter = CdpBrowserAdapter::gemini().unwrap();
+        let selected = adapter
+            .select_runtime_ready_target(
+                profile_dir.to_str().unwrap(),
+                Some("https://gemini.google.com/app"),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(selected.id, "ready-target");
+
+        stale_task.await.unwrap();
+        ready_task.await.unwrap();
+        http_task.abort();
+        let _ = fs::remove_dir_all(profile_dir);
+    }
+
     fn test_binding() -> BrowserAccountBinding {
         BrowserAccountBinding {
             session: "fixture-session".into(),
