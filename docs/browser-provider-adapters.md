@@ -192,13 +192,9 @@ A binding can temporarily override selector groups without rebuilding llmgateway
 ```toml
 [browser.bindings.gemini-web-account]
 session = "gemini-web-primary"
-selector_overrides = {
-  input = ["div[aria-label='Enter a prompt for Gemini']"],
-  send = ["button[aria-label='Send message']"]
-}
+selector_overrides = { input = ["div[aria-label='Enter a prompt for Gemini']"], send = ["button[aria-label='Send message']"] }
 ```
 
-The exact TOML may be formatted on one line if preferred.
 
 Selector overrides are a recovery mechanism, not a way to bypass authentication or provider controls.
 
