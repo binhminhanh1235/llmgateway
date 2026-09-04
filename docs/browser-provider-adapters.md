@@ -249,7 +249,7 @@ This preserves llmgateway's core ownership rule:
 
 Set `ephemeral_chat = false` only when intentionally using a persistent provider page.
 
-Persistent llmgateway threads are a separate concept. Gemini thread requests can use provider-native conversation affinity while still keeping browser tabs ephemeral: the first turn creates and records the Gemini conversation URL, later turns reopen that exact URL, and only missed/current turns are sent. See [Provider-native conversation affinity](provider-conversation-affinity.md).
+Persistent llmgateway threads are a separate concept. Gemini thread requests use provider-native conversation affinity: the first turn creates and records the native Gemini conversation, later turns reuse the same open tab when possible, and a missing tab is reopened once from the persisted native URL. Only provider-missed/current turns are sent. See [Provider-native conversation affinity](provider-conversation-affinity.md).
 
 ## Coding-agent tool bridge
 
