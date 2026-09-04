@@ -11,6 +11,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub context: ContextConfig,
     #[serde(default)]
+    pub routing: RoutingConfig,
+    #[serde(default)]
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub accounts: Vec<AccountConfig>,
@@ -90,6 +92,35 @@ pub struct ContextConfig {
     pub retrieval_min_similarity: f64,
     #[serde(default = "default_context_retrieval_embedding_batch_size")]
     pub retrieval_embedding_batch_size: usize,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RoutingConfig {
+    #[serde(default = "default_true")]
+    pub adaptive_enabled: bool,
+    #[serde(default = "default_routing_adaptive_min_samples")]
+    pub adaptive_min_samples: u64,
+    #[serde(default = "default_routing_adaptive_ewma_alpha")]
+    pub adaptive_ewma_alpha: f64,
+    #[serde(default = "default_routing_adaptive_latency_target_ms")]
+    pub adaptive_latency_target_ms: u64,
+    #[serde(default = "default_routing_adaptive_max_penalty")]
+    pub adaptive_max_penalty: i32,
+    #[serde(default = "default_routing_adaptive_failure_weight")]
+    pub adaptive_failure_weight: f64,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            adaptive_enabled: true,
+            adaptive_min_samples: default_routing_adaptive_min_samples(),
+            adaptive_ewma_alpha: default_routing_adaptive_ewma_alpha(),
+            adaptive_latency_target_ms: default_routing_adaptive_latency_target_ms(),
+            adaptive_max_penalty: default_routing_adaptive_max_penalty(),
+            adaptive_failure_weight: default_routing_adaptive_failure_weight(),
+        }
+    }
 }
 
 impl Default for ContextConfig {
@@ -261,6 +292,37 @@ impl AppConfig {
                 self.api.default_model
             )));
         }
+        if self.routing.adaptive_min_samples == 0 {
+            return Err(ConfigError::Invalid(
+                "routing.adaptive_min_samples must be greater than zero".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.routing.adaptive_ewma_alpha)
+            || self.routing.adaptive_ewma_alpha == 0.0
+            || !self.routing.adaptive_ewma_alpha.is_finite()
+        {
+            return Err(ConfigError::Invalid(
+                "routing.adaptive_ewma_alpha must be greater than 0 and at most 1".into(),
+            ));
+        }
+        if self.routing.adaptive_latency_target_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "routing.adaptive_latency_target_ms must be greater than zero".into(),
+            ));
+        }
+        if self.routing.adaptive_max_penalty < 0 {
+            return Err(ConfigError::Invalid(
+                "routing.adaptive_max_penalty must be non-negative".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.routing.adaptive_failure_weight)
+            || !self.routing.adaptive_failure_weight.is_finite()
+        {
+            return Err(ConfigError::Invalid(
+                "routing.adaptive_failure_weight must be between 0 and 1".into(),
+            ));
+        }
+
         if !(0.5..=1.0).contains(&self.context.compaction_trigger_ratio) {
             return Err(ConfigError::Invalid(
                 "context.compaction_trigger_ratio must be between 0.5 and 1.0".into(),
@@ -465,6 +527,11 @@ fn default_context_retrieval_backend() -> String { "local".into() }
 fn default_context_retrieval_semantic_weight() -> f64 { 0.70 }
 fn default_context_retrieval_min_similarity() -> f64 { 0.15 }
 fn default_context_retrieval_embedding_batch_size() -> usize { 64 }
+fn default_routing_adaptive_min_samples() -> u64 { 3 }
+fn default_routing_adaptive_ewma_alpha() -> f64 { 0.25 }
+fn default_routing_adaptive_latency_target_ms() -> u64 { 1_200 }
+fn default_routing_adaptive_max_penalty() -> i32 { 30 }
+fn default_routing_adaptive_failure_weight() -> f64 { 0.70 }
 
 #[cfg(test)]
 mod tests {
