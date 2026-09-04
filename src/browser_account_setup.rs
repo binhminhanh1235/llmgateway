@@ -1,5 +1,11 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
+    browser_provider::BrowserProviderConfig,
+    browser_provider_runtime,
+    browser_session::BrowserConfig,
+    browser_session_runtime,
+    chromium_driver::ChromiumConfig,
+    chromium_driver_runtime,
     config::AppConfig,
 };
 use axum::{
@@ -13,6 +19,7 @@ use serde_json::json;
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use thiserror::Error;
 use toml_edit::{
@@ -72,6 +79,8 @@ pub enum BrowserAccountSetupError {
     Invalid(String),
     #[error("browser account '{0}' already exists")]
     Conflict(String),
+    #[error("browser account hot activation failed: {0}")]
+    Activation(String),
 }
 
 pub async fn browser_account_setup_presets(
@@ -85,8 +94,8 @@ pub async fn browser_account_setup_presets(
         StatusCode::OK,
         json!({
             "providers": provider_presets(),
-            "hot_activation": false,
-            "restart_required_after_create": true
+            "hot_activation": true,
+            "restart_required_after_create": false
         }),
         None,
     )
@@ -104,7 +113,22 @@ pub async fn create_browser_account_setup(
     let config_path =
         env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
     match apply_browser_account_setup(&config_path, body) {
-        Ok(result) => json_response(StatusCode::CREATED, json!(result), None),
+        Ok(mut result) => match activate_browser_account_setup(&state, &config_path).await {
+            Ok(()) => {
+                result.restart_required = false;
+                result.next_steps = vec![
+                    "Open Accounts and choose Login with browser for the new account.".into(),
+                    "Complete provider login, CAPTCHA, and 2FA normally in Chromium if requested.".into(),
+                    "Verify the authenticated page; browser-first routing will make the route eligible immediately.".into(),
+                ];
+                json_response(StatusCode::CREATED, json!(result), None)
+            }
+            Err(error) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "browser_account_hot_activation_error",
+                &error.to_string(),
+            ),
+        },
         Err(BrowserAccountSetupError::Conflict(message)) => json_error(
             StatusCode::CONFLICT,
             "browser_account_setup_conflict",
@@ -121,6 +145,49 @@ pub async fn create_browser_account_setup(
             &error.to_string(),
         ),
     }
+}
+
+async fn activate_browser_account_setup(
+    state: &AppState,
+    config_path: &str,
+) -> Result<(), BrowserAccountSetupError> {
+    let app_config = Arc::new(AppConfig::load(config_path)?);
+    let browser_config = BrowserConfig::load_from_gateway_config(config_path)
+        .map_err(|error| BrowserAccountSetupError::Activation(error.to_string()))?;
+    let chromium_config = ChromiumConfig::load_from_gateway_config(config_path)
+        .map_err(|error| BrowserAccountSetupError::Activation(error.to_string()))?;
+    let provider_config = BrowserProviderConfig::load_from_gateway_config(config_path)
+        .map_err(|error| BrowserAccountSetupError::Activation(error.to_string()))?;
+
+    let browser_sessions = browser_session_runtime::get().ok_or_else(|| {
+        BrowserAccountSetupError::Activation("browser session runtime is not initialized".into())
+    })?;
+    let chromium_driver = chromium_driver_runtime::get().ok_or_else(|| {
+        BrowserAccountSetupError::Activation("Chromium driver runtime is not initialized".into())
+    })?;
+    let browser_providers = browser_provider_runtime::get().ok_or_else(|| {
+        BrowserAccountSetupError::Activation("browser provider runtime is not initialized".into())
+    })?;
+
+    browser_sessions
+        .reload(browser_config)
+        .await
+        .map_err(|error| BrowserAccountSetupError::Activation(error.to_string()))?;
+    chromium_driver
+        .reload(chromium_config)
+        .map_err(|error| BrowserAccountSetupError::Activation(error.to_string()))?;
+    browser_providers
+        .reload(provider_config)
+        .map_err(|error| BrowserAccountSetupError::Activation(error.to_string()))?;
+
+    state
+        .catalog
+        .seed_from_app_config(app_config.as_ref())
+        .await
+        .map_err(|error| BrowserAccountSetupError::Activation(error.to_string()))?;
+
+    state.gateway.live_config.replace(app_config);
+    Ok(())
 }
 
 pub fn apply_browser_account_setup(
