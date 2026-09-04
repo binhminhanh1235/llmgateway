@@ -1,5 +1,5 @@
 use crate::{
-    browser_session_runtime,
+    browser_session_runtime, chromium_driver_runtime,
     config::{AccountConfig, ProviderConfig, RouteConfig},
 };
 use async_trait::async_trait;
@@ -167,10 +167,29 @@ impl BrowserProviderRegistry {
         let Some(store) = browser_session_runtime::get() else {
             return false;
         };
-        match store.session(&binding.session).await {
+        let session_ready = match store.session(&binding.session).await {
             Ok(session) => session.enabled && session.status == "ready",
             Err(_) => false,
+        };
+        if !session_ready {
+            return false;
         }
+
+        if provider_kind == "browser-cdp" {
+            let Some(driver) = chromium_driver_runtime::get() else {
+                return false;
+            };
+            return driver
+                .status(&binding.session)
+                .await
+                .is_ok_and(|status| {
+                    status.running
+                        && status.debugger_reachable
+                        && status.ready_match.is_some()
+                });
+        }
+
+        true
     }
 
     pub async fn require_attention(
