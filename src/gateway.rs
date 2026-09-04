@@ -7,7 +7,7 @@ use crate::{
     live_config::LiveConfig,
     quota_usage::{QuotaUsageStore, UsageEvent},
     quota_usage_runtime,
-    routing::Router,
+    routing::{RouteDecisionTrace, Router},
 };
 use axum::http::Response as HttpResponse;
 use futures_util::StreamExt;
@@ -245,7 +245,11 @@ impl Gateway {
             }
         }
         if routes.is_empty() {
-            let error = GatewayError::NoRoute(requested_model.to_string());
+            let trace = self
+                .router
+                .explain_for_body_with_config(config.clone(), requested_model, Some(body))
+                .await;
+            let error = GatewayError::NoRoute(no_route_message(&trace));
             return Err(self.finish_execution_error(&request_id, error).await);
         }
 
@@ -725,6 +729,45 @@ fn apply_auth(
         }
     }
     Ok(())
+}
+
+fn no_route_message(trace: &RouteDecisionTrace) -> String {
+    if trace.candidates.is_empty() {
+        return format!(
+            "model '{}' has no configured or discovered routes",
+            trace.requested_model
+        );
+    }
+
+    let details = trace
+        .candidates
+        .iter()
+        .take(6)
+        .map(|candidate| {
+            let mut reasons = candidate.exclusion_reasons.clone();
+            if let Some(adapter_message) = candidate
+                .readiness
+                .browser_adapter_message
+                .as_deref()
+                .filter(|message| !message.trim().is_empty())
+            {
+                let adapter_detail = format!("adapter: {adapter_message}");
+                if !reasons.iter().any(|reason| reason == &adapter_detail) {
+                    reasons.push(adapter_detail);
+                }
+            }
+            if reasons.is_empty() {
+                reasons.push("route_not_eligible".into());
+            }
+            format!("{} [{}]", candidate.route_id, reasons.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    format!(
+        "model '{}' has no eligible routes: {details}",
+        trace.requested_model
+    )
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
