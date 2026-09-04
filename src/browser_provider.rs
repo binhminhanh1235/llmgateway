@@ -310,6 +310,12 @@ impl BrowserProviderRegistry {
             .map(|binding| binding.session.as_str())
     }
 
+    pub fn model_allowed(&self, account_id: &str, model: &str) -> bool {
+        self.config.bindings.get(account_id).is_none_or(|binding| {
+            binding.models.is_empty() || binding.models.iter().any(|allowed| allowed == model)
+        })
+    }
+
     pub async fn adapter_diagnostics(
         &self,
         provider_kind: &str,
