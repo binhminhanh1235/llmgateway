@@ -397,7 +397,7 @@ impl Router {
                         } else if task_adjustment > 0 {
                             push_unique(&mut warnings, "task_mismatch");
                         }
-                        if apply_execution_policy {
+                        if apply_execution_policy && policy_reason != "balanced" {
                             push_unique(&mut warnings, &policy_reason);
                         }
                     }
@@ -431,7 +431,7 @@ impl Router {
                         } else if task_adjustment > 0 {
                             push_unique(&mut warnings, "task_mismatch");
                         }
-                        if apply_execution_policy {
+                        if apply_execution_policy && policy_reason != "balanced" {
                             push_unique(&mut warnings, &policy_reason);
                         }
                     }
@@ -478,27 +478,39 @@ impl Router {
                     index,
                     candidate.decision.transport_preference,
                     candidate.decision.final_score.unwrap_or(i32::MAX),
-                    candidate
-                        .decision
-                        .browser_fairness_rank
-                        .unwrap_or(u64::MAX),
                     candidate.original_index,
                 )
             })
             .collect::<Vec<_>>();
-        ranked_indices.sort_by_key(
-            |(_, transport_preference, score, fairness_rank, original_index)| {
-                (
-                    *transport_preference,
-                    *score,
-                    *fairness_rank,
-                    *original_index,
-                )
-            },
-        );
-        for (rank_index, (candidate_index, _, _, _, _)) in
-            ranked_indices.into_iter().enumerate()
-        {
+        ranked_indices.sort_by(|left, right| {
+            let base = (left.1, left.2).cmp(&(right.1, right.2));
+            if base != std::cmp::Ordering::Equal {
+                return base;
+            }
+
+            let left_candidate = &evaluated[left.0];
+            let right_candidate = &evaluated[right.0];
+            if left_candidate.decision.transport == "browser"
+                && right_candidate.decision.transport == "browser"
+            {
+                let fairness = left_candidate
+                    .decision
+                    .browser_fairness_rank
+                    .unwrap_or(0)
+                    .cmp(
+                        &right_candidate
+                            .decision
+                            .browser_fairness_rank
+                            .unwrap_or(0),
+                    );
+                if fairness != std::cmp::Ordering::Equal {
+                    return fairness;
+                }
+            }
+
+            left.3.cmp(&right.3)
+        });
+        for (rank_index, (candidate_index, _, _, _)) in ranked_indices.into_iter().enumerate() {
             let candidate = &mut evaluated[candidate_index];
             candidate.decision.rank = Some(rank_index + 1);
             candidate.decision.selected = rank_index == 0;
