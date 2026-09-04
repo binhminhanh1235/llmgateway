@@ -1,4 +1,4 @@
-use crate::config::{AccountConfig, AppConfig};
+use crate::{config::AccountConfig, live_config::LiveConfig};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION},
     Client, StatusCode,
@@ -18,7 +18,7 @@ use thiserror::Error;
 
 #[derive(Clone)]
 pub struct ModelCatalog {
-    config: Arc<AppConfig>,
+    config: LiveConfig,
     pool: SqlitePool,
     client: Client,
 }
@@ -94,9 +94,10 @@ struct DiscoveredModel {
 }
 
 impl ModelCatalog {
-    pub async fn connect(config: Arc<AppConfig>) -> Result<Self, CatalogError> {
-        ensure_sqlite_parent(&config.storage.database_url)?;
-        let options = SqliteConnectOptions::from_str(&config.storage.database_url)?
+    pub async fn connect(config: LiveConfig) -> Result<Self, CatalogError> {
+        let snapshot = config.snapshot();
+        ensure_sqlite_parent(&snapshot.storage.database_url)?;
+        let options = SqliteConnectOptions::from_str(&snapshot.storage.database_url)?
             .create_if_missing(true)
             .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
@@ -164,12 +165,13 @@ impl ModelCatalog {
     }
 
     pub async fn seed_from_config(&self) -> Result<(), CatalogError> {
+        let config = self.config.snapshot();
         let mut capabilities_by_model: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for route in self.config.routes.iter().filter(|route| route.enabled) {
-            let account = self.config.account(&route.account).ok_or_else(|| {
+        for route in config.routes.iter().filter(|route| route.enabled) {
+            let account = config.account(&route.account).ok_or_else(|| {
                 CatalogError::InvalidConfig(format!("unknown account '{}'", route.account))
             })?;
-            let provider = self.config.provider(&account.provider).ok_or_else(|| {
+            let provider = config.provider(&account.provider).ok_or_else(|| {
                 CatalogError::InvalidConfig(format!("unknown provider '{}'", account.provider))
             })?;
             let canonical_id = canonical_model_id(&provider.id, &route.model);
@@ -193,8 +195,8 @@ impl ModelCatalog {
             .await?;
         }
 
-        for route in self.config.routes.iter().filter(|route| route.enabled) {
-            let account = self.config.account(&route.account).ok_or_else(|| {
+        for route in config.routes.iter().filter(|route| route.enabled) {
+            let account = config.account(&route.account).ok_or_else(|| {
                 CatalogError::InvalidConfig(format!("unknown account '{}'", route.account))
             })?;
             let canonical_id = canonical_model_id(&account.provider, &route.model);
@@ -214,7 +216,8 @@ impl ModelCatalog {
     }
 
     pub async fn refresh_account(&self, account_id: &str) -> Result<RefreshResult, CatalogError> {
-        let account = self
+        let config = self.config.snapshot();
+        let account = config
             .config
             .account(account_id)
             .ok_or_else(|| CatalogError::InvalidConfig(format!("unknown account '{account_id}'")))?;
@@ -223,7 +226,7 @@ impl ModelCatalog {
                 "model discovery is disabled for account '{account_id}'"
             )));
         }
-        let provider = self.config.provider(&account.provider).ok_or_else(|| {
+        let provider = config.provider(&account.provider).ok_or_else(|| {
             CatalogError::InvalidConfig(format!("unknown provider '{}'", account.provider))
         })?;
         if provider.models_path.trim().is_empty() {
@@ -297,8 +300,9 @@ impl ModelCatalog {
     }
 
     pub async fn accounts(&self) -> Result<Vec<AccountView>, CatalogError> {
-        let mut result = Vec::with_capacity(self.config.accounts.len());
-        for account in &self.config.accounts {
+        let config = self.config.snapshot();
+        let mut result = Vec::with_capacity(config.accounts.len());
+        for account in &config.accounts {
             let row = sqlx::query(
                 "SELECT
                     COUNT(*) AS model_count,
@@ -322,7 +326,7 @@ impl ModelCatalog {
     }
 
     pub async fn account_models(&self, account_id: &str) -> Result<Vec<CatalogModelView>, CatalogError> {
-        if self.config.account(account_id).is_none() {
+        if config.account(account_id).is_none() {
             return Err(CatalogError::InvalidConfig(format!("unknown account '{account_id}'")));
         }
         let all = self.models().await?;
@@ -397,14 +401,14 @@ impl ModelCatalog {
         let Ok((provider_id, external_id)) = split_canonical_model_id(canonical_id) else {
             return Vec::new();
         };
-        self.config
+        let config = self.config.snapshot();
+        config
             .routes
             .iter()
             .filter(|route| {
                 route.enabled
                     && route.model == external_id
-                    && self
-                        .config
+                    && config
                         .account(&route.account)
                         .is_some_and(|account| account.provider == provider_id)
             })
