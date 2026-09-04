@@ -137,7 +137,6 @@ def envelope_for(expression, target_id):
     if 'const __operation = "chat_stream_start"' in expression:
         request = expression_request(expression)
         append_marker("browser-requests.jsonl", json.dumps({"target_id": target_id, "messages": request.get("messages", [])}, ensure_ascii=False))
-        ensure_native_conversation(target_id, provider)
         prompt_text = json.dumps(request.get("messages", []), ensure_ascii=False)
         if "force-browser-stream-fallback" in prompt_text:
             write_marker("stream-start-failed", "forced")
@@ -194,6 +193,7 @@ def envelope_for(expression, target_id):
         write_marker("stream-poll-count", poll)
         completion_id = "chatcmpl_browser_stream"
         if poll == 1:
+            ensure_native_conversation(target_id, provider)
             events = [{
                 "id": completion_id,
                 "object": "chat.completion.chunk",
