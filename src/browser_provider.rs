@@ -482,30 +482,32 @@ impl BrowserProviderRegistry {
                 "browser session is disabled",
             );
         }
-        let auth_snapshot_ready =
-            provider_kind == "browser-http" && self.auth_material_available(&binding.session);
-        if session.status != "ready" {
-            let can_reprobe = adapter.is_cdp()
-                && cdp_session_status_probeable(&session.status)
-                && self.cdp_session_live(&binding.session).await;
-            if !auth_snapshot_ready && !can_reprobe {
-                // Session lifecycle can transition immediately during login/re-auth.
-                // Drop any prior ready probe so a later verified generation must be
-                // diagnosed again rather than borrowing stale adapter health.
-                self.invalidate_diagnostics(account_id).await;
-                return unavailable_diagnostics(
-                    account_id,
-                    provider_kind,
-                    adapter.adapter_id(),
-                    &binding,
-                    &format!("browser session is {}", session.status),
-                );
-            }
+        let direct_adapter = self.direct_adapter(provider_kind, &binding).cloned();
+        let direct_snapshot_ready = direct_adapter.is_some()
+            && self.auth_material_available(&binding.session);
+        let auth_snapshot_ready = (provider_kind == "browser-http"
+            && self.auth_material_available(&binding.session))
+            || direct_snapshot_ready;
+        let can_reprobe = adapter.is_cdp()
+            && cdp_session_status_probeable(&session.status)
+            && self.cdp_session_live(&binding.session).await;
+        if session.status != "ready" && !auth_snapshot_ready && !can_reprobe {
+            // Session lifecycle can transition immediately during login/re-auth.
+            // Drop any prior ready probe so a later verified generation must be
+            // diagnosed again rather than borrowing stale adapter health.
+            self.invalidate_diagnostics(account_id).await;
+            return unavailable_diagnostics(
+                account_id,
+                provider_kind,
+                adapter.adapter_id(),
+                &binding,
+                &format!("browser session is {}", session.status),
+            );
         }
 
         let mut session_marker = session.updated_at.clone();
         if let Some(cached) = self.adapter_health.read().await.get(account_id).cloned() {
-            let cache_ttl = if session.status == "ready" {
+            let cache_ttl = if session.status == "ready" || auth_snapshot_ready {
                 Duration::from_secs(ADAPTER_HEALTH_TTL_SECONDS)
             } else {
                 // Recoverable non-ready states must re-probe quickly after the user
@@ -520,9 +522,23 @@ impl BrowserProviderRegistry {
             }
         }
 
-        let diagnostics = adapter
-            .diagnose(account_id, &session.profile_dir, &binding)
-            .await;
+        let diagnostics = if direct_snapshot_ready {
+            let direct = direct_adapter.expect("direct adapter checked above");
+            let direct_diagnostics = direct
+                .diagnose(account_id, &session.profile_dir, &binding)
+                .await;
+            if direct_diagnostics.status == "ready" || !can_reprobe {
+                direct_diagnostics
+            } else {
+                adapter
+                    .diagnose(account_id, &session.profile_dir, &binding)
+                    .await
+            }
+        } else {
+            adapter
+                .diagnose(account_id, &session.profile_dir, &binding)
+                .await
+        };
 
         if diagnostics.status == "ready"
             && session.status != "ready"
@@ -602,6 +618,15 @@ impl BrowserProviderRegistry {
 
         if provider_kind == "browser-http" && self.auth_material_available(&binding.session) {
             return true;
+        }
+
+        if self.direct_adapter(provider_kind, &binding).is_some()
+            && self.auth_material_available(&binding.session)
+        {
+            let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
+            if diagnostics.status == "ready" {
+                return true;
+            }
         }
 
         let adapter = match self.adapters.get(provider_kind) {
