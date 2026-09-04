@@ -89,6 +89,8 @@ balance_weight = 1
 [routing]
 adaptive_enabled = true
 adaptive_min_samples = 3
+# On restart, replay at most this many qualifying execution attempts per route.
+adaptive_history_samples = 100
 adaptive_ewma_alpha = 0.25
 adaptive_latency_target_ms = 1200
 adaptive_max_penalty = 30
