@@ -112,6 +112,16 @@ pub struct RoutingConfig {
     pub adaptive_max_penalty: i32,
     #[serde(default = "default_routing_adaptive_failure_weight")]
     pub adaptive_failure_weight: f64,
+    #[serde(default = "default_true")]
+    pub task_aware_enabled: bool,
+    #[serde(default = "default_routing_task_fit_max_bonus")]
+    pub task_fit_max_bonus: i32,
+    #[serde(default = "default_routing_task_mismatch_penalty")]
+    pub task_mismatch_penalty: i32,
+    #[serde(default = "default_routing_task_long_context_threshold_tokens")]
+    pub task_long_context_threshold_tokens: usize,
+    #[serde(default = "default_routing_task_simple_max_input_tokens")]
+    pub task_simple_max_input_tokens: usize,
 }
 
 impl Default for RoutingConfig {
@@ -125,6 +135,12 @@ impl Default for RoutingConfig {
             adaptive_latency_target_ms: default_routing_adaptive_latency_target_ms(),
             adaptive_max_penalty: default_routing_adaptive_max_penalty(),
             adaptive_failure_weight: default_routing_adaptive_failure_weight(),
+            task_aware_enabled: true,
+            task_fit_max_bonus: default_routing_task_fit_max_bonus(),
+            task_mismatch_penalty: default_routing_task_mismatch_penalty(),
+            task_long_context_threshold_tokens:
+                default_routing_task_long_context_threshold_tokens(),
+            task_simple_max_input_tokens: default_routing_task_simple_max_input_tokens(),
         }
     }
 }
@@ -210,6 +226,8 @@ pub struct RouteConfig {
     pub enabled: bool,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub context_window: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -336,6 +354,29 @@ impl AppConfig {
         {
             return Err(ConfigError::Invalid(
                 "routing.adaptive_failure_weight must be between 0 and 1".into(),
+            ));
+        }
+        if self.routing.task_fit_max_bonus < 0 {
+            return Err(ConfigError::Invalid(
+                "routing.task_fit_max_bonus must be non-negative".into(),
+            ));
+        }
+        if self.routing.task_mismatch_penalty < 0 {
+            return Err(ConfigError::Invalid(
+                "routing.task_mismatch_penalty must be non-negative".into(),
+            ));
+        }
+        if self.routing.task_long_context_threshold_tokens < 1024 {
+            return Err(ConfigError::Invalid(
+                "routing.task_long_context_threshold_tokens must be at least 1024".into(),
+            ));
+        }
+        if self.routing.task_simple_max_input_tokens == 0
+            || self.routing.task_simple_max_input_tokens
+                >= self.routing.task_long_context_threshold_tokens
+        {
+            return Err(ConfigError::Invalid(
+                "routing.task_simple_max_input_tokens must be greater than zero and smaller than routing.task_long_context_threshold_tokens".into(),
             ));
         }
 
@@ -493,6 +534,12 @@ impl AppConfig {
                     route.id, route.account
                 )));
             }
+            if route.context_window.is_some_and(|window| window <= 0) {
+                return Err(ConfigError::Invalid(format!(
+                    "route '{}' context_window must be greater than zero",
+                    route.id
+                )));
+            }
         }
 
         for (name, virtual_model) in &self.virtual_models {
@@ -550,6 +597,10 @@ fn default_routing_adaptive_ewma_alpha() -> f64 { 0.25 }
 fn default_routing_adaptive_latency_target_ms() -> u64 { 1_200 }
 fn default_routing_adaptive_max_penalty() -> i32 { 30 }
 fn default_routing_adaptive_failure_weight() -> f64 { 0.70 }
+fn default_routing_task_fit_max_bonus() -> i32 { 20 }
+fn default_routing_task_mismatch_penalty() -> i32 { 12 }
+fn default_routing_task_long_context_threshold_tokens() -> usize { 12_000 }
+fn default_routing_task_simple_max_input_tokens() -> usize { 800 }
 
 #[cfg(test)]
 mod tests {
@@ -681,5 +732,10 @@ enabled = true"#,
         assert_eq!(config.routing.adaptive_max_penalty, 30);
         assert!((config.routing.adaptive_ewma_alpha - 0.25).abs() < f64::EPSILON);
         assert!((config.routing.adaptive_failure_weight - 0.70).abs() < f64::EPSILON);
+        assert!(config.routing.task_aware_enabled);
+        assert_eq!(config.routing.task_fit_max_bonus, 20);
+        assert_eq!(config.routing.task_mismatch_penalty, 12);
+        assert_eq!(config.routing.task_long_context_threshold_tokens, 12_000);
+        assert_eq!(config.routing.task_simple_max_input_tokens, 800);
     }
 }
