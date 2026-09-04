@@ -1366,6 +1366,28 @@ if (!__probe || __probe.ok !== true) {
 if (__operation === "probe") {
   return { meta: __meta, probe: __probe };
 }
+if (__operation === "chat_stream_start") {
+  if (typeof __adapter.streamStart !== "function") {
+    return {
+      meta: __meta,
+      probe: __probe,
+      error: { code: "stream_unsupported", message: "adapter contract is missing streamStart(request, context)" }
+    };
+  }
+  try {
+    const __stream = await __adapter.streamStart(__request, __context);
+    return { meta: __meta, probe: __probe, stream: __stream };
+  } catch (error) {
+    return {
+      meta: __meta,
+      probe: __probe,
+      error: {
+        code: "stream_start_error",
+        message: String(error?.message || error || "browser stream failed to start")
+      }
+    };
+  }
+}
 if (typeof __adapter.chat !== "function") {
   return {
     meta: __meta,
@@ -1389,6 +1411,48 @@ try {
 })()"#,
     );
     Ok(expression)
+}
+
+fn build_stream_control_expression(
+    operation: &str,
+    request: &Value,
+) -> Result<String, BrowserProviderError> {
+    let operation_json = serde_json::to_string(operation)
+        .map_err(|error| BrowserProviderError::InvalidConfig(error.to_string()))?;
+    let request_json = serde_json::to_string(request)
+        .map_err(|error| BrowserProviderError::InvalidConfig(error.to_string()))?;
+    Ok(format!(
+        r#"(async () => {{
+const __adapter = globalThis.__LLMGATEWAY_ADAPTER__;
+const __operation = {operation_json};
+const __request = {request_json};
+const __meta = __adapter?.meta || null;
+if (!__adapter || typeof __adapter !== "object" || !__meta) {{
+  return {{ error: {{ code: "contract_missing", message: "browser adapter is not initialized" }} }};
+}}
+if (__operation === "chat_stream_poll") {{
+  if (typeof __adapter.streamPoll !== "function") {{
+    return {{ meta: __meta, error: {{ code: "stream_unsupported", message: "adapter contract is missing streamPoll(request)" }} }};
+  }}
+  try {{
+    return {{ meta: __meta, stream: await __adapter.streamPoll(__request) }};
+  }} catch (error) {{
+    return {{ meta: __meta, error: {{ code: "stream_poll_error", message: String(error?.message || error || "browser stream poll failed") }} }};
+  }}
+}}
+if (__operation === "chat_stream_cancel") {{
+  if (typeof __adapter.streamCancel !== "function") {{
+    return {{ meta: __meta, stream: {{ cancelled: false, unsupported: true }} }};
+  }}
+  try {{
+    return {{ meta: __meta, stream: await __adapter.streamCancel(__request) }};
+  }} catch (error) {{
+    return {{ meta: __meta, error: {{ code: "stream_cancel_error", message: String(error?.message || error || "browser stream cancel failed") }} }};
+  }}
+}}
+return {{ meta: __meta, error: {{ code: "invalid_stream_operation", message: "unknown browser stream operation" }} }};
+}})()"#
+    ))
 }
 
 fn validate_contract_envelope(
