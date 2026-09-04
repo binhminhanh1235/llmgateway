@@ -685,13 +685,27 @@ impl BrowserProviderAdapter for HttpBrowserAdapter {
     }
 }
 
+#[derive(Clone, Copy)]
+struct CdpAdapterSpec {
+    kind: &'static str,
+    adapter_id: &'static str,
+    provider: &'static str,
+    builtin_script: Option<&'static str>,
+    default_target_url_prefix: Option<&'static str>,
+    new_chat_url: Option<&'static str>,
+    ephemeral_default: bool,
+}
+
 #[derive(Clone)]
 struct CdpBrowserAdapter {
     client: Client,
+    spec: CdpAdapterSpec,
 }
 
 #[derive(Debug, Deserialize)]
 struct CdpTarget {
+    #[serde(default)]
+    id: String,
     #[serde(rename = "type", default)]
     kind: String,
     #[serde(default)]
@@ -700,7 +714,7 @@ struct CdpTarget {
     websocket_debugger_url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct CdpAdapterResult {
     #[serde(default = "default_ok_status")]
     status: u16,
@@ -710,13 +724,99 @@ struct CdpAdapterResult {
 }
 
 impl CdpBrowserAdapter {
-    fn new() -> Result<Self, BrowserProviderError> {
+    fn custom() -> Result<Self, BrowserProviderError> {
+        Self::new(CdpAdapterSpec {
+            kind: "browser-cdp",
+            adapter_id: "custom-cdp",
+            provider: "custom",
+            builtin_script: None,
+            default_target_url_prefix: None,
+            new_chat_url: None,
+            ephemeral_default: false,
+        })
+    }
+
+    fn gemini() -> Result<Self, BrowserProviderError> {
+        Self::new(CdpAdapterSpec {
+            kind: "browser-gemini",
+            adapter_id: "gemini-web",
+            provider: "gemini",
+            builtin_script: Some(GEMINI_WEB_ADAPTER),
+            default_target_url_prefix: Some("https://gemini.google.com/app"),
+            new_chat_url: Some("https://gemini.google.com/app"),
+            ephemeral_default: true,
+        })
+    }
+
+    fn qwen() -> Result<Self, BrowserProviderError> {
+        Self::new(CdpAdapterSpec {
+            kind: "browser-qwen",
+            adapter_id: "qwen-web",
+            provider: "qwen",
+            builtin_script: Some(QWEN_WEB_ADAPTER),
+            default_target_url_prefix: Some("https://chat.qwen.ai/"),
+            new_chat_url: Some("https://chat.qwen.ai/c/new-chat"),
+            ephemeral_default: true,
+        })
+    }
+
+    fn new(spec: CdpAdapterSpec) -> Result<Self, BrowserProviderError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(4))
+            .timeout(Duration::from_secs(15))
             .build()
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self { client, spec })
+    }
+
+    fn script(&self, binding: &BrowserAccountBinding) -> Result<String, BrowserProviderError> {
+        if let Some(script) = self.spec.builtin_script {
+            if binding.adapter_script.is_some() {
+                return Err(BrowserProviderError::InvalidConfig(format!(
+                    "{} uses a built-in adapter; adapter_script is not allowed",
+                    self.spec.kind
+                )));
+            }
+            return Ok(script.to_string());
+        }
+
+        let script_path = binding.adapter_script.as_deref().ok_or_else(|| {
+            BrowserProviderError::InvalidConfig(
+                "browser-cdp requires browser.bindings.<account>.adapter_script".into(),
+            )
+        })?;
+        read_adapter_script(script_path)
+    }
+
+    fn target_url_prefix<'a>(&self, binding: &'a BrowserAccountBinding) -> Option<&'a str> {
+        binding
+            .target_url_prefix
+            .as_deref()
+            .or(self.spec.default_target_url_prefix)
+    }
+
+    fn use_ephemeral_chat(&self, binding: &BrowserAccountBinding) -> bool {
+        binding.ephemeral_chat.unwrap_or(self.spec.ephemeral_default)
+    }
+
+    fn model_label(&self, binding: &BrowserAccountBinding, model: &str) -> String {
+        binding
+            .model_labels
+            .get(model)
+            .cloned()
+            .unwrap_or_else(|| model.to_string())
+    }
+
+    fn context(&self, binding: &BrowserAccountBinding, model: Option<&str>) -> Value {
+        json!({
+            "provider": self.spec.provider,
+            "adapter_id": self.spec.adapter_id,
+            "contract_version": BROWSER_ADAPTER_CONTRACT_VERSION,
+            "model_label": model.map(|value| self.model_label(binding, value)),
+            "selectors": binding.selector_overrides,
+            "probe_timeout_ms": binding.probe_timeout_ms.unwrap_or(8_000),
+            "response_timeout_ms": binding.response_timeout_ms.unwrap_or(180_000),
+        })
     }
 
     async fn targets(&self, profile_dir: &str) -> Result<Vec<CdpTarget>, BrowserProviderError> {
@@ -739,6 +839,49 @@ impl CdpBrowserAdapter {
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))
     }
 
+    async fn open_ephemeral_target(
+        &self,
+        profile_dir: &str,
+    ) -> Result<CdpTarget, BrowserProviderError> {
+        let url = self.spec.new_chat_url.ok_or_else(|| {
+            BrowserProviderError::InvalidConfig(format!(
+                "{} does not define an ephemeral new-chat URL",
+                self.spec.kind
+            ))
+        })?;
+        let port = read_debugger_port(profile_dir)?;
+        let endpoint = format!("http://127.0.0.1:{port}/json/new?{url}");
+        let response = self
+            .client
+            .put(endpoint)
+            .send()
+            .await
+            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(BrowserProviderError::Transport(format!(
+                "DevTools create target returned HTTP {}",
+                response.status()
+            )));
+        }
+        response
+            .json::<CdpTarget>()
+            .await
+            .map_err(|error| BrowserProviderError::Transport(error.to_string()))
+    }
+
+    async fn close_target(&self, profile_dir: &str, target_id: &str) {
+        if target_id.trim().is_empty() {
+            return;
+        }
+        if let Ok(port) = read_debugger_port(profile_dir) {
+            let _ = self
+                .client
+                .get(format!("http://127.0.0.1:{port}/json/close/{target_id}"))
+                .send()
+                .await;
+        }
+    }
+
     fn select_target<'a>(
         &self,
         targets: &'a [CdpTarget],
@@ -750,54 +893,208 @@ impl CdpBrowserAdapter {
                 && prefix.is_none_or(|prefix| target.url.starts_with(prefix))
         })
     }
+
+    async fn evaluate_contract(
+        &self,
+        target: &CdpTarget,
+        script: &str,
+        operation: &str,
+        request: Option<&Value>,
+        context: &Value,
+        account_id: &str,
+    ) -> Result<AdapterContractEnvelope, BrowserProviderError> {
+        let expression = build_contract_expression(script, operation, request, context)?;
+        let value = evaluate_cdp(&target.websocket_debugger_url, &expression).await?;
+        let envelope: AdapterContractEnvelope = serde_json::from_value(value).map_err(|error| {
+            BrowserProviderError::AdapterIncompatible {
+                account_id: account_id.to_string(),
+                code: "invalid_contract_envelope".into(),
+                message: error.to_string(),
+            }
+        })?;
+        validate_contract_envelope(account_id, self.spec, &envelope)?;
+        Ok(envelope)
+    }
+
+    fn diagnostics_from_envelope(
+        &self,
+        account_id: &str,
+        binding: &BrowserAccountBinding,
+        envelope: AdapterContractEnvelope,
+    ) -> BrowserAdapterDiagnostics {
+        let meta = envelope.meta;
+        let probe = envelope.probe;
+        let error = envelope.error;
+        let status = if let Some(error) = &error {
+            if error.code == "login_required" {
+                "login_required"
+            } else {
+                "adapter_incompatible"
+            }
+        } else if probe.as_ref().is_some_and(|probe| probe.ok) {
+            "ready"
+        } else {
+            "adapter_incompatible"
+        };
+        let message = error
+            .as_ref()
+            .map(|error| error.message.clone())
+            .or_else(|| probe.as_ref().map(|probe| probe.message.clone()))
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| status.to_string());
+
+        BrowserAdapterDiagnostics {
+            account_id: account_id.to_string(),
+            provider_kind: self.kind().to_string(),
+            adapter_id: meta.as_ref().map(|meta| meta.id.clone()),
+            adapter_version: meta
+                .as_ref()
+                .map(|meta| meta.adapter_version.clone())
+                .filter(|value| !value.is_empty()),
+            contract_version: meta.as_ref().map(|meta| meta.contract_version),
+            expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+            status: status.into(),
+            message,
+            page_signature: probe.and_then(|probe| probe.page_signature),
+            target_url_prefix: self.target_url_prefix(binding).map(str::to_string),
+            configured_models: binding.models.clone(),
+        }
+    }
 }
 
 #[async_trait]
 impl BrowserProviderAdapter for CdpBrowserAdapter {
     fn kind(&self) -> &'static str {
-        "browser-cdp"
+        self.spec.kind
+    }
+
+    fn adapter_id(&self) -> &'static str {
+        self.spec.adapter_id
+    }
+
+    fn is_cdp(&self) -> bool {
+        true
+    }
+
+    async fn diagnose(
+        &self,
+        account_id: &str,
+        profile_dir: &str,
+        binding: &BrowserAccountBinding,
+    ) -> BrowserAdapterDiagnostics {
+        let script = match self.script(binding) {
+            Ok(script) => script,
+            Err(error) => {
+                return incompatible_diagnostics(
+                    account_id,
+                    self.kind(),
+                    self.adapter_id(),
+                    binding,
+                    "adapter_config_error",
+                    &error.to_string(),
+                );
+            }
+        };
+        let targets = match self.targets(profile_dir).await {
+            Ok(targets) => targets,
+            Err(error) => {
+                return unavailable_diagnostics(
+                    account_id,
+                    self.kind(),
+                    self.adapter_id(),
+                    binding,
+                    &error.to_string(),
+                );
+            }
+        };
+        let Some(target) = self.select_target(&targets, self.target_url_prefix(binding)) else {
+            return incompatible_diagnostics(
+                account_id,
+                self.kind(),
+                self.adapter_id(),
+                binding,
+                "target_not_found",
+                "No authenticated provider page matched the configured target URL",
+            );
+        };
+        let context = self.context(binding, None);
+        match self
+            .evaluate_contract(target, &script, "probe", None, &context, account_id)
+            .await
+        {
+            Ok(envelope) => self.diagnostics_from_envelope(account_id, binding, envelope),
+            Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
+                incompatible_diagnostics(
+                    account_id,
+                    self.kind(),
+                    self.adapter_id(),
+                    binding,
+                    &code,
+                    &message,
+                )
+            }
+            Err(error) => unavailable_diagnostics(
+                account_id,
+                self.kind(),
+                self.adapter_id(),
+                binding,
+                &error.to_string(),
+            ),
+        }
     }
 
     async fn execute_chat(
         &self,
         request: BrowserAdapterRequest,
     ) -> Result<reqwest::Response, BrowserProviderError> {
-        let script_path = request
-            .binding
-            .adapter_script
-            .as_deref()
-            .ok_or_else(|| BrowserProviderError::InvalidConfig(format!(
-                "browser-cdp account '{}' requires browser.bindings.{}.adapter_script",
-                request.account.id, request.account.id
-            )))?;
-        let script = read_adapter_script(script_path)?;
-        let targets = self.targets(&request.profile_dir).await?;
-        let target = self
-            .select_target(&targets, request.binding.target_url_prefix.as_deref())
-            .ok_or_else(|| BrowserProviderError::SessionUnavailable {
-                account_id: request.account.id.clone(),
-                session_id: request.session_id.clone(),
-            })?;
-
+        let script = self.script(&request.binding)?;
         let mut normalized_body = request.body;
         let object = normalized_body.as_object_mut().ok_or_else(|| {
             BrowserProviderError::InvalidConfig("chat request body must be a JSON object".into())
         })?;
-        object.insert("model".into(), Value::String(request.route.model));
-        let request_json = serde_json::to_string(&normalized_body)
-            .map_err(|error| BrowserProviderError::InvalidConfig(error.to_string()))?;
-        let expression = format!(
-            "(async () => {{\n{script}\nconst adapter = globalThis.__LLMGATEWAY_ADAPTER__;\nif (!adapter || typeof adapter.chat !== 'function') throw new Error('adapter script must expose globalThis.__LLMGATEWAY_ADAPTER__.chat(request)');\nreturn await adapter.chat({request_json});\n}})()"
-        );
-        let value = evaluate_cdp(&target.websocket_debugger_url, &expression).await?;
-        let result: CdpAdapterResult = serde_json::from_value(value).map_err(|error| {
-            BrowserProviderError::Transport(format!(
-                "browser CDP adapter returned an invalid result envelope: {error}"
-            ))
+        object.insert("model".into(), Value::String(request.route.model.clone()));
+
+        let context = self.context(&request.binding, Some(&request.route.model));
+        let ephemeral = self.use_ephemeral_chat(&request.binding);
+        let target = if ephemeral {
+            self.open_ephemeral_target(&request.profile_dir).await?
+        } else {
+            let targets = self.targets(&request.profile_dir).await?;
+            self.select_target(&targets, self.target_url_prefix(&request.binding))
+                .cloned()
+                .ok_or_else(|| BrowserProviderError::SessionUnavailable {
+                    account_id: request.account.id.clone(),
+                    session_id: request.session_id.clone(),
+                })?
+        };
+
+        let result = self
+            .evaluate_contract(
+                &target,
+                &script,
+                "chat",
+                Some(&normalized_body),
+                &context,
+                &request.account.id,
+            )
+            .await;
+        if ephemeral {
+            self.close_target(&request.profile_dir, &target.id).await;
+        }
+
+        let envelope = result?;
+        if let Some(error) = envelope.error {
+            return contract_error_to_provider_error(&request.account.id, &request.route.model, error);
+        }
+        let result = envelope.result.ok_or_else(|| BrowserProviderError::AdapterIncompatible {
+            account_id: request.account.id.clone(),
+            code: "missing_result".into(),
+            message: "adapter contract did not return a chat result".into(),
         })?;
         synthetic_response(result)
     }
 }
+
 
 fn read_debugger_port(profile_dir: &str) -> Result<u16, BrowserProviderError> {
     let path = Path::new(profile_dir).join("DevToolsActivePort");
