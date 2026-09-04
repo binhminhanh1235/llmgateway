@@ -462,7 +462,14 @@ impl BrowserProviderRegistry {
 
         let mut session_marker = session.updated_at.clone();
         if let Some(cached) = self.adapter_health.read().await.get(account_id).cloned() {
-            if cached.checked_at.elapsed() < Duration::from_secs(ADAPTER_HEALTH_TTL_SECONDS)
+            let cache_ttl = if session.status == "ready" {
+                Duration::from_secs(ADAPTER_HEALTH_TTL_SECONDS)
+            } else {
+                // Recoverable non-ready states must re-probe quickly after the user
+                // completes login or the provider page repairs itself.
+                Duration::from_secs(2)
+            };
+            if cached.checked_at.elapsed() < cache_ttl
                 && cached.session_marker == session_marker
                 && cached.diagnostics.provider_kind == provider_kind
             {
