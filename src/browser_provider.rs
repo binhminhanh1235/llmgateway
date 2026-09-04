@@ -41,9 +41,19 @@ pub struct BrowserProviderConfig {
     pub bindings: BTreeMap<String, BrowserAccountBinding>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BrowserTransportMode {
+    #[default]
+    BrowserOnly,
+    HttpPreferred,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct BrowserAccountBinding {
     pub session: String,
+    #[serde(default)]
+    pub transport_mode: BrowserTransportMode,
     #[serde(default)]
     pub target_url_prefix: Option<String>,
     #[serde(default)]
