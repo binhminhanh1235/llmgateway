@@ -818,6 +818,25 @@ struct CdpAdapterResult {
     body: Value,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct CdpStreamStart {
+    stream_id: String,
+    #[serde(default = "default_ok_status")]
+    status: u16,
+    #[serde(default = "default_sse_content_type")]
+    content_type: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CdpStreamPoll {
+    #[serde(default)]
+    events: Vec<Value>,
+    #[serde(default)]
+    done: bool,
+    #[serde(default)]
+    error: Option<AdapterContractError>,
+}
+
 impl CdpBrowserAdapter {
     fn custom() -> Result<Self, BrowserProviderError> {
         Self::new(CdpAdapterSpec {
@@ -1008,6 +1027,26 @@ impl CdpBrowserAdapter {
             BrowserProviderError::AdapterIncompatible {
                 account_id: account_id.to_string(),
                 code: "invalid_contract_envelope".into(),
+                message: error.to_string(),
+            }
+        })?;
+        validate_contract_envelope(account_id, self.spec, &envelope)?;
+        Ok(envelope)
+    }
+
+    async fn evaluate_stream_control(
+        &self,
+        target: &CdpTarget,
+        operation: &str,
+        request: &Value,
+        account_id: &str,
+    ) -> Result<AdapterContractEnvelope, BrowserProviderError> {
+        let expression = build_stream_control_expression(operation, request)?;
+        let value = evaluate_cdp(&target.websocket_debugger_url, &expression).await?;
+        let envelope: AdapterContractEnvelope = serde_json::from_value(value).map_err(|error| {
+            BrowserProviderError::AdapterIncompatible {
+                account_id: account_id.to_string(),
+                code: "invalid_stream_contract_envelope".into(),
                 message: error.to_string(),
             }
         })?;
