@@ -145,7 +145,7 @@
           <span>${running ? "Browser running" : "Browser stopped"}</span>
           <span>${driverReady ? "Authenticated page detected" : driverAvailable ? "Waiting for authenticated page" : "Chromium driver unavailable"}</span>
         </div>
-        ${session.last_error ? `<div class="browser-session-error">${escapeHtml(shorten(session.last_error, 150))}</div>` : ""}
+        ${session.last_error ? `<div class="browser-session-error" title="${escapeAttr(session.last_error)}">${escapeHtml(shorten(session.last_error, 320))}</div>` : ""}
         ${driver?.error && !driverAvailable ? `<div class="browser-driver-note">${escapeHtml(shorten(driver.error, 150))}</div>` : ""}
         <div class="browser-session-actions">
           <button type="button" class="browser-primary-action" data-browser-action="${button.action}" data-session-id="${escapeAttr(session.id)}" ${button.disabled ? "disabled" : ""}>${escapeHtml(button.label)}</button>
@@ -186,7 +186,7 @@
     }
     if (session.status === "degraded") return "The saved browser session is temporarily unavailable; llmgateway will try safe automatic recovery.";
     if (session.status === "stopped") return "The browser was stopped intentionally. The isolated profile is preserved for the next launch.";
-    if (session.status === "failed") return "Automatic recovery failed. Reset the session, then launch the isolated profile again.";
+    if (session.status === "failed") return "Browser launch or recovery failed. Review the diagnostic below, reset the session, then try again.";
     if (session.status === "requires_attention") return "The session needs attention. Reset it, then start a normal browser login again.";
     return "Start a dedicated Chromium profile and sign in normally. CAPTCHA and 2FA stay interactive.";
   }
@@ -197,7 +197,7 @@
       case "starting": return { tone: "working", label: "Starting" };
       case "login_required": return { tone: "working", label: "Login required" };
       case "degraded": return { tone: "attention", label: "Recovering" };
-      case "failed": return { tone: "attention", label: "Recovery failed" };
+      case "failed": return { tone: "attention", label: "Browser error" };
       case "stopped": return { tone: "idle", label: "Stopped" };
       case "requires_attention": return { tone: "attention", label: "Needs attention" };
       default: return { tone: "idle", label: "Not connected" };
