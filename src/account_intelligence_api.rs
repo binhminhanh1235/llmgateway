@@ -74,18 +74,17 @@ pub async fn account_intelligence(
         }
     };
 
+    let config = state.gateway.config_snapshot();
     let mut data = Vec::with_capacity(accounts.len());
     for summary in accounts {
-        let Some(account) = state.gateway.config.account(&summary.id) else {
+        let Some(account) = config.account(&summary.id) else {
             continue;
         };
-        let Some(provider) = state.gateway.config.provider(&account.provider) else {
+        let Some(provider) = config.provider(&account.provider) else {
             continue;
         };
 
-        let route_ids = state
-            .gateway
-            .config
+        let route_ids = config
             .routes
             .iter()
             .filter(|route| route.enabled && route.account == account.id)

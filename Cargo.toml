@@ -1,6 +1,6 @@
 [package]
 name = "llmgateway"
-version = "0.28.0"
+version = "0.29.0"
 edition = "2021"
 description = "Local-first universal LLM gateway with multi-account routing and failover"
 license = "MIT"
@@ -21,6 +21,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.28"
 toml = "0.8"
+toml_edit = "0.22"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

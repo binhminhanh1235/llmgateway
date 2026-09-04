@@ -36,10 +36,11 @@ pub async fn openai_chat(
     if let Err(response) = authorize(&headers, &state.gateway_api_key) {
         return response;
     }
+    let config = state.gateway.config_snapshot();
     let requested_model = body
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or(&state.gateway.config.api.default_model)
+        .unwrap_or(&config.api.default_model)
         .to_string();
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
@@ -285,13 +286,14 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         return response;
     }
 
+    let config = state.gateway.config_snapshot();
     let physical = match state.catalog.selectable_models().await {
         Ok(models) => models,
         Err(error) => return catalog_error(error),
     };
     let mut data: BTreeMap<String, Value> = BTreeMap::new();
 
-    for id in state.gateway.config.virtual_models.keys() {
+    for id in config.virtual_models.keys() {
         data.insert(
             id.clone(),
             json!({
@@ -330,7 +332,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     }
 
     // Preserve v0.1 route IDs as selectable aliases for existing clients.
-    for route in state.gateway.config.routes.iter().filter(|route| route.enabled) {
+    for route in config.routes.iter().filter(|route| route.enabled) {
         data.entry(route.id.clone()).or_insert_with(|| {
             json!({
                 "id":route.id,
@@ -401,6 +403,7 @@ pub async fn admin_refresh_account_models(
 }
 
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    let config = state.gateway.config_snapshot();
     let routes = state.gateway.router.snapshot().await;
     let catalog_models = state.catalog.models().await.map(|models| models.len()).unwrap_or(0);
     let threads = state
@@ -412,7 +415,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "status":"ok",
         "service":"llmgateway",
-        "default_model":state.gateway.config.api.default_model,
+        "default_model":config.api.default_model,
         "catalog_models":catalog_models,
         "threads":threads,
         "routes":routes

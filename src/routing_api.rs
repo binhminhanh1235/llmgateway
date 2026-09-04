@@ -27,10 +27,11 @@ pub async fn explain_routes(
         return response;
     }
 
+    let config = state.gateway.config_snapshot();
     let requested_model = request
         .model
         .filter(|model| !model.trim().is_empty())
-        .unwrap_or_else(|| state.gateway.config.api.default_model.clone());
+        .unwrap_or_else(|| config.api.default_model.clone());
 
     let has_task_context = request.task.is_some() || request.body.is_some();
     let mut body = request
@@ -45,7 +46,11 @@ pub async fn explain_routes(
     let trace = state
         .gateway
         .router
-        .explain_for_body(&requested_model, has_task_context.then_some(&body))
+        .explain_for_body_with_config(
+            config,
+            &requested_model,
+            has_task_context.then_some(&body),
+        )
         .await;
     json_response(StatusCode::OK, json!(trace), None)
 }

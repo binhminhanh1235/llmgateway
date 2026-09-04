@@ -10,6 +10,7 @@ use crate::{
     browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AppConfig, RouteConfig},
+    live_config::LiveConfig,
     quota_usage_runtime,
 };
 use account_readiness::evaluate_base;
@@ -83,15 +84,17 @@ enum QuotaEvaluation {
 #[derive(Clone)]
 pub struct Router {
     config: Arc<AppConfig>,
+    live_config: LiveConfig,
     catalog: Arc<ModelCatalog>,
     health: Arc<RwLock<HashMap<String, RouteHealth>>>,
     adaptive: Arc<RwLock<HashMap<String, AdaptiveRouteState>>>,
 }
 
 impl Router {
-    pub fn new(config: Arc<AppConfig>, catalog: Arc<ModelCatalog>) -> Self {
+    pub fn new(config: Arc<AppConfig>, live_config: LiveConfig, catalog: Arc<ModelCatalog>) -> Self {
         Self {
             config,
+            live_config,
             catalog,
             health: Arc::new(RwLock::new(HashMap::new())),
             adaptive: Arc::new(RwLock::new(HashMap::new())),
@@ -107,7 +110,17 @@ impl Router {
         requested_model: &str,
         body: Option<&Value>,
     ) -> Vec<RouteConfig> {
-        let evaluation = self.evaluate(requested_model, body).await;
+        let config = self.live_config.snapshot();
+        self.plan_for_body_with_config(config, requested_model, body).await
+    }
+
+    pub async fn plan_for_body_with_config(
+        &self,
+        config: Arc<AppConfig>,
+        requested_model: &str,
+        body: Option<&Value>,
+    ) -> Vec<RouteConfig> {
+        let evaluation = self.evaluate_with_config(config, requested_model, body).await;
         let mut eligible = evaluation
             .candidates
             .into_iter()
@@ -128,18 +141,37 @@ impl Router {
         preferred: &RouteConfig,
         best: &RouteConfig,
     ) -> bool {
-        let resolved_model = self.config.resolve_model_alias(requested_model);
-        if self.config.virtual_models.contains_key(resolved_model)
-            && self.transport_preference_rank(preferred) != self.transport_preference_rank(best)
+        let config = self.live_config.snapshot();
+        self.sticky_route_matches_best_task_fit_with_config(
+            config.as_ref(),
+            requested_model,
+            body,
+            preferred,
+            best,
+        )
+    }
+
+    pub fn sticky_route_matches_best_task_fit_with_config(
+        &self,
+        config: &AppConfig,
+        requested_model: &str,
+        body: &Value,
+        preferred: &RouteConfig,
+        best: &RouteConfig,
+    ) -> bool {
+        let resolved_model = config.resolve_model_alias(requested_model);
+        if config.virtual_models.contains_key(resolved_model)
+            && self.transport_preference_rank(config, preferred)
+                != self.transport_preference_rank(config, best)
         {
             return false;
         }
-        if !self.config.routing.task_aware_enabled {
+        if !config.routing.task_aware_enabled {
             return true;
         }
-        let task = classify_task(Some(body), &self.config.routing);
-        let preferred_fit = evaluate_task_fit(&task, preferred, &self.config.routing);
-        let best_fit = evaluate_task_fit(&task, best, &self.config.routing);
+        let task = classify_task(Some(body), &config.routing);
+        let preferred_fit = evaluate_task_fit(&task, preferred, &config.routing);
+        let best_fit = evaluate_task_fit(&task, best, &config.routing);
         preferred_fit.exclusion_reason.is_none()
             && preferred_fit.snapshot.adjustment == best_fit.snapshot.adjustment
     }
@@ -149,7 +181,19 @@ impl Router {
         requested_model: &str,
         body: Option<&Value>,
     ) -> RouteDecisionTrace {
-        let evaluation = self.evaluate(requested_model, body).await;
+        let config = self.live_config.snapshot();
+        self.explain_for_body_with_config(config, requested_model, body).await
+    }
+
+    pub async fn explain_for_body_with_config(
+        &self,
+        config: Arc<AppConfig>,
+        requested_model: &str,
+        body: Option<&Value>,
+    ) -> RouteDecisionTrace {
+        let evaluation = self
+            .evaluate_with_config(config.clone(), requested_model, body)
+            .await;
         let selected_route = evaluation
             .candidates
             .iter()
@@ -158,8 +202,8 @@ impl Router {
         RouteDecisionTrace {
             requested_model: requested_model.to_string(),
             resolved_model: evaluation.resolved_model,
-            execution_preference: self.config.routing.execution_preference.clone(),
-            api_fallback: self.config.routing.api_fallback,
+            execution_preference: config.routing.execution_preference.clone(),
+            api_fallback: config.routing.api_fallback,
             task: evaluation.task,
             selected_route,
             candidates: evaluation
@@ -170,11 +214,18 @@ impl Router {
         }
     }
 
-    async fn evaluate(&self, requested_model: &str, body: Option<&Value>) -> RouteEvaluation {
-        let resolved_model = self.config.resolve_model_alias(requested_model).to_string();
-        let task = classify_task(body, &self.config.routing);
-        let candidates = self.candidate_routes(&resolved_model).await;
-        let apply_execution_policy = self.config.virtual_models.contains_key(&resolved_model);
+    async fn evaluate_with_config(
+        &self,
+        config: Arc<AppConfig>,
+        requested_model: &str,
+        body: Option<&Value>,
+    ) -> RouteEvaluation {
+        let resolved_model = config.resolve_model_alias(requested_model).to_string();
+        let task = classify_task(body, &config.routing);
+        let candidates = self
+            .candidate_routes(config.clone(), &resolved_model)
+            .await;
+        let apply_execution_policy = config.virtual_models.contains_key(&resolved_model);
         let now = Utc::now();
         let health_snapshot = self.health.read().await.clone();
         let adaptive_snapshot = self.adaptive.read().await.clone();
@@ -186,13 +237,15 @@ impl Router {
             let readiness = if let Some(readiness) = readiness_by_account.get(&route.account) {
                 readiness.clone()
             } else {
-                let readiness = self.account_readiness(&route.account).await;
+                let readiness = self
+                    .account_readiness_with_config(config.as_ref(), &route.account)
+                    .await;
                 readiness_by_account.insert(route.account.clone(), readiness.clone());
                 readiness
             };
-            let transport = self.route_transport(&route);
+            let transport = self.route_transport(config.as_ref(), &route);
             let transport_preference = if apply_execution_policy {
-                self.transport_preference_rank(&route)
+                self.transport_preference_rank(config.as_ref(), &route)
             } else {
                 0
             };
@@ -201,9 +254,9 @@ impl Router {
                 .get(&route.id)
                 .cloned()
                 .unwrap_or_default()
-                .snapshot(&self.config.routing);
+                .snapshot(&config.routing);
             let adaptive_penalty = adaptive.penalty;
-            let task_fit = evaluate_task_fit(&task, &route, &self.config.routing);
+            let task_fit = evaluate_task_fit(&task, &route, &config.routing);
             let task_adjustment = task_fit.snapshot.adjustment;
             let mut exclusion_reasons = Vec::new();
             let mut warnings = Vec::new();
@@ -218,8 +271,8 @@ impl Router {
                 push_unique(&mut exclusion_reasons, "browser_model_unavailable");
             }
             if apply_execution_policy
-                && self.config.routing.execution_preference == "browser-first"
-                && !self.config.routing.api_fallback
+                && config.routing.execution_preference == "browser-first"
+                && !config.routing.api_fallback
                 && transport == "api"
             {
                 push_unique(&mut exclusion_reasons, "api_fallback_disabled");
@@ -284,7 +337,7 @@ impl Router {
                             push_unique(&mut warnings, "task_mismatch");
                         }
                         if apply_execution_policy {
-                            match self.config.routing.execution_preference.as_str() {
+                            match config.routing.execution_preference.as_str() {
                                 "browser-first" if transport == "browser" => {
                                     push_unique(&mut warnings, "browser_preferred");
                                 }
@@ -323,7 +376,7 @@ impl Router {
                             push_unique(&mut warnings, "task_mismatch");
                         }
                         if apply_execution_policy {
-                            match self.config.routing.execution_preference.as_str() {
+                            match config.routing.execution_preference.as_str() {
                                 "browser-first" if transport == "browser" => {
                                     push_unique(&mut warnings, "browser_preferred");
                                 }
@@ -400,39 +453,54 @@ impl Router {
         }
     }
 
-    fn route_transport(&self, route: &RouteConfig) -> &'static str {
-        self.config
+    fn route_transport(&self, config: &AppConfig, route: &RouteConfig) -> &'static str {
+        config
             .account(&route.account)
-            .and_then(|account| self.config.provider(&account.provider))
+            .and_then(|account| config.provider(&account.provider))
             .map(|provider| provider.transport())
             .unwrap_or("unknown")
     }
 
-    fn transport_preference_rank(&self, route: &RouteConfig) -> i32 {
-        match (self.config.routing.execution_preference.as_str(), self.route_transport(route)) {
+    fn transport_preference_rank(&self, config: &AppConfig, route: &RouteConfig) -> i32 {
+        match (
+            config.routing.execution_preference.as_str(),
+            self.route_transport(config, route),
+        ) {
             ("browser-first", "browser") | ("api-first", "api") => 0,
             ("browser-first", _) | ("api-first", _) => 1,
             _ => 0,
         }
     }
 
-    async fn candidate_routes(&self, resolved: &str) -> Vec<RouteConfig> {
-        if let Some(vm) = self.config.virtual_models.get(resolved) {
+    async fn candidate_routes(
+        &self,
+        config: Arc<AppConfig>,
+        resolved: &str,
+    ) -> Vec<RouteConfig> {
+        if let Some(vm) = config.virtual_models.get(resolved) {
             vm.routes
                 .iter()
-                .filter_map(|id| self.config.route(id).cloned())
+                .filter_map(|id| config.route(id).cloned())
                 .collect()
-        } else if let Some(route) = self.config.route(resolved) {
+        } else if let Some(route) = config.route(resolved) {
             vec![route.clone()]
         } else {
-            self.routes_for_physical_model(resolved).await
+            self.routes_for_physical_model(config, resolved).await
         }
     }
 
     pub async fn account_readiness(&self, account_id: &str) -> AccountReadiness {
-        let mut readiness = evaluate_base(self.config.as_ref(), account_id).await;
-        let routes = self
-            .config
+        let config = self.live_config.snapshot();
+        self.account_readiness_with_config(config.as_ref(), account_id).await
+    }
+
+    async fn account_readiness_with_config(
+        &self,
+        config: &AppConfig,
+        account_id: &str,
+    ) -> AccountReadiness {
+        let mut readiness = evaluate_base(config, account_id).await;
+        let routes = config
             .routes
             .iter()
             .filter(|route| route.enabled && route.account == account_id)
@@ -460,10 +528,14 @@ impl Router {
         readiness
     }
 
-    async fn routes_for_physical_model(&self, requested: &str) -> Vec<RouteConfig> {
+    async fn routes_for_physical_model(
+        &self,
+        config: Arc<AppConfig>,
+        requested: &str,
+    ) -> Vec<RouteConfig> {
         let (provider_filter, external_id) = requested
             .split_once('/')
-            .filter(|(provider, _)| self.config.provider(provider).is_some())
+            .filter(|(provider, _)| config.provider(provider).is_some())
             .map(|(provider, external)| (Some(provider), external))
             .unwrap_or((None, requested));
 
@@ -471,7 +543,7 @@ impl Router {
             Ok(models) => models,
             Err(error) => {
                 warn!(%error, "failed to read model catalog while planning route");
-                return self.config_routes_for_model(provider_filter, external_id);
+                return self.config_routes_for_model(config.as_ref(), provider_filter, external_id);
             }
         };
 
@@ -485,7 +557,7 @@ impl Router {
                 binding.enabled
                     && matches!(binding.availability.as_str(), "available" | "unknown")
             }) {
-                let Some(account) = self.config.account(&binding.account_id) else {
+                let Some(account) = config.account(&binding.account_id) else {
                     continue;
                 };
                 if !account.enabled || account.provider != model.provider {
@@ -496,7 +568,7 @@ impl Router {
                     continue;
                 }
 
-                if let Some(configured) = self.config.routes.iter().find(|route| {
+                if let Some(configured) = config.routes.iter().find(|route| {
                     route.enabled && route.account == account.id && route.model == external_id
                 }) {
                     let mut configured = configured.clone();
@@ -512,12 +584,11 @@ impl Router {
                     continue;
                 }
 
-                let account_order = self
-                    .config
+                let account_order = config
                     .accounts
                     .iter()
                     .position(|candidate| candidate.id == account.id)
-                    .unwrap_or(self.config.accounts.len()) as i32;
+                    .unwrap_or(config.accounts.len()) as i32;
                 routes.push(RouteConfig {
                     id: format!("discovered:{}:{}", account.id, external_id),
                     account: account.id.clone(),
@@ -531,7 +602,7 @@ impl Router {
         }
 
         if routes.is_empty() {
-            self.config_routes_for_model(provider_filter, external_id)
+            self.config_routes_for_model(config.as_ref(), provider_filter, external_id)
         } else {
             routes
         }
@@ -539,17 +610,18 @@ impl Router {
 
     fn config_routes_for_model(
         &self,
+        config: &AppConfig,
         provider_filter: Option<&str>,
         external_id: &str,
     ) -> Vec<RouteConfig> {
-        self.config
+        config
             .routes
             .iter()
             .filter(|route| {
                 route.enabled
                     && route.model == external_id
                     && provider_filter.is_none_or(|provider| {
-                        self.config
+                        config
                             .account(&route.account)
                             .is_some_and(|account| account.provider == provider)
                     })

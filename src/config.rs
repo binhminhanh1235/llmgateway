@@ -262,7 +262,11 @@ pub enum ConfigError {
 impl AppConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let raw = fs::read_to_string(path)?;
-        let mut config: Self = toml::from_str(&raw)?;
+        Self::parse(&raw)
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, ConfigError> {
+        let mut config: Self = toml::from_str(raw)?;
         config.normalize();
         config.validate()?;
         Ok(config)

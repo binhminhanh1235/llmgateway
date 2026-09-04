@@ -2,6 +2,7 @@ mod account_intelligence_api;
 mod admin;
 mod admin_api;
 mod api;
+mod browser_account_setup;
 mod browser_provider;
 mod browser_provider_runtime;
 mod browser_session;
@@ -22,6 +23,7 @@ mod embedding_runtime;
 mod execution_trace;
 mod execution_trace_api;
 mod gateway;
+mod live_config;
 mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
@@ -47,6 +49,9 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use browser_account_setup::{
+    browser_account_setup_presets, create_browser_account_setup, set_browser_account_enabled,
+};
 use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
 use browser_session::{BrowserConfig, BrowserSessionStore};
 use browser_session_api::{
@@ -69,6 +74,7 @@ use embedding_retrieval::EmbeddingRetriever;
 use execution_trace::ExecutionTraceStore;
 use execution_trace_api::{get_execution, list_executions};
 use gateway::Gateway;
+use live_config::LiveConfig;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
@@ -103,9 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let browser_provider_config = BrowserProviderConfig::load_from_gateway_config(&config_path)?;
     let chromium_config = ChromiumConfig::load_from_gateway_config(&config_path)?;
     let config = Arc::new(AppConfig::load(&config_path)?);
+    let live_config = LiveConfig::new(config.clone());
     let gateway_api_key = Arc::new(config.gateway_api_key()?);
 
-    let catalog = Arc::new(ModelCatalog::connect(config.clone()).await?);
+    let catalog = Arc::new(ModelCatalog::connect(live_config.clone()).await?);
     catalog.seed_from_config().await?;
     let conversations = Arc::new(ConversationStore::connect(config.clone()).await?);
     let execution_traces = Arc::new(ExecutionTraceStore::connect(config.clone()).await?);
@@ -173,6 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let gateway = Arc::new(Gateway::new(
         config.clone(),
+        live_config.clone(),
         catalog.clone(),
         execution_traces,
     )?);
@@ -268,6 +276,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/_llmgateway/accounts/{account_id}/quota/reset",
             post(reset_account_quota),
+        )
+        .route(
+            "/_llmgateway/browser-account-setup/providers",
+            get(browser_account_setup_presets),
+        )
+        .route(
+            "/_llmgateway/browser-account-setup",
+            post(create_browser_account_setup),
+        )
+        .route(
+            "/_llmgateway/browser-account-setup/{account_id}",
+            axum::routing::patch(set_browser_account_enabled),
         )
         .route("/_llmgateway/browser-sessions", get(list_browser_sessions))
         .route(

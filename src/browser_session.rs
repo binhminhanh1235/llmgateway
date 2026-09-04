@@ -10,7 +10,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -53,7 +53,7 @@ struct ConfigEnvelope {
 
 #[derive(Clone)]
 pub struct BrowserSessionStore {
-    browser_config: Arc<BrowserConfig>,
+    browser_config: Arc<RwLock<BrowserConfig>>,
     pool: SqlitePool,
 }
 
@@ -139,7 +139,7 @@ impl BrowserSessionStore {
             .connect_with(options)
             .await?;
         let store = Self {
-            browser_config: Arc::new(browser_config),
+            browser_config: Arc::new(RwLock::new(browser_config)),
             pool,
         };
         store.migrate().await?;
@@ -148,17 +148,40 @@ impl BrowserSessionStore {
     }
 
     pub fn enabled(&self) -> bool {
-        self.browser_config.enabled
+        self.config_snapshot().enabled
+    }
+
+    pub async fn reload(&self, browser_config: BrowserConfig) -> Result<(), BrowserSessionError> {
+        validate_browser_config(&browser_config)?;
+        if browser_config.enabled || !browser_config.sessions.is_empty() {
+            ensure_private_dir(Path::new(&browser_config.profile_root))?;
+        }
+        {
+            let mut guard = self
+                .browser_config
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = browser_config;
+        }
+        self.seed().await
+    }
+
+    fn config_snapshot(&self) -> BrowserConfig {
+        self.browser_config
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub async fn summary(&self) -> Result<BrowserSessionSummary, BrowserSessionError> {
+        let config = self.config_snapshot();
         let mut sessions = Vec::new();
-        for id in self.browser_config.sessions.keys() {
+        for id in config.sessions.keys() {
             sessions.push(self.session(id).await?);
         }
         Ok(BrowserSessionSummary {
-            enabled: self.enabled(),
-            profile_root: self.browser_config.profile_root.clone(),
+            enabled: config.enabled,
+            profile_root: config.profile_root,
             sessions,
         })
     }
@@ -368,15 +391,17 @@ impl BrowserSessionStore {
         self.session(id).await
     }
 
-    fn spec(&self, id: &str) -> Result<&BrowserSessionSpec, BrowserSessionError> {
-        self.browser_config
+    fn spec(&self, id: &str) -> Result<BrowserSessionSpec, BrowserSessionError> {
+        self.config_snapshot()
             .sessions
             .get(id)
+            .cloned()
             .ok_or_else(|| BrowserSessionError::NotFound(id.to_string()))
     }
 
     fn profile_dir(&self, id: &str) -> PathBuf {
-        Path::new(&self.browser_config.profile_root).join(id)
+        let config = self.config_snapshot();
+        Path::new(&config.profile_root).join(id)
     }
 
     async fn migrate(&self) -> Result<(), BrowserSessionError> {
@@ -414,7 +439,8 @@ impl BrowserSessionStore {
     }
 
     async fn seed(&self) -> Result<(), BrowserSessionError> {
-        for (id, spec) in &self.browser_config.sessions {
+        let config = self.config_snapshot();
+        for (id, spec) in &config.sessions {
             sqlx::query(
                 "INSERT INTO browser_session_state (session_id, provider_id, status, updated_at)
                  VALUES (?, ?, 'login_required', ?)
@@ -425,7 +451,7 @@ impl BrowserSessionStore {
             .bind(now_string())
             .execute(&self.pool)
             .await?;
-            if self.browser_config.enabled && spec.enabled {
+            if config.enabled && spec.enabled {
                 ensure_private_dir(&self.profile_dir(id))?;
             }
         }
