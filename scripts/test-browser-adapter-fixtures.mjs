@@ -395,14 +395,16 @@ async function testChatGPTFreshStreamSkipsRedundantNewChatAndSubmitsBeforeReturn
   assert.ok(started.stream_id);
 
   await new Promise((resolve) => setTimeout(resolve, 120));
-  const first = await adapter.streamPoll({ stream_id: started.stream_id });
-  assert.equal(first.error, null, JSON.stringify(first));
-  assert.ok(first.events.length >= 1, JSON.stringify(first));
+  let polled = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(polled.error, null, JSON.stringify(polled));
+  assert.ok(polled.events.length >= 1, JSON.stringify(polled));
 
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  const second = await adapter.streamPoll({ stream_id: started.stream_id });
-  assert.equal(second.error, null, JSON.stringify(second));
-  assert.equal(second.done, true, JSON.stringify(second));
+  if (!polled.done) {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    polled = await adapter.streamPoll({ stream_id: started.stream_id });
+    assert.equal(polled.error, null, JSON.stringify(polled));
+  }
+  assert.equal(polled.done, true, JSON.stringify(polled));
 }
 
 async function testChatGPTReopenWaitsForStableHistory() {
