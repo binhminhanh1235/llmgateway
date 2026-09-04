@@ -347,7 +347,7 @@ fn first_matching_capability(
 ) -> Option<String> {
     expected
         .iter()
-        .find(|candidate| capabilities.contains(*candidate))
+        .find(|candidate| capabilities.contains(**candidate))
         .map(|candidate| (*candidate).to_string())
 }
 
