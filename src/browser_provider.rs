@@ -799,12 +799,14 @@ impl CdpBrowserAdapter {
         binding.ephemeral_chat.unwrap_or(self.spec.ephemeral_default)
     }
 
-    fn model_label(&self, binding: &BrowserAccountBinding, model: &str) -> String {
-        binding
-            .model_labels
-            .get(model)
-            .cloned()
-            .unwrap_or_else(|| model.to_string())
+    fn model_label(&self, binding: &BrowserAccountBinding, model: &str) -> Option<String> {
+        if let Some(label) = binding.model_labels.get(model) {
+            return Some(label.clone());
+        }
+        if self.spec.builtin_script.is_none() {
+            return Some(model.to_string());
+        }
+        None
     }
 
     fn context(&self, binding: &BrowserAccountBinding, model: Option<&str>) -> Value {
@@ -812,7 +814,7 @@ impl CdpBrowserAdapter {
             "provider": self.spec.provider,
             "adapter_id": self.spec.adapter_id,
             "contract_version": BROWSER_ADAPTER_CONTRACT_VERSION,
-            "model_label": model.map(|value| self.model_label(binding, value)),
+            "model_label": model.and_then(|value| self.model_label(binding, value)),
             "selectors": binding.selector_overrides,
             "probe_timeout_ms": binding.probe_timeout_ms.unwrap_or(8_000),
             "response_timeout_ms": binding.response_timeout_ms.unwrap_or(180_000),
