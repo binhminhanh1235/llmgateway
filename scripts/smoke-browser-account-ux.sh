@@ -96,7 +96,7 @@ import json,sys
 x=json.load(sys.stdin)
 assert x["hot_activation"] is True, x
 assert x["restart_required_after_create"] is False, x
-assert {p["id"] for p in x["providers"]} >= {"gemini","qwen"}, x
+assert {p["id"] for p in x["providers"]} >= {"gemini","chatgpt","qwen"}, x
 '
 
 BEFORE=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions "${AUTH[@]}")
