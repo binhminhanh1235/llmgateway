@@ -394,6 +394,10 @@ mod tests {
             task_simple_max_input_tokens: 800,
             execution_preference: "browser-first".into(),
             api_fallback: true,
+            browser_fairness_enabled: true,
+            browser_recovery_penalty: 8,
+            browser_recovery_max_penalty: 40,
+            browser_sticky_affinity: true,
         }
     }
 

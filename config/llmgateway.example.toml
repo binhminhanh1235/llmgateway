@@ -127,12 +127,22 @@ task_mismatch_penalty = 12
 task_long_context_threshold_tokens = 12000
 task_simple_max_input_tokens = 800
 
-# v0.27 is browser-first by default for virtual models. Browser and API routes still
-# use the normal priority/quota/adaptive/task score inside their transport tier.
-# Set "balanced" to remove the transport preference or "api-first" to invert it.
-execution_preference = "browser-first"
-# When false under browser-first, API routes are excluded from virtual-model fallback.
+# v0.31 keeps browser execution as the default while making the policy explicit.
+# Preferred names are "prefer-browser", "browser-only", "balanced", "prefer-api", and "api-only".
+# Legacy "browser-first" and "api-first" remain accepted aliases.
+execution_preference = "prefer-browser"
+# Under prefer-browser, false removes API routes from fallback. browser-only is the hard boundary.
 api_fallback = true
+
+# Equal-quality browser routes rotate by least-recent successful account use. Persistent threads
+# can keep a healthy browser route sticky so provider/session churn does not defeat context affinity.
+browser_fairness_enabled = true
+browser_sticky_affinity = true
+
+# A browser route that just left cooldown re-enters cautiously. The penalty is additive to the
+# normal priority/quota/adaptive/task score and disappears after a successful request.
+browser_recovery_penalty = 8
+browser_recovery_max_penalty = 40
 
 # Context is compiled before persistent-thread requests are sent upstream.
 # Full transcripts remain in SQLite; checkpoints only replace older turns in the model input.
