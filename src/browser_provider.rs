@@ -1534,6 +1534,19 @@ mod tests {
     }
 
     #[test]
+    fn browser_binding_model_allowlist_is_enforced() {
+        let mut binding = test_binding();
+        binding.models = vec!["model-a".into(), "model-b".into()];
+        let mut config = BrowserProviderConfig::default();
+        config.bindings.insert("account".into(), binding);
+        let registry = BrowserProviderRegistry::new(config).unwrap();
+        assert!(registry.model_allowed("account", "model-a"));
+        assert!(registry.model_allowed("account", "model-b"));
+        assert!(!registry.model_allowed("account", "model-c"));
+        assert!(registry.model_allowed("unbound-account", "model-c"));
+    }
+
+    #[test]
     fn built_in_provider_defaults_are_first_class() {
         let gemini = CdpBrowserAdapter::gemini().unwrap();
         let qwen = CdpBrowserAdapter::qwen().unwrap();
