@@ -294,6 +294,7 @@ assert s["byte_count"] > 0, s
 assert "dropped" in (s["error"] or ""), s
 '
 
+rm -f "$PROFILE_DIR/target-closed" "$PROFILE_DIR/stream-start-failed"
 python3 <<'PY'
 import http.client
 import json
@@ -319,6 +320,7 @@ assert "data: [DONE]" in payload, payload
 conn.close()
 PY
 test -f "$PROFILE_DIR/stream-start-failed"
+test -f "$PROFILE_DIR/target-closed"
 
 curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/qwen-stream/driver/stop   "${AUTH[@]}" >/dev/null
 BROWSER_PID=""
