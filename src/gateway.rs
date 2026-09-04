@@ -149,6 +149,19 @@ fn observe_terminal_sse_done(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
 }
 
 
+fn stream_error_message(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(current) = source {
+        let candidate = current.to_string();
+        if !candidate.trim().is_empty() {
+            message = candidate;
+        }
+        source = current.source();
+    }
+    message
+}
+
 fn upstream_stream_error_sse(message: &str) -> bytes::Bytes {
     let payload = serde_json::json!({
         "error": {
@@ -615,7 +628,7 @@ impl Gateway {
                         yield Ok::<_, std::io::Error>(bytes);
                     }
                     Err(error) => {
-                        let message = error.to_string();
+                        let message = stream_error_message(&error);
                         guard.finish("failed", Some(&message)).await;
                         // Preserve a valid SSE response for downstream clients. Propagating a
                         // transport-level body error makes reqwest surface only the opaque
@@ -883,7 +896,7 @@ fn cooldown_for(status: StatusCode) -> i64 {
 
 #[cfg(test)]
 mod stream_trace_tests {
-    use super::{observe_terminal_sse_done, upstream_stream_error_sse};
+    use super::{observe_terminal_sse_done, stream_error_message, upstream_stream_error_sse};
 
     #[test]
     fn terminal_done_detector_requires_a_complete_sse_data_frame() {
@@ -894,6 +907,29 @@ mod stream_trace_tests {
         ));
         assert!(!observe_terminal_sse_done(&mut buffer, b"data: [DO"));
         assert!(observe_terminal_sse_done(&mut buffer, b"NE]\n\n"));
+    }
+
+    #[derive(Debug)]
+    struct NestedStreamError;
+
+    impl std::fmt::Display for NestedStreamError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("forced browser stream poll failure")
+        }
+    }
+
+    impl std::error::Error for NestedStreamError {}
+
+    #[test]
+    fn stream_error_message_prefers_the_deepest_source() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::Other,
+            NestedStreamError,
+        );
+        assert_eq!(
+            stream_error_message(&error),
+            "forced browser stream poll failure"
+        );
     }
 
     #[test]
