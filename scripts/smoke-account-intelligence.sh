@@ -150,6 +150,9 @@ assert browser["browser_session"]["id"] == "fake-web", browser
 assert browser["readiness"]["browser_session_id"] == "fake-web", browser
 assert browser["readiness"]["browser_session_status"] == "login_required", browser
 assert browser["browser_session"]["status"] == "login_required", browser
+assert browser["readiness"]["browser_adapter_status"] == "unavailable", browser
+assert browser["browser_adapter"]["adapter_id"] == "browser-http", browser
+assert browser["browser_adapter"]["status"] == "unavailable", browser
 
 missing=accounts["missing-key-account"]
 assert missing["routing_state"] == "unavailable", missing
@@ -170,6 +173,7 @@ assert api["readiness"]["effective_status"] == "ready", api
 assert api["readiness"]["routable"] is True, api
 assert api["readiness"]["healthy_route_count"] == 1, api
 assert api["browser_session"] is None, api
+assert api["browser_adapter"] is None, api
 '
 
 echo "llmgateway unified account readiness smoke test passed"
