@@ -113,7 +113,7 @@
       "Available tools: " + JSON.stringify(definitions),
       "Tool choice: " + String(choice),
       "When a tool is needed, respond ONLY with this exact envelope and no markdown:",
-      "<LLMGATEWAY_TOOL_CALLS>{\"tool_calls\":[{\"name\":\"tool_name\",\"arguments\":{}}]}</LLMGATEWAY_TOOL_CALLS>",
+      "[[LLMGATEWAY_TOOL_CALLS]]{\"tool_calls\":[{\"name\":\"tool_name\",\"arguments\":{}}]}[[/LLMGATEWAY_TOOL_CALLS]]",
       "You may return multiple tool_calls. arguments must be a JSON object. If no tool is needed, answer normally."
     ].join("\n");
   };
@@ -145,11 +145,15 @@
     const tools = Array.isArray(request?.tools) ? request.tools : [];
     if (!tools.length || request?.tool_choice === "none") return null;
     const allowed = new Set(tools.map((tool) => tool?.function?.name).filter(Boolean));
-    const match = String(answer || "").match(/<LLMGATEWAY_TOOL_CALLS>\s*([\s\S]*?)\s*<\/LLMGATEWAY_TOOL_CALLS>/i);
-    if (!match) return null;
+    const rawAnswer = String(answer || "").trim();
+    const marked = rawAnswer.match(/\[\[LLMGATEWAY_TOOL_CALLS\]\]\s*([\s\S]*?)\s*\[\[\/LLMGATEWAY_TOOL_CALLS\]\]/i);
+    let candidate = marked ? marked[1].trim() : rawAnswer;
+    const fenced = candidate.match(/^\`\`\`(?:json)?\s*([\s\S]*?)\s*\`\`\`$/i);
+    if (fenced) candidate = fenced[1].trim();
+    if (!marked && !candidate.startsWith("{")) return null;
     let payload;
     try {
-      payload = JSON.parse(match[1]);
+      payload = JSON.parse(candidate);
     } catch (_) {
       return null;
     }
