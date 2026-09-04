@@ -748,9 +748,10 @@ impl BrowserProviderRegistry {
         body: &Value,
         thread_id: Option<&str>,
     ) -> Result<reqwest::Response, BrowserProviderError> {
-        let adapter = self
+        let browser_adapter = self
             .adapters
             .get(&provider.kind)
+            .cloned()
             .ok_or_else(|| BrowserProviderError::UnsupportedAdapter(provider.kind.clone()))?;
         let binding = self
             .config_snapshot()
@@ -779,8 +780,13 @@ impl BrowserProviderRegistry {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
             })?;
-        let auth_snapshot_ready =
-            provider.kind == "browser-http" && self.auth_material_available(&binding.session);
+
+        let direct_adapter = self.direct_adapter(&provider.kind, &binding).cloned();
+        let direct_snapshot_ready = direct_adapter.is_some()
+            && self.auth_material_available(&binding.session);
+        let auth_snapshot_ready = (provider.kind == "browser-http"
+            && self.auth_material_available(&binding.session))
+            || direct_snapshot_ready;
         if !session.enabled || (session.status != "ready" && !auth_snapshot_ready) {
             return Err(BrowserProviderError::SessionUnavailable {
                 account_id: account.id.clone(),
@@ -788,18 +794,39 @@ impl BrowserProviderRegistry {
             });
         }
 
-        let result = adapter
-            .execute_chat(BrowserAdapterRequest {
-                provider: provider.clone(),
-                account: account.clone(),
-                route: route.clone(),
-                body: body.clone(),
-                session_id: binding.session.clone(),
-                profile_dir: session.profile_dir,
-                binding: binding.clone(),
-                thread_id: thread_id.map(str::to_string),
-            })
-            .await;
+        let adapter_request = BrowserAdapterRequest {
+            provider: provider.clone(),
+            account: account.clone(),
+            route: route.clone(),
+            body: body.clone(),
+            session_id: binding.session.clone(),
+            profile_dir: session.profile_dir.clone(),
+            binding: binding.clone(),
+            thread_id: thread_id.map(str::to_string),
+        };
+
+        let mut used_adapter = browser_adapter.clone();
+        let result = if direct_snapshot_ready {
+            let direct = direct_adapter.expect("direct adapter checked above");
+            used_adapter = direct.clone();
+            let direct_result = direct.execute_chat(adapter_request.clone()).await;
+            let safe_browser_fallback = matches!(
+                &direct_result,
+                Err(BrowserProviderError::AdapterIncompatible { .. })
+                    | Err(BrowserProviderError::ModelUnavailable { .. })
+            ) && session.status == "ready"
+                && browser_adapter.is_cdp()
+                && self.cdp_session_live(&binding.session).await;
+
+            if safe_browser_fallback {
+                used_adapter = browser_adapter.clone();
+                browser_adapter.execute_chat(adapter_request).await
+            } else {
+                direct_result
+            }
+        } else {
+            browser_adapter.execute_chat(adapter_request).await
+        };
 
         match &result {
             Ok(_) => {
@@ -810,7 +837,7 @@ impl BrowserProviderRegistry {
                     let _ = self
                         .mark_login_required(
                             &account.id,
-                            &format!("browser adapter login required: {message}"),
+                            &format!("browserless adapter login required: {message}"),
                         )
                         .await;
                     "login_required"
@@ -820,7 +847,7 @@ impl BrowserProviderRegistry {
                 self.cache_diagnostics(BrowserAdapterDiagnostics {
                     account_id: account.id.clone(),
                     provider_kind: provider.kind.clone(),
-                    adapter_id: Some(adapter.adapter_id().to_string()),
+                    adapter_id: Some(used_adapter.adapter_id().to_string()),
                     adapter_version: None,
                     contract_version: None,
                     expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
@@ -834,7 +861,7 @@ impl BrowserProviderRegistry {
             }
             Err(BrowserProviderError::SessionUnavailable { .. })
             | Err(BrowserProviderError::Transport(_))
-                if adapter.is_cdp() =>
+                if used_adapter.is_cdp() =>
             {
                 let error_text = result
                     .as_ref()
