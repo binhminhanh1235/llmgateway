@@ -98,7 +98,6 @@ fn driver_error(error: ChromiumDriverError) -> Response<Body> {
         | ChromiumDriverError::SessionNotConfigured(_)
         | ChromiumDriverError::ExecutableNotFound
         | ChromiumDriverError::AlreadyRunning(_)
-        | ChromiumDriverError::StartupTimeout
         | ChromiumDriverError::InvalidDevToolsPort(_)
         | ChromiumDriverError::InvalidConfig(_) => {
             json_error(StatusCode::BAD_REQUEST, "chromium_driver_error", &error.to_string())
@@ -108,7 +107,10 @@ fn driver_error(error: ChromiumDriverError) -> Response<Body> {
             "browser_session_error",
             &error.to_string(),
         ),
-        ChromiumDriverError::Launch(error) => json_error(
+        ChromiumDriverError::Launch(_)
+        | ChromiumDriverError::DevToolsPortReservation(_)
+        | ChromiumDriverError::EarlyExit(_)
+        | ChromiumDriverError::StartupTimeout(_) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "chromium_launch_error",
             &error.to_string(),
