@@ -21,7 +21,10 @@ use serde_json::Value;
 use task_aware::{classify as classify_task, route_fit as evaluate_task_fit};
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -40,6 +43,9 @@ pub struct RouteCandidateDecision {
     pub model: String,
     pub transport: String,
     pub transport_preference: i32,
+    pub policy_reason: String,
+    pub browser_fairness_rank: Option<u64>,
+    pub browser_recovery_penalty: i32,
     pub base_priority: i32,
     pub eligible: bool,
     pub exclusion_reasons: Vec<String>,
@@ -61,6 +67,7 @@ pub struct RouteDecisionTrace {
     pub requested_model: String,
     pub resolved_model: String,
     pub execution_preference: String,
+    pub execution_policy: String,
     pub api_fallback: bool,
     pub task: TaskProfile,
     pub selected_route: Option<String>,
@@ -88,6 +95,8 @@ pub struct Router {
     catalog: Arc<ModelCatalog>,
     health: Arc<RwLock<HashMap<String, RouteHealth>>>,
     adaptive: Arc<RwLock<HashMap<String, AdaptiveRouteState>>>,
+    browser_last_success: Arc<RwLock<HashMap<String, u64>>>,
+    browser_success_sequence: Arc<AtomicU64>,
 }
 
 impl Router {
@@ -98,6 +107,8 @@ impl Router {
             catalog,
             health: Arc::new(RwLock::new(HashMap::new())),
             adaptive: Arc::new(RwLock::new(HashMap::new())),
+            browser_last_success: Arc::new(RwLock::new(HashMap::new())),
+            browser_success_sequence: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -166,6 +177,11 @@ impl Router {
         {
             return false;
         }
+        if self.route_transport(config, preferred) == "browser"
+            && !config.routing.browser_sticky_affinity
+        {
+            return false;
+        }
         if !config.routing.task_aware_enabled {
             return true;
         }
@@ -203,6 +219,7 @@ impl Router {
             requested_model: requested_model.to_string(),
             resolved_model: evaluation.resolved_model,
             execution_preference: config.routing.execution_preference.clone(),
+            execution_policy: config.routing.execution_policy().to_string(),
             api_fallback: config.routing.api_fallback,
             task: evaluation.task,
             selected_route,
@@ -229,6 +246,7 @@ impl Router {
         let now = Utc::now();
         let health_snapshot = self.health.read().await.clone();
         let adaptive_snapshot = self.adaptive.read().await.clone();
+        let browser_success_snapshot = self.browser_last_success.read().await.clone();
         let mut readiness_by_account: HashMap<String, AccountReadiness> = HashMap::new();
         let mut quota_by_account: HashMap<String, QuotaEvaluation> = HashMap::new();
         let mut evaluated = Vec::with_capacity(candidates.len());
@@ -256,6 +274,31 @@ impl Router {
                 .unwrap_or_default()
                 .snapshot(&config.routing);
             let adaptive_penalty = adaptive.penalty;
+            let browser_fairness_rank = if transport == "browser"
+                && config.routing.browser_fairness_enabled
+            {
+                Some(
+                    browser_success_snapshot
+                        .get(&route.account)
+                        .copied()
+                        .unwrap_or(0),
+                )
+            } else {
+                None
+            };
+            let browser_recovery_penalty = if transport == "browser"
+                && route_health.consecutive_failures > 0
+            {
+                let failures = route_health
+                    .consecutive_failures
+                    .min(i32::MAX as u32) as i32;
+                failures
+                    .saturating_mul(config.routing.browser_recovery_penalty)
+                    .min(config.routing.browser_recovery_max_penalty)
+            } else {
+                0
+            };
+            let policy_reason = self.policy_reason(config.as_ref(), transport).to_string();
             let task_fit = evaluate_task_fit(&task, &route, &config.routing);
             let task_adjustment = task_fit.snapshot.adjustment;
             let mut exclusion_reasons = Vec::new();
@@ -270,12 +313,21 @@ impl Router {
             {
                 push_unique(&mut exclusion_reasons, "browser_model_unavailable");
             }
-            if apply_execution_policy
-                && config.routing.execution_preference == "browser-first"
-                && !config.routing.api_fallback
-                && transport == "api"
-            {
-                push_unique(&mut exclusion_reasons, "api_fallback_disabled");
+            if apply_execution_policy {
+                match config.routing.execution_policy() {
+                    "browser-only" if transport != "browser" => {
+                        push_unique(&mut exclusion_reasons, "policy_browser_only");
+                    }
+                    "api-only" if transport != "api" => {
+                        push_unique(&mut exclusion_reasons, "policy_api_only");
+                    }
+                    "prefer-browser"
+                        if transport == "api" && !config.routing.api_fallback =>
+                    {
+                        push_unique(&mut exclusion_reasons, "api_fallback_disabled");
+                    }
+                    _ => {}
+                }
             }
             if let Some(reason) = task_fit.exclusion_reason {
                 push_unique(&mut exclusion_reasons, reason);
@@ -326,10 +378,19 @@ impl Router {
                                 .priority
                                 .saturating_add(penalty)
                                 .saturating_add(adaptive_penalty)
+                                .saturating_add(browser_recovery_penalty)
                                 .saturating_add(task_adjustment),
                         );
                         if adaptive.active && adaptive_penalty > 0 {
                             push_unique(&mut warnings, "adaptive_degraded");
+                        }
+                        if browser_recovery_penalty > 0 {
+                            push_unique(&mut warnings, "browser_recovery_probe");
+                        }
+                        if transport == "browser"
+                            && config.routing.browser_fairness_enabled
+                        {
+                            push_unique(&mut warnings, "browser_fairness");
                         }
                         if task_adjustment < 0 {
                             push_unique(&mut warnings, "task_preferred");
@@ -337,21 +398,7 @@ impl Router {
                             push_unique(&mut warnings, "task_mismatch");
                         }
                         if apply_execution_policy {
-                            match config.routing.execution_preference.as_str() {
-                                "browser-first" if transport == "browser" => {
-                                    push_unique(&mut warnings, "browser_preferred");
-                                }
-                                "browser-first" if transport == "api" => {
-                                    push_unique(&mut warnings, "api_fallback");
-                                }
-                                "api-first" if transport == "api" => {
-                                    push_unique(&mut warnings, "api_preferred");
-                                }
-                                "api-first" if transport == "browser" => {
-                                    push_unique(&mut warnings, "browser_fallback");
-                                }
-                                _ => {}
-                            }
+                            push_unique(&mut warnings, &policy_reason);
                         }
                     }
                     QuotaEvaluation::Excluded => {
@@ -365,10 +412,19 @@ impl Router {
                             route
                                 .priority
                                 .saturating_add(adaptive_penalty)
+                                .saturating_add(browser_recovery_penalty)
                                 .saturating_add(task_adjustment),
                         );
                         if adaptive.active && adaptive_penalty > 0 {
                             push_unique(&mut warnings, "adaptive_degraded");
+                        }
+                        if browser_recovery_penalty > 0 {
+                            push_unique(&mut warnings, "browser_recovery_probe");
+                        }
+                        if transport == "browser"
+                            && config.routing.browser_fairness_enabled
+                        {
+                            push_unique(&mut warnings, "browser_fairness");
                         }
                         if task_adjustment < 0 {
                             push_unique(&mut warnings, "task_preferred");
@@ -376,21 +432,7 @@ impl Router {
                             push_unique(&mut warnings, "task_mismatch");
                         }
                         if apply_execution_policy {
-                            match config.routing.execution_preference.as_str() {
-                                "browser-first" if transport == "browser" => {
-                                    push_unique(&mut warnings, "browser_preferred");
-                                }
-                                "browser-first" if transport == "api" => {
-                                    push_unique(&mut warnings, "api_fallback");
-                                }
-                                "api-first" if transport == "api" => {
-                                    push_unique(&mut warnings, "api_preferred");
-                                }
-                                "api-first" if transport == "browser" => {
-                                    push_unique(&mut warnings, "browser_fallback");
-                                }
-                                _ => {}
-                            }
+                            push_unique(&mut warnings, &policy_reason);
                         }
                     }
                 }
@@ -404,6 +446,9 @@ impl Router {
                     model: route.model.clone(),
                     transport: transport.to_string(),
                     transport_preference,
+                    policy_reason,
+                    browser_fairness_rank,
+                    browser_recovery_penalty,
                     base_priority: route.priority,
                     eligible,
                     exclusion_reasons,
@@ -433,14 +478,27 @@ impl Router {
                     index,
                     candidate.decision.transport_preference,
                     candidate.decision.final_score.unwrap_or(i32::MAX),
+                    candidate
+                        .decision
+                        .browser_fairness_rank
+                        .unwrap_or(u64::MAX),
                     candidate.original_index,
                 )
             })
             .collect::<Vec<_>>();
-        ranked_indices.sort_by_key(|(_, transport_preference, score, original_index)| {
-            (*transport_preference, *score, *original_index)
-        });
-        for (rank_index, (candidate_index, _, _, _)) in ranked_indices.into_iter().enumerate() {
+        ranked_indices.sort_by_key(
+            |(_, transport_preference, score, fairness_rank, original_index)| {
+                (
+                    *transport_preference,
+                    *score,
+                    *fairness_rank,
+                    *original_index,
+                )
+            },
+        );
+        for (rank_index, (candidate_index, _, _, _, _)) in
+            ranked_indices.into_iter().enumerate()
+        {
             let candidate = &mut evaluated[candidate_index];
             candidate.decision.rank = Some(rank_index + 1);
             candidate.decision.selected = rank_index == 0;
@@ -463,12 +521,24 @@ impl Router {
 
     fn transport_preference_rank(&self, config: &AppConfig, route: &RouteConfig) -> i32 {
         match (
-            config.routing.execution_preference.as_str(),
+            config.routing.execution_policy(),
             self.route_transport(config, route),
         ) {
-            ("browser-first", "browser") | ("api-first", "api") => 0,
-            ("browser-first", _) | ("api-first", _) => 1,
+            ("prefer-browser", "browser") | ("prefer-api", "api") => 0,
+            ("prefer-browser", _) | ("prefer-api", _) => 1,
             _ => 0,
+        }
+    }
+
+    fn policy_reason(&self, config: &AppConfig, transport: &str) -> &'static str {
+        match (config.routing.execution_policy(), transport) {
+            ("prefer-browser", "browser") => "browser_preferred",
+            ("prefer-browser", "api") => "api_fallback",
+            ("browser-only", "browser") => "browser_only",
+            ("prefer-api", "api") => "api_preferred",
+            ("prefer-api", "browser") => "browser_fallback",
+            ("api-only", "api") => "api_only",
+            _ => "balanced",
         }
     }
 
@@ -478,15 +548,60 @@ impl Router {
         resolved: &str,
     ) -> Vec<RouteConfig> {
         if let Some(vm) = config.virtual_models.get(resolved) {
-            vm.routes
+            let routes = vm
+                .routes
                 .iter()
                 .filter_map(|id| config.route(id).cloned())
-                .collect()
+                .collect();
+            self.enrich_configured_routes(config.as_ref(), routes).await
         } else if let Some(route) = config.route(resolved) {
-            vec![route.clone()]
+            self.enrich_configured_routes(config.as_ref(), vec![route.clone()])
+                .await
         } else {
             self.routes_for_physical_model(config, resolved).await
         }
+    }
+
+    async fn enrich_configured_routes(
+        &self,
+        config: &AppConfig,
+        mut routes: Vec<RouteConfig>,
+    ) -> Vec<RouteConfig> {
+        let models = match self.catalog.models().await {
+            Ok(models) => models,
+            Err(error) => {
+                warn!(%error, "failed to enrich configured routes from model catalog");
+                return routes;
+            }
+        };
+
+        for route in &mut routes {
+            let Some(account) = config.account(&route.account) else {
+                continue;
+            };
+            let Some(model) = models.iter().find(|model| {
+                model.provider == account.provider
+                    && model.external_id == route.model
+                    && model.accounts.iter().any(|binding| {
+                        binding.account_id == route.account
+                            && binding.enabled
+                            && binding.availability != "unavailable"
+                    })
+            }) else {
+                continue;
+            };
+
+            if route.context_window.is_none() {
+                route.context_window = model.context_window;
+            }
+            for capability in &model.capabilities {
+                if !route.capabilities.iter().any(|value| value == capability) {
+                    route.capabilities.push(capability.clone());
+                }
+            }
+        }
+
+        routes
     }
 
     pub async fn account_readiness(&self, account_id: &str) -> AccountReadiness {
@@ -662,6 +777,22 @@ impl Router {
             .entry(route_id.to_string())
             .or_default()
             .observe_success(latency_ms, &self.config.routing);
+
+        let config = self.live_config.snapshot();
+        if let Some(route) = config.route(route_id) {
+            if self.route_transport(config.as_ref(), route) == "browser"
+                && config.routing.browser_fairness_enabled
+            {
+                let sequence = self
+                    .browser_success_sequence
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                self.browser_last_success
+                    .write()
+                    .await
+                    .insert(route.account.clone(), sequence);
+            }
+        }
     }
 
     pub async fn mark_failure(
