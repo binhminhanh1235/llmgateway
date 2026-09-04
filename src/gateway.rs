@@ -87,7 +87,12 @@ impl Gateway {
             .restore_adaptive_samples(
                 samples
                     .into_iter()
-                    .map(|sample| (sample.route_id, sample.success, sample.duration_ms)),
+                    .map(|sample| (
+                        sample.route_id,
+                        sample.success,
+                        sample.duration_ms,
+                        sample.observed_at_ms,
+                    )),
             )
             .await)
     }
