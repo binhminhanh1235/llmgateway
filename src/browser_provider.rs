@@ -1794,16 +1794,33 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
             .thread_id
             .as_deref()
             .filter(|_| self.supports_native_conversation_affinity());
+        let mut unsynced_messages = Vec::new();
         let existing_conversation = if let Some(thread_id) = thread_affinity {
             match conversation_runtime::get() {
-                Some(store) => store
-                    .provider_conversation(thread_id, &request.provider.id, &request.account.id)
-                    .await
-                    .map_err(|error| {
-                        BrowserProviderError::Transport(format!(
-                            "provider conversation lookup failed: {error}"
-                        ))
-                    })?,
+                Some(store) => {
+                    let conversation = store
+                        .provider_conversation(thread_id, &request.provider.id, &request.account.id)
+                        .await
+                        .map_err(|error| {
+                            BrowserProviderError::Transport(format!(
+                                "provider conversation lookup failed: {error}"
+                            ))
+                        })?;
+                    if let Some(conversation) = conversation.as_ref() {
+                        let detail = store.thread(thread_id).await.map_err(|error| {
+                            BrowserProviderError::Transport(format!(
+                                "provider conversation history lookup failed: {error}"
+                            ))
+                        })?;
+                        unsynced_messages = detail
+                            .messages
+                            .into_iter()
+                            .filter(|message| message.ordinal > conversation.last_synced_ordinal)
+                            .map(|message| message.message)
+                            .collect();
+                    }
+                    conversation
+                }
                 None => None,
             }
         } else {
@@ -1811,7 +1828,7 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         };
 
         if existing_conversation.is_some() {
-            normalized_body = incremental_browser_body(&normalized_body);
+            normalized_body = incremental_browser_body(&normalized_body, &unsynced_messages);
         }
 
         let persistent_url = existing_conversation
@@ -1960,7 +1977,7 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
 
 
 
-fn incremental_browser_body(body: &Value) -> Value {
+fn incremental_browser_body(body: &Value, unsynced_messages: &[Value]) -> Value {
     let mut incremental = body.clone();
     let Some(object) = incremental.as_object_mut() else {
         return incremental;
@@ -1975,7 +1992,9 @@ fn incremental_browser_body(body: &Value) -> Value {
         .iter()
         .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
         .unwrap_or(messages.len() - 1);
-    object.insert("messages".into(), Value::Array(messages[start..].to_vec()));
+    let mut delta = unsynced_messages.to_vec();
+    delta.extend_from_slice(&messages[start..]);
+    object.insert("messages".into(), Value::Array(delta));
     incremental
 }
 
