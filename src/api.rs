@@ -456,6 +456,16 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
         GatewayError::Transport(message) => {
             json_error(StatusCode::BAD_GATEWAY, "upstream_error", &message)
         }
+        GatewayError::BrowserSessionUnavailable(message) => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "browser_session_error",
+            &message,
+        ),
+        GatewayError::BrowserTransport(message) => json_error(
+            StatusCode::BAD_GATEWAY,
+            "browser_transport_error",
+            &message,
+        ),
         GatewayError::Upstream { status, body } => json_error(status, "upstream_error", &body),
         GatewayError::Execution { request_id, source } => {
             let mut response = gateway_error(*source);
