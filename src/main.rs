@@ -77,7 +77,7 @@ use retrieval_api::inspect_thread_retrieval;
 use routing_api::explain_routes;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use ui::{
     account_control_css, account_control_js, account_intelligence_css, account_intelligence_js,
@@ -143,6 +143,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         catalog.clone(),
         execution_traces,
     )?);
+    match gateway.restore_adaptive_from_traces().await {
+        Ok(restored) if restored > 0 => {
+            info!(restored, "restored adaptive route samples from execution trace");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(%error, "failed to restore adaptive route samples; starting with cold telemetry");
+        }
+    }
     let context_engine = Arc::new(
         ContextEngine::connect(
             config.clone(),
