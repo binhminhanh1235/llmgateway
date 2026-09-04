@@ -72,7 +72,10 @@
             <h1 class="page-title">Accounts</h1>
             <div class="page-subtitle">Quota, browser sessions, health, and model availability across every account</div>
           </div>
-          <button id="refreshAccountsButton" class="secondary-button" type="button">Refresh</button>
+          <div class="accounts-topbar-actions">
+            <button id="addBrowserAccountButton" class="primary-button" type="button">+ Add browser account</button>
+            <button id="refreshAccountsButton" class="secondary-button" type="button">Refresh</button>
+          </div>
         </header>
         <div id="accountsContent" class="content-scroll"></div>
       </section>
@@ -117,6 +120,74 @@
       </div>
       <input id="modelSearch" class="search-input" type="search" placeholder="Search model or provider…" autofocus />
       <div id="modelPickerContent" class="model-picker-content"></div>
+    </div>
+  </div>
+
+
+  <div id="browserAccountModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="browserAccountModalTitle">
+    <div class="modal browser-account-modal">
+      <div class="modal-header">
+        <div>
+          <div class="browser-wizard-eyebrow">Browser account wizard</div>
+          <h2 id="browserAccountModalTitle">Add browser account</h2>
+          <p>Create the session, provider, account, route, and isolated Chromium profile as one validated setup.</p>
+        </div>
+        <button class="icon-button" data-close-modal="browserAccountModal" type="button">✕</button>
+      </div>
+
+      <div id="browserAccountWizardBody">
+        <div class="browser-provider-picker" id="browserProviderPicker" role="radiogroup" aria-label="Browser provider">
+          <button type="button" class="browser-provider-option selected" data-browser-provider="gemini" aria-pressed="true">
+            <span class="browser-provider-option-mark">G</span>
+            <span><strong>Gemini Web</strong><small>Google Gemini browser account</small></span>
+          </button>
+          <button type="button" class="browser-provider-option" data-browser-provider="qwen" aria-pressed="false">
+            <span class="browser-provider-option-mark">Q</span>
+            <span><strong>Qwen Web</strong><small>Qwen browser account</small></span>
+          </button>
+        </div>
+
+        <div class="browser-wizard-grid">
+          <label class="browser-wizard-field">
+            <span>Account ID <em>optional</em></span>
+            <input id="browserAccountIdInput" class="search-input" type="text" autocomplete="off" placeholder="Auto-generate, e.g. gemini-web-a1b2c3d4" />
+            <small>Stable local ID. Leave blank to generate one.</small>
+          </label>
+          <label class="browser-wizard-field">
+            <span>Display name <em>optional</em></span>
+            <input id="browserAccountLabelInput" class="search-input" type="text" autocomplete="off" placeholder="Personal Gemini" />
+            <small>Only used to make Accounts easier to scan.</small>
+          </label>
+          <label class="browser-wizard-field">
+            <span>Model ID <em>optional</em></span>
+            <input id="browserModelIdInput" class="search-input" type="text" autocomplete="off" placeholder="Use provider default" />
+            <small>Logical llmgateway model ID for this route.</small>
+          </label>
+          <label class="browser-wizard-field">
+            <span>Provider UI model label <em>optional</em></span>
+            <input id="browserModelLabelInput" class="search-input" type="text" autocomplete="off" placeholder="Pro, Flash, Qwen3-Coder…" />
+            <small>If blank, keep the model already selected in the provider UI.</small>
+          </label>
+          <label class="browser-wizard-field">
+            <span>Route priority</span>
+            <input id="browserPriorityInput" class="search-input" type="number" min="-10000" max="10000" value="10" />
+            <small>Lower wins inside the browser routing tier.</small>
+          </label>
+        </div>
+
+        <div class="browser-wizard-security">
+          <strong>Local authentication boundary</strong>
+          <span>llmgateway creates an isolated Chromium profile. You complete login, CAPTCHA, 2FA, or passkeys normally in the provider page. Raw cookies are never copied into the gateway config.</span>
+        </div>
+
+        <div id="browserAccountWizardError" class="form-error hidden"></div>
+        <div class="browser-wizard-actions">
+          <button type="button" class="secondary-button" data-close-modal="browserAccountModal">Cancel</button>
+          <button id="createBrowserAccountButton" type="button" class="primary-button">Create account</button>
+        </div>
+      </div>
+
+      <div id="browserAccountWizardResult" class="browser-wizard-result hidden"></div>
     </div>
   </div>
 
