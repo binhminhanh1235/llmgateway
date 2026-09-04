@@ -1,4 +1,8 @@
-use crate::browser_session::{BrowserSessionError, BrowserSessionStore};
+use crate::browser_session::{
+    BrowserSessionError, BrowserSessionStore, STATUS_DEGRADED, STATUS_FAILED,
+    STATUS_LOGIN_REQUIRED, STATUS_READY, STATUS_REQUIRES_ATTENTION, STATUS_STARTING,
+    STATUS_STOPPED,
+};
 use chrono::{SecondsFormat, Utc};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -27,6 +31,10 @@ pub struct ChromiumConfig {
     pub extra_args: Vec<String>,
     #[serde(default = "default_startup_timeout_seconds")]
     pub startup_timeout_seconds: u64,
+    #[serde(default = "default_true")]
+    pub auto_recover: bool,
+    #[serde(default = "default_reconcile_interval_seconds")]
+    pub reconcile_interval_seconds: u64,
     #[serde(default)]
     pub sessions: BTreeMap<String, ChromiumSessionConfig>,
 }
@@ -38,6 +46,8 @@ impl Default for ChromiumConfig {
             executable: None,
             extra_args: Vec::new(),
             startup_timeout_seconds: default_startup_timeout_seconds(),
+            auto_recover: true,
+            reconcile_interval_seconds: default_reconcile_interval_seconds(),
             sessions: BTreeMap::new(),
         }
     }
@@ -112,12 +122,33 @@ pub struct ChromiumPageView {
 pub struct ChromiumStatusView {
     pub session_id: String,
     pub running: bool,
+    pub managed: bool,
     pub pid: Option<u32>,
     pub executable: Option<String>,
     pub started_at: Option<String>,
     pub debugger_port: Option<u16>,
+    pub debugger_reachable: bool,
     pub pages: Vec<ChromiumPageView>,
     pub ready_match: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ChromiumReconcileView {
+    pub session_id: String,
+    pub action: String,
+    pub session_status: String,
+    pub running: bool,
+    pub ready: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ChromiumReconcileSummary {
+    pub checked: usize,
+    pub ready: usize,
+    pub recovered: usize,
+    pub attention: usize,
+    pub sessions: Vec<ChromiumReconcileView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
