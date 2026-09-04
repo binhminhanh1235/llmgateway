@@ -36,6 +36,7 @@ runtime_host_lock = threading.Lock()
 runtime_host_attempts = {}
 target_lock = threading.Lock()
 target_urls = {"fake-page": page_url}
+target_seq = 0
 conversation_seq = 0
 
 def expression_request(expression):
@@ -69,6 +70,14 @@ def set_target_url(target_id, value):
     with target_lock:
         target_urls[target_id] = value
 
+def create_target(value):
+    global target_seq
+    with target_lock:
+        target_seq += 1
+        target_id = f"fake-ephemeral-{target_seq}"
+        target_urls[target_id] = value
+        return target_id
+
 def remove_target(target_id):
     if target_id == "fake-page":
         return
@@ -95,6 +104,8 @@ def adapter_identity(expression):
     return "qwen-web", "qwen", "qwen-web-default"
 
 def runtime_evaluate_value(expression, target_id):
+    if expression.strip() == "String(globalThis.location?.href || '')":
+        return target_url_for(target_id)
     if expression.strip() == "String(globalThis.location?.hostname || '')":
         host = urlparse(target_url_for(target_id)).hostname or ""
         with runtime_host_lock:
@@ -102,7 +113,7 @@ def runtime_evaluate_value(expression, target_id):
             runtime_host_attempts[target_id] = attempts
         # Real Chromium can expose the intended target URL before the new
         # document execution context commits. Exercise that race in smoke tests.
-        if target_id == "fake-ephemeral" and attempts == 1:
+        if target_id.startswith("fake-ephemeral-") and attempts == 1:
             return ""
         return host
     return envelope_for(expression, target_id)
@@ -374,9 +385,9 @@ class Handler(socketserver.StreamRequestHandler):
             self.http_response(200, body, "application/json")
         elif method == "PUT" and parsed.path == "/json/new":
             requested_url = parsed.query or page_url
-            set_target_url("fake-ephemeral", requested_url)
+            target_id = create_target(requested_url)
             append_marker("opened-targets.log", requested_url)
-            body = json.dumps(target(port, "fake-ephemeral")).encode()
+            body = json.dumps(target(port, target_id)).encode()
             self.http_response(200, body, "application/json")
         elif method == "GET" and parsed.path.startswith("/json/close/"):
             target_id = parsed.path.rsplit("/", 1)[-1]
