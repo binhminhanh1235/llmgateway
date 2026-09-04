@@ -365,6 +365,11 @@ impl GeminiWebHttpAdapter {
             merge_update(&mut latest, update);
         }
 
+        if !latest.completed {
+            return Err(BrowserProviderError::Transport(
+                "Gemini StreamGenerate ended before the provider completion marker".into(),
+            ));
+        }
         if latest.text.is_empty() {
             return Err(BrowserProviderError::Transport(
                 "Gemini StreamGenerate completed without assistant text after the request was accepted"
@@ -414,6 +419,21 @@ impl GeminiWebHttpAdapter {
             let mut latest = GeminiFrameUpdate::default();
             let mut saw_text = false;
             let mut finished = false;
+
+            // Emit a role-only chunk immediately so gateway first-byte timers do not
+            // punish the stability window used to absorb cumulative Gemini rewrites.
+            let role_event = json!({
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": Value::Null
+                }]
+            });
+            yield Ok(Bytes::from(format!("data: {role_event}\n\n")));
 
             'outer: while let Some(chunk) = upstream.next().await {
                 let chunk = match chunk {
@@ -496,6 +516,13 @@ impl GeminiWebHttpAdapter {
                         return;
                     }
                 }
+            }
+
+            if !latest.completed {
+                yield Err(std::io::Error::other(
+                    "Gemini browserless stream ended before the provider completion marker"
+                ));
+                return;
             }
 
             match emitter.observe(&latest.text, true) {
