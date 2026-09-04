@@ -243,6 +243,7 @@
     const picker = document.getElementById("browserProviderPicker");
     if (!picker) return;
     const fallback = [
+      { id: "chatgpt", label: "ChatGPT Web", default_model_id: "chatgpt-web-default" },
       { id: "gemini", label: "Gemini Web", default_model_id: "gemini-web-default" },
       { id: "qwen", label: "Qwen Web", default_model_id: "qwen-web-default" },
     ];
