@@ -1096,7 +1096,7 @@ fn diagnostic_stderr(stderr: &str) -> String {
     if stderr.is_empty() {
         "stderr=<empty>".into()
     } else {
-        format!("stderr={}", stderr.replace(['\r', '\n'], " "))
+        format!("stderr={}", stderr.replace('\r', " ").replace('\n', " "))
     }
 }
 
