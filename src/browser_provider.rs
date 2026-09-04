@@ -1485,19 +1485,22 @@ mod tests {
         assert!(BrowserProviderRegistry::is_browser_kind("browser-http"));
         assert!(BrowserProviderRegistry::is_browser_kind("browser-cdp"));
         assert!(BrowserProviderRegistry::is_browser_kind("browser-gemini"));
+        assert!(BrowserProviderRegistry::is_browser_kind("browser-qwen"));
         assert!(!BrowserProviderRegistry::is_browser_kind("openai-compatible"));
     }
 
     #[test]
     fn selects_matching_page_target() {
-        let adapter = CdpBrowserAdapter::new().unwrap();
+        let adapter = CdpBrowserAdapter::custom().unwrap();
         let targets = vec![
             CdpTarget {
+                id: "one".into(),
                 kind: "page".into(),
                 url: "https://example.test/login".into(),
                 websocket_debugger_url: "ws://127.0.0.1/one".into(),
             },
             CdpTarget {
+                id: "two".into(),
                 kind: "page".into(),
                 url: "https://example.test/chat/123".into(),
                 websocket_debugger_url: "ws://127.0.0.1/two".into(),
@@ -1507,6 +1510,37 @@ mod tests {
             .select_target(&targets, Some("https://example.test/chat"))
             .unwrap();
         assert_eq!(selected.websocket_debugger_url, "ws://127.0.0.1/two");
+    }
+
+    #[test]
+    fn built_in_provider_defaults_are_first_class() {
+        let gemini = CdpBrowserAdapter::gemini().unwrap();
+        let qwen = CdpBrowserAdapter::qwen().unwrap();
+        assert_eq!(gemini.kind(), "browser-gemini");
+        assert_eq!(gemini.adapter_id(), "gemini-web");
+        assert!(gemini.spec.ephemeral_default);
+        assert_eq!(
+            gemini.spec.default_target_url_prefix,
+            Some("https://gemini.google.com/app")
+        );
+        assert_eq!(qwen.kind(), "browser-qwen");
+        assert_eq!(qwen.adapter_id(), "qwen-web");
+        assert!(qwen.spec.ephemeral_default);
+        assert_eq!(qwen.spec.new_chat_url, Some("https://chat.qwen.ai/c/new-chat"));
+    }
+
+    #[test]
+    fn contract_expression_requires_version_and_probe() {
+        let expression = build_contract_expression(
+            "globalThis.__LLMGATEWAY_ADAPTER__ = {meta:{contract_version:1,id:'x',provider:'x'},probe:async()=>({ok:true}),chat:async()=>({status:200,body:{ok:true}})};",
+            "probe",
+            None,
+            &json!({"model_label":"x"}),
+        )
+        .unwrap();
+        assert!(expression.contains("contract_version"));
+        assert!(expression.contains("__adapter.probe"));
+        assert!(expression.contains("contract_version_mismatch"));
     }
 
     #[tokio::test]
