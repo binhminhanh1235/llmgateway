@@ -380,6 +380,8 @@ pub fn apply_browser_account_setup(
         binding["ephemeral_chat"] = value(true);
         binding["probe_timeout_ms"] = value(3_000);
         binding["response_timeout_ms"] = value(180_000);
+        binding["first_byte_timeout_ms"] = value(30_000);
+        binding["idle_stream_timeout_ms"] = value(30_000);
         if let Some(model_label) = &model_label {
             let mut labels = InlineTable::new();
             labels.insert(&model_id, Value::from(model_label.as_str()));
