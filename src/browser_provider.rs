@@ -1113,7 +1113,7 @@ impl CdpBrowserAdapter {
         normalized_body: Value,
         ephemeral: bool,
     ) -> Result<reqwest::Response, BrowserProviderError> {
-        let envelope = self
+        let envelope = match self
             .evaluate_contract(
                 &target,
                 &script,
@@ -1122,29 +1122,57 @@ impl CdpBrowserAdapter {
                 &context,
                 &request.account.id,
             )
-            .await?;
+            .await
+        {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                if ephemeral {
+                    self.close_target(&request.profile_dir, &target.id).await;
+                }
+                return Err(error);
+            }
+        };
         if let Some(error) = envelope.error {
-            return contract_error_to_provider_error(
+            let result = contract_error_to_provider_error(
                 &request.account.id,
                 &request.route.model,
                 error,
             );
+            if ephemeral {
+                self.close_target(&request.profile_dir, &target.id).await;
+            }
+            return result;
         }
-        let stream_value = envelope.stream.ok_or_else(|| {
-            BrowserProviderError::AdapterIncompatible {
-                account_id: request.account.id.clone(),
-                code: "missing_stream_start".into(),
-                message: "adapter did not return browser stream start metadata".into(),
+        let stream_value = match envelope.stream {
+            Some(stream) => stream,
+            None => {
+                if ephemeral {
+                    self.close_target(&request.profile_dir, &target.id).await;
+                }
+                return Err(BrowserProviderError::AdapterIncompatible {
+                    account_id: request.account.id.clone(),
+                    code: "missing_stream_start".into(),
+                    message: "adapter did not return browser stream start metadata".into(),
+                });
             }
-        })?;
-        let start: CdpStreamStart = serde_json::from_value(stream_value).map_err(|error| {
-            BrowserProviderError::AdapterIncompatible {
-                account_id: request.account.id.clone(),
-                code: "invalid_stream_start".into(),
-                message: error.to_string(),
+        };
+        let start: CdpStreamStart = match serde_json::from_value(stream_value) {
+            Ok(start) => start,
+            Err(error) => {
+                if ephemeral {
+                    self.close_target(&request.profile_dir, &target.id).await;
+                }
+                return Err(BrowserProviderError::AdapterIncompatible {
+                    account_id: request.account.id.clone(),
+                    code: "invalid_stream_start".into(),
+                    message: error.to_string(),
+                });
             }
-        })?;
+        };
         if start.stream_id.trim().is_empty() {
+            if ephemeral {
+                self.close_target(&request.profile_dir, &target.id).await;
+            }
             return Err(BrowserProviderError::AdapterIncompatible {
                 account_id: request.account.id.clone(),
                 code: "invalid_stream_start".into(),
@@ -1152,9 +1180,17 @@ impl CdpBrowserAdapter {
             });
         }
 
-        let status = reqwest::StatusCode::from_u16(start.status).map_err(|error| {
-            BrowserProviderError::Transport(format!("invalid browser stream HTTP status: {error}"))
-        })?;
+        let status = match reqwest::StatusCode::from_u16(start.status) {
+            Ok(status) => status,
+            Err(error) => {
+                if ephemeral {
+                    self.close_target(&request.profile_dir, &target.id).await;
+                }
+                return Err(BrowserProviderError::Transport(format!(
+                    "invalid browser stream HTTP status: {error}"
+                )));
+            }
+        };
         let adapter = self.clone();
         let account_id = request.account.id.clone();
         let stream_id = start.stream_id.clone();
