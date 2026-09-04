@@ -204,8 +204,32 @@ async function testQwenToolBridgeStream() {
   );
 }
 
+
+async function testMidRequestLoginExpiry() {
+  const input = new FakeElement();
+  const nodes = {
+    "div[aria-label='Enter a prompt for Gemini']": input,
+    "button[aria-label='Send message']": new FakeElement("Send"),
+    "div.markdown.markdown-main-panel": new FakeElement("")
+  };
+  nodes["button[aria-label='Send message']"].onClick = () => {
+    nodes["a[href*='accounts.google.com']"] = new FakeElement("Sign in");
+  };
+  installPage({ host: "gemini.google.com", nodes });
+  const adapter = loadAdapter("adapters/gemini-web.js");
+  await assert.rejects(
+    () => adapter.chat({
+      model: "gemini-web-test",
+      stream: false,
+      messages: [{ role: "user", content: "Continue" }]
+    }, { response_timeout_ms: 2000 }),
+    /LOGIN_REQUIRED: Gemini session expired/
+  );
+}
+
 await testGemini();
 await testQwen();
 await testGeminiToolBridge();
 await testQwenToolBridgeStream();
+await testMidRequestLoginExpiry();
 console.log("built-in Gemini/Qwen fake-page adapter fixtures passed");
