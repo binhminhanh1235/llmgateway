@@ -109,15 +109,15 @@ curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-af
 
 THREAD_A=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${JSON[@]}"   -d '{"title":"Affinity A","model":"llmgateway-auto"}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-curl -fsS -D /tmp/affinity-a1.headers -o /tmp/affinity-a1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-one","stream":false}'
+curl -fsS -D /tmp/affinity-a1.headers -o /tmp/affinity-a1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-one","stream":true}'
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-a1.headers
 
-curl -fsS -D /tmp/affinity-a2.headers -o /tmp/affinity-a2.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-two","stream":false}'
+curl -fsS -D /tmp/affinity-a2.headers -o /tmp/affinity-a2.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-two","stream":true}'
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-a2.headers
 
 THREAD_B=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${JSON[@]}"   -d '{"title":"Affinity B","model":"llmgateway-auto"}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
-curl -fsS -D /tmp/affinity-b1.headers -o /tmp/affinity-b1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_B/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"beta-one","stream":false}'
+curl -fsS -D /tmp/affinity-b1.headers -o /tmp/affinity-b1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_B/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"beta-one","stream":true}'
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-b1.headers
 
 python3 <<'PY'
