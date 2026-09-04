@@ -366,7 +366,11 @@ impl ChromiumDriver {
         let session = self.sessions.session(session_id).await?;
 
         if authenticated {
-            self.sessions.mark_ready(session_id).await?;
+            if session.status == STATUS_READY {
+                self.sessions.mark_verified(session_id).await?;
+            } else {
+                self.sessions.mark_ready(session_id).await?;
+            }
         } else if status.running {
             if matches!(
                 session.status.as_str(),
@@ -512,11 +516,17 @@ impl ChromiumDriver {
                 } else {
                     "reconnected"
                 };
-                let current = self
-                    .sessions
-                    .mark_ready(session_id)
-                    .await
-                    .unwrap_or(session.clone());
+                let current = if session.status == STATUS_READY {
+                    self.sessions
+                        .mark_verified(session_id)
+                        .await
+                        .unwrap_or(session.clone())
+                } else {
+                    self.sessions
+                        .mark_ready(session_id)
+                        .await
+                        .unwrap_or(session.clone())
+                };
                 return ChromiumReconcileView {
                     session_id: session_id.to_string(),
                     action: action.into(),
