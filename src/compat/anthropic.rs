@@ -158,6 +158,7 @@ pub fn openai_stream_to_anthropic(
         let mut tools: BTreeMap<usize, ToolStreamState> = BTreeMap::new();
         let mut stop_reason = "end_turn".to_string();
         let mut output_tokens = 0u64;
+        let mut saw_done = false;
 
         while let Some(item) = upstream.next().await {
             match item {
@@ -167,8 +168,19 @@ pub fn openai_stream_to_anthropic(
                         let frame = buffer[..pos].to_string();
                         buffer.drain(..pos + 2);
                         let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) else { continue; };
-                        if data == "[DONE]" { continue; }
+                        if data == "[DONE]" {
+                            saw_done = true;
+                            continue;
+                        }
                         let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue; };
+
+                        if let Some(message) = openai_stream_error_message(&chunk) {
+                            yield Ok(event("error", json!({
+                                "type":"error",
+                                "error":{"type":"api_error","message":message}
+                            })));
+                            return;
+                        }
 
                         if let Some(usage) = chunk.get("usage") {
                             output_tokens = usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(output_tokens);
@@ -261,6 +273,17 @@ pub fn openai_stream_to_anthropic(
             }
         }
 
+        if !saw_done {
+            yield Ok(event("error", json!({
+                "type":"error",
+                "error":{
+                    "type":"api_error",
+                    "message":"upstream stream ended before terminal [DONE] frame"
+                }
+            })));
+            return;
+        }
+
         if let Some(index) = text_block {
             yield Ok(event("content_block_stop", json!({"type":"content_block_stop","index":index})));
         }
@@ -279,6 +302,18 @@ pub fn openai_stream_to_anthropic(
         })));
         yield Ok(event("message_stop", json!({"type":"message_stop"})));
     }
+}
+
+fn openai_stream_error_message(chunk: &Value) -> Option<String> {
+    let error = chunk.get("error")?;
+    Some(
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("upstream stream failed")
+            .to_string(),
+    )
 }
 
 #[derive(Debug)]
@@ -451,6 +486,21 @@ fn copy_if_present(source: &Value, target: &mut Map<String, Value>, from: &str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_openai_style_stream_error_frames() {
+        let chunk = json!({
+            "error": {
+                "code": "upstream_stream_error",
+                "message": "browser stream poll failed"
+            }
+        });
+        assert_eq!(
+            openai_stream_error_message(&chunk),
+            Some("browser stream poll failed".to_string())
+        );
+        assert_eq!(openai_stream_error_message(&json!({"choices":[]})), None);
+    }
 
     #[test]
     fn translates_tool_use_and_tool_result() {
