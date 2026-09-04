@@ -39,8 +39,17 @@ label = "Fake browser provider"
 login_url = "http://127.0.0.1:18082/login"
 enabled = true
 
+[browser.sessions.fake-web-secondary]
+provider = "browser-fake"
+label = "Fake browser provider secondary"
+login_url = "http://127.0.0.1:18082/login"
+enabled = true
+
 [browser.bindings.browser-account]
 session = "fake-web"
+
+[browser.bindings.browser-account-secondary]
+session = "fake-web-secondary"
 
 [context]
 enabled = false
@@ -67,6 +76,12 @@ enabled = true
 discover_models = false
 
 [[accounts]]
+id = "browser-account-secondary"
+provider = "browser-fake"
+enabled = true
+discover_models = false
+
+[[accounts]]
 id = "api-account"
 provider = "fake-api"
 api_key_env = "FAKE_API_KEY"
@@ -83,6 +98,14 @@ enabled = true
 capabilities = ["chat"]
 
 [[routes]]
+id = "browser-route-secondary"
+account = "browser-account-secondary"
+model = "browser-model-secondary"
+priority = 15
+enabled = true
+capabilities = ["chat"]
+
+[[routes]]
 id = "api-route"
 account = "api-account"
 model = "fake-model"
@@ -91,11 +114,11 @@ enabled = true
 capabilities = ["chat"]
 
 [virtual_models.llmgateway-auto]
-routes = ["browser-route", "api-route"]
+routes = ["browser-route", "browser-route-secondary", "api-route"]
 [virtual_models.llmgateway-coding]
-routes = ["browser-route", "api-route"]
+routes = ["browser-route", "browser-route-secondary", "api-route"]
 [virtual_models.llmgateway-best]
-routes = ["browser-route", "api-route"]
+routes = ["browser-route", "browser-route-secondary", "api-route"]
 EOF
 
 python3 scripts/fake-openai.py >/tmp/llmgateway-browser-provider-api.log 2>&1 &
@@ -114,14 +137,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("content-length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")
-        assert self.headers.get("x-llmgateway-browser-session") == "fake-web"
-        assert self.headers.get("x-llmgateway-browser-account") == "browser-account"
-        assert self.headers.get("x-llmgateway-route") == "browser-route"
-        assert body.get("model") == "browser-model"
+        account = self.headers.get("x-llmgateway-browser-account")
+        route = self.headers.get("x-llmgateway-route")
+        session = self.headers.get("x-llmgateway-browser-session")
+        expected = {
+            "browser-account": ("browser-route", "fake-web", "browser-model"),
+            "browser-account-secondary": ("browser-route-secondary", "fake-web-secondary", "browser-model-secondary"),
+        }
+        assert account in expected, account
+        expected_route, expected_session, expected_model = expected[account]
+        assert route == expected_route, (route, expected_route)
+        assert session == expected_session, (session, expected_session)
+        assert body.get("model") == expected_model, body
         messages = body.get("messages") or []
         text = " ".join(str(message.get("content", "")) for message in messages)
-        if "expire-browser" in text:
-            payload = {"error": {"message": "browser session expired"}}
+        should_expire = (
+            account == "browser-account" and "expire-browser" in text
+        ) or (
+            account == "browser-account-secondary" and "expire-secondary" in text
+        )
+        if should_expire:
+            payload = {"error": {"message": f"{account} session expired"}}
             raw = json.dumps(payload).encode()
             self.send_response(401)
             content_type = "application/json"
@@ -140,8 +176,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             payload = {
                 "id": "chatcmpl_browser",
                 "object": "chat.completion",
-                "model": "browser-model",
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": "browser-adapter-ok"}, "finish_reason": "stop"}],
+                "model": expected_model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": f"{account}-ok"}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
             }
             raw = json.dumps(payload).encode()
@@ -193,6 +229,10 @@ curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/lo
   "${AUTH[@]}" >/dev/null
 curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/login/complete \
   "${AUTH[@]}" >/dev/null
+curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web-secondary/login/start \
+  "${AUTH[@]}" >/dev/null
+curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web-secondary/login/complete \
+  "${AUTH[@]}" >/dev/null
 
 # Once READY, the higher-priority browser route should win and receive only opaque session identity.
 curl -fsS -D /tmp/browser-provider-ready.headers -o /tmp/browser-provider-ready.json \
@@ -204,7 +244,7 @@ python3 - /tmp/browser-provider-ready.json <<'PY'
 import json,sys
 with open(sys.argv[1], encoding="utf-8") as f:
     x=json.load(f)
-assert x["choices"][0]["message"]["content"] == "browser-adapter-ok", x
+assert x["choices"][0]["message"]["content"] == "browser-account-ok", x
 PY
 
 # Streaming uses the same adapter lane and remains OpenAI-compatible end to end.
@@ -229,12 +269,19 @@ with open(sys.argv[1], encoding="utf-8") as f:
 assert text == "browser-stream-ok", text
 PY
 
-# 401 from a browser adapter means the session needs user attention, then the same request fails over.
+# 401 from the primary browser marks only that session for attention.
+# The same request must fail over to the second browser account before considering API.
 curl -fsS -D /tmp/browser-provider-expired.headers -o /tmp/browser-provider-expired.json \
   -X POST http://127.0.0.1:7331/v1/chat/completions \
   "${AUTH[@]}" "${JSON[@]}" \
   -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"expire-browser"}]}'
-grep -qi '^x-llmgateway-route: api-route' /tmp/browser-provider-expired.headers
+grep -qi '^x-llmgateway-route: browser-route-secondary' /tmp/browser-provider-expired.headers
+python3 - /tmp/browser-provider-expired.json <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    x=json.load(f)
+assert x["choices"][0]["message"]["content"] == "browser-account-secondary-ok", x
+PY
 
 SESSION=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web "${AUTH[@]}")
 printf '%s' "$SESSION" | python3 -c '
@@ -242,14 +289,29 @@ import json,sys
 x=json.load(sys.stdin)
 assert x["status"] == "requires_attention", x
 assert "401" in (x.get("last_error") or ""), x
-assert "browser session expired" in (x.get("last_error") or ""), x
+assert "browser-account session expired" in (x.get("last_error") or ""), x
 '
 
-# After the transition, future plans skip the browser route without calling the bridge again.
+# Future plans skip the expired primary and keep using the healthy secondary browser.
 curl -fsS -D /tmp/browser-provider-after.headers -o /tmp/browser-provider-after.json \
   -X POST http://127.0.0.1:7331/v1/chat/completions \
   "${AUTH[@]}" "${JSON[@]}" \
-  -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"after browser expiry"}]}'
-grep -qi '^x-llmgateway-route: api-route' /tmp/browser-provider-after.headers
+  -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"after primary browser expiry"}]}'
+grep -qi '^x-llmgateway-route: browser-route-secondary' /tmp/browser-provider-after.headers
 
-echo "llmgateway browser provider adapter + routing + streaming smoke test passed"
+# Expire the second browser too. Only after every browser account is unavailable may API win.
+curl -fsS -D /tmp/browser-provider-all-expired.headers -o /tmp/browser-provider-all-expired.json \
+  -X POST http://127.0.0.1:7331/v1/chat/completions \
+  "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"expire-secondary"}]}'
+grep -qi '^x-llmgateway-route: api-route' /tmp/browser-provider-all-expired.headers
+
+SECONDARY=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web-secondary "${AUTH[@]}")
+printf '%s' "$SECONDARY" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["status"] == "requires_attention", x
+assert "browser-account-secondary session expired" in (x.get("last_error") or ""), x
+'
+
+echo "llmgateway browser-to-browser failover + API fallback + streaming smoke test passed"
