@@ -1477,8 +1477,10 @@ fn default_json_content_type() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::get, Json, Router};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+    use uuid::Uuid;
 
     #[test]
     fn browser_kind_is_explicit() {
@@ -1579,6 +1581,147 @@ mod tests {
             .unwrap();
         assert_eq!(value["body"]["ok"], true);
         server.await.unwrap();
+    }
+
+    fn test_binding() -> BrowserAccountBinding {
+        BrowserAccountBinding {
+            session: "fixture-session".into(),
+            target_url_prefix: None,
+            adapter_script: None,
+            adapter_contract_version: Some(BROWSER_ADAPTER_CONTRACT_VERSION),
+            models: vec!["gemini-test".into()],
+            model_labels: BTreeMap::new(),
+            selector_overrides: BTreeMap::new(),
+            ephemeral_chat: Some(false),
+            probe_timeout_ms: Some(500),
+            response_timeout_ms: Some(1_000),
+        }
+    }
+
+    async fn fake_cdp_diagnostics(envelope: Value) -> BrowserAdapterDiagnostics {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_address = ws_listener.local_addr().unwrap();
+        let websocket_url = format!("ws://{ws_address}/devtools/page/fixture");
+        let ws_task = tokio::spawn(async move {
+            let (stream, _) = ws_listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let message = socket.next().await.unwrap().unwrap();
+            let command: Value =
+                serde_json::from_str(message.into_text().unwrap().as_ref()).unwrap();
+            assert_eq!(command["method"], "Runtime.evaluate");
+            let expression = command["params"]["expression"].as_str().unwrap();
+            assert!(expression.contains("gemini-web"));
+            let id = command["id"].as_u64().unwrap();
+            let response = json!({
+                "id": id,
+                "result": {
+                    "result": {
+                        "type": "object",
+                        "value": envelope
+                    }
+                }
+            });
+            socket
+                .send(Message::Text(response.to_string().into()))
+                .await
+                .unwrap();
+        });
+
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_address = http_listener.local_addr().unwrap();
+        let target_ws = websocket_url.clone();
+        let app = Router::new().route(
+            "/json/list",
+            get(move || {
+                let target_ws = target_ws.clone();
+                async move {
+                    Json(json!([{
+                        "id": "fixture-target",
+                        "type": "page",
+                        "url": "https://gemini.google.com/app",
+                        "webSocketDebuggerUrl": target_ws
+                    }]))
+                }
+            }),
+        );
+        let http_task = tokio::spawn(async move {
+            axum::serve(http_listener, app).await.unwrap();
+        });
+
+        let profile_dir = std::env::temp_dir().join(format!(
+            "llmgateway-adapter-fixture-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&profile_dir).unwrap();
+        fs::write(
+            profile_dir.join("DevToolsActivePort"),
+            format!("{}\n/devtools/browser/fixture\n", http_address.port()),
+        )
+        .unwrap();
+
+        let adapter = CdpBrowserAdapter::gemini().unwrap();
+        let diagnostics = adapter
+            .diagnose(
+                "gemini-fixture-account",
+                profile_dir.to_str().unwrap(),
+                &test_binding(),
+            )
+            .await;
+
+        ws_task.await.unwrap();
+        http_task.abort();
+        let _ = fs::remove_dir_all(profile_dir);
+        diagnostics
+    }
+
+    #[tokio::test]
+    async fn fake_cdp_fixture_reports_ready_adapter() {
+        let diagnostics = fake_cdp_diagnostics(json!({
+            "meta": {
+                "contract_version": 1,
+                "id": "gemini-web",
+                "provider": "gemini",
+                "adapter_version": "fixture-v1"
+            },
+            "probe": {
+                "ok": true,
+                "code": "ready",
+                "message": "fixture page compatible",
+                "page_signature": "fixture-gemini-v1"
+            }
+        }))
+        .await;
+        assert_eq!(diagnostics.status, "ready");
+        assert_eq!(diagnostics.adapter_id.as_deref(), Some("gemini-web"));
+        assert_eq!(diagnostics.adapter_version.as_deref(), Some("fixture-v1"));
+        assert_eq!(
+            diagnostics.page_signature.as_deref(),
+            Some("fixture-gemini-v1")
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_cdp_fixture_surfaces_page_drift() {
+        let diagnostics = fake_cdp_diagnostics(json!({
+            "meta": {
+                "contract_version": 1,
+                "id": "gemini-web",
+                "provider": "gemini",
+                "adapter_version": "fixture-v1"
+            },
+            "probe": {
+                "ok": false,
+                "code": "adapter_incompatible",
+                "message": "prompt composer missing"
+            },
+            "error": {
+                "code": "adapter_incompatible",
+                "message": "prompt composer missing"
+            }
+        }))
+        .await;
+        assert_eq!(diagnostics.status, "adapter_incompatible");
+        assert!(diagnostics.message.contains("prompt composer missing"));
     }
 
     #[test]
