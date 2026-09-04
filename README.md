@@ -99,6 +99,26 @@ Open the local UI at:
 http://127.0.0.1:7331/
 ```
 
+## Built-in browser providers
+
+v0.28 includes first-class Gemini Web and Qwen Web providers:
+
+```toml
+[[providers]]
+id = "gemini-web"
+kind = "browser-gemini"
+
+[[providers]]
+id = "qwen-web"
+kind = "browser-qwen"
+```
+
+Bind each account to an isolated browser session, enable the corresponding Chromium session, sign in normally, and let the adapter probe decide whether the provider page is compatible before Router makes it eligible. No dummy upstream API key is required.
+
+Built-in adapters default to fresh provider chat tabs per request while reusing the authenticated Chromium profile. Optional `model_labels` select provider UI models explicitly; without a mapping, the current provider UI model is preserved.
+
+See [Browser provider adapters](docs/browser-provider-adapters.md) for complete Gemini/Qwen configuration, adapter diagnostics, page-drift recovery, and the coding-agent tool bridge.
+
 ## Gateway APIs
 
 ```text
