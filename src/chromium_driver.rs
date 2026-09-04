@@ -4,6 +4,7 @@ use crate::browser_session::{
     STATUS_STOPPED,
 };
 use chrono::{SecondsFormat, Utc};
+use futures_util::SinkExt;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,6 +21,7 @@ use tokio::{
     sync::Mutex,
     time::{sleep, Instant},
 };
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ChromiumConfig {
@@ -180,6 +182,12 @@ struct DevToolsTarget {
     kind: String,
     #[serde(default)]
     url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DevToolsVersion {
+    #[serde(rename = "webSocketDebuggerUrl", default)]
+    websocket_debugger_url: String,
 }
 
 impl ChromiumConfig {
@@ -392,6 +400,7 @@ impl ChromiumDriver {
 
     pub async fn stop(&self, session_id: &str) -> Result<ChromiumStatusView, ChromiumDriverError> {
         self.driver_session(session_id)?;
+        let before = self.status(session_id).await?;
         let mut process = {
             let mut processes = self.processes.lock().await;
             processes.remove(session_id)
@@ -399,6 +408,17 @@ impl ChromiumDriver {
         if let Some(ref mut managed) = process {
             let _ = managed.child.kill().await;
             let _ = managed.child.wait().await;
+        } else if before.debugger_reachable {
+            if let Some(port) = before.debugger_port {
+                let _ = self.close_external_browser(port).await;
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    if self.devtools_pages(port).await.is_err() {
+                        break;
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+            }
         }
 
         let session = self.sessions.session(session_id).await?;
@@ -706,6 +726,42 @@ impl ChromiumDriver {
                 location: sanitize_url(&target.url),
             })
             .collect())
+    }
+
+    async fn close_external_browser(&self, port: u16) -> Result<(), ChromiumDriverError> {
+        let response = self
+            .client
+            .get(format!("http://127.0.0.1:{port}/json/version"))
+            .send()
+            .await
+            .map_err(ChromiumDriverError::DevToolsTransport)?;
+        if !response.status().is_success() {
+            return Err(ChromiumDriverError::DevToolsResponse(format!(
+                "DevTools version returned HTTP {}",
+                response.status()
+            )));
+        }
+        let version = response
+            .json::<DevToolsVersion>()
+            .await
+            .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))?;
+        if version.websocket_debugger_url.trim().is_empty() {
+            return Err(ChromiumDriverError::DevToolsResponse(
+                "DevTools version did not expose a browser websocket".into(),
+            ));
+        }
+
+        let (mut socket, _) = connect_async(&version.websocket_debugger_url)
+            .await
+            .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))?;
+        socket
+            .send(Message::Text(
+                r#"{"id":1,"method":"Browser.close"}"#.to_string().into(),
+            ))
+            .await
+            .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))?;
+        let _ = socket.close(None).await;
+        Ok(())
     }
 
     async fn remove_finished_process(&self, session_id: &str) {
