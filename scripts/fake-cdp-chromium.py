@@ -57,7 +57,7 @@ def adapter_identity(expression):
     return "qwen-web", "qwen", "qwen-web-default"
 
 def runtime_evaluate_value(expression, target_id):
-    if "globalThis.location?.hostname" in expression or "location.hostname" in expression:
+    if expression.strip() == "String(globalThis.location?.hostname || '')":
         host = urlparse(page_url).hostname or ""
         with runtime_host_lock:
             attempts = runtime_host_attempts.get(target_id, 0) + 1
