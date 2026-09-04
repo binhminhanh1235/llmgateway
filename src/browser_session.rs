@@ -435,6 +435,19 @@ impl BrowserSessionStore {
         )
         .execute(&self.pool)
         .await?;
+
+        // PR #41 stopped promoting adapter-level login detection to requires_attention.
+        // Recover only rows created by that old behavior so an authenticated isolated
+        // profile can be relaunched and re-probed after upgrade. Other attention states
+        // remain untouched because they may represent real provider/user intervention.
+        sqlx::query(
+            "UPDATE browser_session_state
+             SET status = 'degraded', updated_at = CURRENT_TIMESTAMP
+             WHERE status = 'requires_attention'
+               AND last_error LIKE 'browser adapter login required:%'",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
