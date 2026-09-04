@@ -137,7 +137,7 @@ impl Gateway {
                 let keep_sticky = index == 0
                     || self
                         .router
-                        .sticky_route_matches_best_task_fit(body, &routes[index], &routes[0]);
+                        .sticky_route_matches_best_task_fit(requested_model, body, &routes[index], &routes[0]);
                 if keep_sticky {
                     let preferred = routes.remove(index);
                     routes.insert(0, preferred);
