@@ -142,16 +142,15 @@ pub fn route_fit(
         };
     }
 
-    if profile.long_context {
-        if let Some(window) = route.context_window {
-            let sufficient = window >= profile.required_context_tokens.min(i64::MAX as usize) as i64;
-            snapshot.context_sufficient = Some(sufficient);
-            if !sufficient {
-                return TaskRouteFit {
-                    snapshot,
-                    exclusion_reason: Some("context_window_too_small"),
-                };
-            }
+    if let Some(window) = route.context_window {
+        let sufficient =
+            window >= profile.required_context_tokens.min(i64::MAX as usize) as i64;
+        snapshot.context_sufficient = Some(sufficient);
+        if !sufficient {
+            return TaskRouteFit {
+                snapshot,
+                exclusion_reason: Some("context_window_too_small"),
+            };
         }
     }
 
@@ -452,7 +451,8 @@ mod tests {
         });
         let profile = classify(Some(&body), &config());
         assert_eq!(profile.kind, TaskKind::SimpleChat);
-        assert!(profile.long_context);
+        assert!(!profile.long_context);
+        assert!(profile.required_context_tokens > 4_096);
         let fit = route_fit(&profile, &route(&["chat", "cheap"], Some(4_096)), &config());
         assert_eq!(fit.exclusion_reason, Some("context_window_too_small"));
     }
