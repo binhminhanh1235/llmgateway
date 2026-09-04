@@ -154,17 +154,18 @@ async function testGeminiToolBridge() {
   const input = new FakeElement();
   const response = new FakeElement("");
   const send = new FakeElement("Send");
+  const nodes = {
+    "div[aria-label='Enter a prompt for Gemini']": input,
+    "button[aria-label='Send message']": send
+  };
   send.onClick = () => {
     response.innerText = '[[LLMGATEWAY_TOOL_CALLS]]{"tool_calls":[{"name":"read_file","arguments":{"path":"src/main.rs"}}]}[[/LLMGATEWAY_TOOL_CALLS]]';
     response.textContent = response.innerText;
+    nodes["div.markdown.markdown-main-panel"] = [response];
   };
   installPage({
     host: "gemini.google.com",
-    nodes: {
-      "div[aria-label='Enter a prompt for Gemini']": input,
-      "button[aria-label='Send message']": send,
-      "div.markdown.markdown-main-panel": response
-    }
+    nodes
   });
   const adapter = loadAdapter("adapters/gemini-web.js");
   const result = await adapter.chat({
