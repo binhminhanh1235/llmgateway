@@ -907,6 +907,8 @@ struct CdpStreamPoll {
     done: bool,
     #[serde(default)]
     error: Option<AdapterContractError>,
+    #[serde(default)]
+    progress_seq: Option<u64>,
 }
 
 struct CdpStreamCleanup {
@@ -1641,6 +1643,7 @@ impl CdpBrowserAdapter {
             let mut saw_event = false;
             let mut saw_assistant_output = false;
             let mut last_progress = Instant::now();
+            let mut last_progress_seq = None;
 
             loop {
                 let limit = if saw_event {
@@ -1720,6 +1723,10 @@ impl CdpBrowserAdapter {
                         error.code, error.message
                     )));
                     break;
+                }
+
+                if browser_stream_poll_advanced(&poll, &mut last_progress_seq) {
+                    last_progress = Instant::now();
                 }
 
                 if !poll.events.is_empty() {
@@ -2495,6 +2502,20 @@ return {{ meta: __meta, error: {{ code: "invalid_stream_operation", message: "un
     ))
 }
 
+fn browser_stream_poll_advanced(
+    poll: &CdpStreamPoll,
+    last_progress_seq: &mut Option<u64>,
+) -> bool {
+    let Some(progress_seq) = poll.progress_seq else {
+        return false;
+    };
+    if last_progress_seq.is_some_and(|previous| previous == progress_seq) {
+        return false;
+    }
+    *last_progress_seq = Some(progress_seq);
+    true
+}
+
 fn browser_stream_event_has_assistant_output(event: &Value) -> bool {
     event
         .get("choices")
@@ -2990,6 +3011,35 @@ mod tests {
                 {"role":"user","content":"current user"}
             ])
         );
+    }
+
+    #[test]
+    fn browser_stream_progress_heartbeat_advances_without_output_events() {
+        let mut last = None;
+        let first = CdpStreamPoll {
+            events: vec![],
+            done: false,
+            error: None,
+            progress_seq: Some(1),
+        };
+        assert!(browser_stream_poll_advanced(&first, &mut last));
+        assert_eq!(last, Some(1));
+        assert!(!browser_stream_poll_advanced(&first, &mut last));
+
+        let generating = CdpStreamPoll {
+            progress_seq: Some(2),
+            ..first
+        };
+        assert!(browser_stream_poll_advanced(&generating, &mut last));
+        assert_eq!(last, Some(2));
+
+        let legacy = CdpStreamPoll {
+            events: vec![],
+            done: false,
+            error: None,
+            progress_seq: None,
+        };
+        assert!(!browser_stream_poll_advanced(&legacy, &mut last));
     }
 
     #[test]

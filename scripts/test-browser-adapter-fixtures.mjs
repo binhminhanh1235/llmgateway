@@ -493,6 +493,69 @@ async function testQwenIncrementalStream() {
   assert.equal(final.events.at(-1).choices[0].finish_reason, "stop");
 }
 
+async function testBrowserStreamProgressHeartbeats() {
+  const cases = [
+    {
+      path: "adapters/gemini-web.js",
+      host: "gemini.google.com",
+      inputSelector: "div[aria-label='Enter a prompt for Gemini']",
+      sendSelector: "button[aria-label='Send message']",
+      stopSelector: "button[aria-label='Stop response']",
+      input: new FakeElement()
+    },
+    {
+      path: "adapters/chatgpt-web.js",
+      host: "chatgpt.com",
+      inputSelector: "#prompt-textarea",
+      sendSelector: "#composer-submit-button",
+      stopSelector: "button[data-testid='stop-button']",
+      input: new FakeElement()
+    },
+    {
+      path: "adapters/qwen-web.js",
+      host: "chat.qwen.ai",
+      inputSelector: "textarea.message-input-textarea",
+      sendSelector: "button.send-button",
+      stopSelector: "button.stop-button",
+      input: new FakeTextAreaElement()
+    }
+  ];
+
+  for (const fixture of cases) {
+    const send = new FakeElement("Send");
+    const stop = new FakeElement("Stop");
+    const nodes = {
+      [fixture.inputSelector]: fixture.input,
+      [fixture.sendSelector]: send,
+      [fixture.stopSelector]: stop
+    };
+    installPage({ host: fixture.host, path: fixture.host === "chatgpt.com" ? "/" : "/app", nodes });
+    const adapter = loadAdapter(fixture.path);
+    const started = await adapter.streamStart({
+      model: "browser-heartbeat-test",
+      stream: true,
+      messages: [{ role: "user", content: "think before answering" }]
+    }, { response_timeout_ms: 4000 });
+
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const first = await adapter.streamPoll({ stream_id: started.stream_id });
+    assert.equal(first.error, null, JSON.stringify(first));
+    assert.equal(first.events.length, 0, JSON.stringify(first));
+    assert.equal(typeof first.progress_seq, "number", JSON.stringify(first));
+    assert.ok(first.progress_seq >= 2, JSON.stringify(first));
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const second = await adapter.streamPoll({ stream_id: started.stream_id });
+    assert.equal(second.error, null, JSON.stringify(second));
+    assert.equal(second.events.length, 0, JSON.stringify(second));
+    assert.ok(second.progress_seq > first.progress_seq, JSON.stringify({ first, second }));
+    assert.match(String(second.progress_phase || ""), /generating|submitted-wait/);
+
+    const cancelled = await adapter.streamCancel({ stream_id: started.stream_id });
+    assert.equal(cancelled.cancelled, true);
+  }
+}
+
 async function testGeminiStreamCancellation() {
   const input = new FakeElement();
   const response = new FakeElement("");
@@ -644,6 +707,7 @@ await testChatGPTFreshThreadForcesNewChat();
 await testChatGPTReopenWaitsForStableHistory();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
+await testBrowserStreamProgressHeartbeats();
 await testGeminiStreamCancellation();
 await testGeminiFreshThreadForcesNewChat();
 await testGeminiReopenWaitsForStableHistoryAndIgnoresRerenderedOldTurns();
