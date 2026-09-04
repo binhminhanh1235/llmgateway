@@ -159,6 +159,7 @@ def envelope_for(expression, target_id):
                 "model": model,
                 "provider": provider,
                 "target_id": target_id,
+                "force_poll_error": "force-browser-stream-poll-error" in prompt_text,
             }
         write_marker("stream-started", stream_id)
         return {
@@ -199,6 +200,7 @@ def envelope_for(expression, target_id):
             model = state["model"]
             stream_provider = state["provider"]
             stream_target_id = state["target_id"]
+            force_poll_error = state.get("force_poll_error", False)
 
         write_marker("stream-poll-count", poll)
         completion_id = "chatcmpl_browser_stream"
@@ -215,6 +217,18 @@ def envelope_for(expression, target_id):
             return {"meta": meta, "stream": {"events": events, "done": False, "error": None}}
         if poll == 2:
             time.sleep(0.15)
+            if force_poll_error:
+                return {
+                    "meta": meta,
+                    "stream": {
+                        "events": [],
+                        "done": False,
+                        "error": {
+                            "code": "forced_poll_error",
+                            "message": "forced browser stream poll failure",
+                        },
+                    },
+                }
             events = [{
                 "id": completion_id,
                 "object": "chat.completion.chunk",
