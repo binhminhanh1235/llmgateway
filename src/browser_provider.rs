@@ -46,6 +46,7 @@ pub struct BrowserProviderConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum BrowserTransportMode {
     #[default]
+    Auto,
     BrowserOnly,
     HttpPreferred,
 }
@@ -402,7 +403,12 @@ impl BrowserProviderRegistry {
         provider_kind: &str,
         binding: &BrowserAccountBinding,
     ) -> Option<&Arc<dyn BrowserProviderAdapter>> {
-        (binding.transport_mode == BrowserTransportMode::HttpPreferred)
+        let enabled = match binding.transport_mode {
+            BrowserTransportMode::HttpPreferred => true,
+            BrowserTransportMode::Auto => provider_kind == "browser-gemini",
+            BrowserTransportMode::BrowserOnly => false,
+        };
+        enabled
             .then(|| self.direct_adapters.get(provider_kind))
             .flatten()
     }
