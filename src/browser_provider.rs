@@ -293,7 +293,7 @@ impl BrowserProviderRegistry {
             .await;
         if provider.kind == "browser-cdp"
             && matches!(
-                result,
+                &result,
                 Err(BrowserProviderError::SessionUnavailable { .. })
                     | Err(BrowserProviderError::Transport(_))
             )
