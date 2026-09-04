@@ -11,7 +11,6 @@ use std::{
     env,
     path::Path,
     str::FromStr,
-    sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
@@ -218,7 +217,6 @@ impl ModelCatalog {
     pub async fn refresh_account(&self, account_id: &str) -> Result<RefreshResult, CatalogError> {
         let config = self.config.snapshot();
         let account = config
-            .config
             .account(account_id)
             .ok_or_else(|| CatalogError::InvalidConfig(format!("unknown account '{account_id}'")))?;
         if !account.discover_models {
@@ -326,6 +324,7 @@ impl ModelCatalog {
     }
 
     pub async fn account_models(&self, account_id: &str) -> Result<Vec<CatalogModelView>, CatalogError> {
+        let config = self.config.snapshot();
         if config.account(account_id).is_none() {
             return Err(CatalogError::InvalidConfig(format!("unknown account '{account_id}'")));
         }
