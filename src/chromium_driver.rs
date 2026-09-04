@@ -858,6 +858,25 @@ impl ChromiumDriver {
         Ok(None)
     }
 
+    async fn probe_debugger_port(
+        &self,
+        devtools_file: &Path,
+        requested_port: u16,
+    ) -> Option<u16> {
+        if self.devtools_pages(requested_port).await.is_ok() {
+            return Some(requested_port);
+        }
+
+        // Backward compatibility for fake/test Chromium and existing runtimes
+        // that still publish a different ephemeral port through DevToolsActivePort.
+        if let Ok(file_port) = read_debugger_port(devtools_file) {
+            if file_port != requested_port && self.devtools_pages(file_port).await.is_ok() {
+                return Some(file_port);
+            }
+        }
+        None
+    }
+
     async fn wait_for_debugger(
         &self,
         session_id: &str,
@@ -870,16 +889,11 @@ impl ChromiumDriver {
     ) -> Result<u16, ChromiumDriverError> {
         let deadline = Instant::now() + timeout;
         loop {
-            if self.devtools_pages(requested_port).await.is_ok() {
-                return Ok(requested_port);
-            }
-
-            // Backward compatibility for fake/test Chromium and existing runtimes
-            // that still publish a different ephemeral port through DevToolsActivePort.
-            if let Ok(file_port) = read_debugger_port(devtools_file) {
-                if file_port != requested_port && self.devtools_pages(file_port).await.is_ok() {
-                    return Ok(file_port);
-                }
+            if let Some(port) = self
+                .probe_debugger_port(devtools_file, requested_port)
+                .await
+            {
+                return Ok(port);
             }
 
             let exited = {
@@ -894,7 +908,21 @@ impl ChromiumDriver {
                 }
             };
             if let Some(exit) = exited {
-                sleep(Duration::from_millis(50)).await;
+                // On Windows chrome.exe may briefly act as a launcher while the
+                // browser process that owns the isolated profile continues. Give CDP
+                // a short grace window before treating the launcher exit as fatal.
+                let grace_deadline =
+                    std::cmp::min(deadline, Instant::now() + Duration::from_secs(1));
+                while Instant::now() < grace_deadline {
+                    if let Some(port) = self
+                        .probe_debugger_port(devtools_file, requested_port)
+                        .await
+                    {
+                        return Ok(port);
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+
                 let stderr = stderr_snapshot(stderr_buffer).await;
                 return Err(ChromiumDriverError::EarlyExit(format!(
                     "exit={exit}; executable={executable}; profile={}; {}",
