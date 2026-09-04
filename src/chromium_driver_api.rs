@@ -1,5 +1,6 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
+    browser_provider_runtime,
     chromium_driver::{ChromiumDriver, ChromiumDriverError},
     chromium_driver_runtime,
 };
@@ -57,9 +58,48 @@ pub async fn verify_chromium_login(
         return unavailable();
     };
     match driver.verify(&session_id).await {
-        Ok(verification) => json_response(StatusCode::OK, json!(verification), None),
+        Ok(mut verification) => {
+            if verification.authenticated
+                && verification.auth_material_captured
+                && session_can_release_browser(&state, &session_id).await
+            {
+                if let Ok(status) = driver.stop(&session_id).await {
+                    verification.browser_closed_after_capture = true;
+                    verification.status = status;
+                }
+            }
+            json_response(StatusCode::OK, json!(verification), None)
+        }
         Err(error) => driver_error(error),
     }
+}
+
+async fn session_can_release_browser(state: &AppState, session_id: &str) -> bool {
+    let Some(registry) = browser_provider_runtime::get() else {
+        return false;
+    };
+    let config = state.gateway.config_snapshot();
+    let mut matched = false;
+
+    for account in config.accounts.iter().filter(|account| account.enabled) {
+        if registry.session_id_for_account(&account.id).as_deref() != Some(session_id) {
+            continue;
+        }
+        matched = true;
+        let Some(provider) = config.provider(&account.provider) else {
+            return false;
+        };
+        let diagnostics = registry
+            .adapter_diagnostics(&provider.kind, &account.id)
+            .await;
+        if diagnostics.status != "ready"
+            || diagnostics.adapter_id.as_deref() != Some("gemini-web-http")
+        {
+            return false;
+        }
+    }
+
+    matched
 }
 
 pub async fn stop_chromium(
