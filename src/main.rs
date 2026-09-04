@@ -118,7 +118,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let browser_session_count = browser_sessions.summary().await?.sessions.len();
     let chromium_driver = Arc::new(ChromiumDriver::new(chromium_config, browser_sessions.clone())?);
     let chromium_driver_enabled = chromium_driver.enabled();
-    chromium_driver_runtime::install(chromium_driver)
+    let startup_browser_reconcile = chromium_driver.reconcile_all().await;
+    chromium_driver_runtime::install(chromium_driver.clone())
         .map_err(|_| "Chromium driver was already initialized")?;
     browser_session_runtime::install(browser_sessions)
         .map_err(|_| "browser session store was already initialized")?;
@@ -132,7 +133,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(browser_session_count, "browser session registry enabled");
     }
     if chromium_driver_enabled {
-        info!("Chromium browser driver enabled");
+        info!(
+            checked = startup_browser_reconcile.checked,
+            ready = startup_browser_reconcile.ready,
+            recovered = startup_browser_reconcile.recovered,
+            attention = startup_browser_reconcile.attention,
+            "Chromium browser driver enabled and startup reconciliation completed"
+        );
+
+        let reconcile_driver = chromium_driver.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    reconcile_driver.reconcile_interval_seconds(),
+                ))
+                .await;
+                let summary = reconcile_driver.reconcile_all().await;
+                if summary.recovered > 0 {
+                    info!(
+                        recovered = summary.recovered,
+                        ready = summary.ready,
+                        "browser sessions recovered automatically"
+                    );
+                }
+                for session in summary.sessions.iter().filter(|session| session.error.is_some()) {
+                    warn!(
+                        session_id = %session.session_id,
+                        action = %session.action,
+                        error = %session.error.as_deref().unwrap_or("unknown"),
+                        "browser session reconciliation needs attention"
+                    );
+                }
+            }
+        });
     }
     if browser_provider_bindings > 0 {
         info!(browser_provider_bindings, "browser provider account bindings enabled");
