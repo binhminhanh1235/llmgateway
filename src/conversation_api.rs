@@ -344,6 +344,17 @@ pub async fn send_thread_message(
         Err(error) => return gateway_error(error),
     };
     let route_id = routed.route.id.clone();
+    let provider_affinity = {
+        let config = state.gateway.config_snapshot();
+        config
+            .account(&routed.route.account)
+            .and_then(|account| {
+                config
+                    .provider(&account.provider)
+                    .filter(|provider| provider.kind == "browser-gemini")
+                    .map(|provider| (provider.id.clone(), account.id.clone()))
+            })
+    };
 
     if let Err(error) = state
         .conversations
@@ -373,16 +384,29 @@ pub async fn send_thread_message(
         let thread_id_for_task = thread_id.clone();
         let model_for_task = requested_model.clone();
         let route_for_task = route_id.clone();
+        let provider_affinity_for_task = provider_affinity.clone();
         tokio::spawn(async move {
             if let Ok(assistant) = rx.await {
-                let _ = conversations
+                if let Ok(stored) = conversations
                     .append_message(
                         &thread_id_for_task,
                         &assistant,
                         Some(&model_for_task),
                         Some(&route_for_task),
                     )
-                    .await;
+                    .await
+                {
+                    if let Some((provider, account)) = provider_affinity_for_task {
+                        let _ = conversations
+                            .mark_provider_conversation_synced(
+                                &thread_id_for_task,
+                                &provider,
+                                &account,
+                                stored.ordinal,
+                            )
+                            .await;
+                    }
+                }
             }
         });
         let response = response_with_route(
@@ -409,7 +433,7 @@ pub async fn send_thread_message(
                 .and_then(|choice| choice.get("message"))
                 .cloned()
             {
-                if let Err(error) = state
+                let stored = match state
                     .conversations
                     .append_message(
                         &thread_id,
@@ -419,7 +443,22 @@ pub async fn send_thread_message(
                     )
                     .await
                 {
-                    return conversation_error(error);
+                    Ok(stored) => stored,
+                    Err(error) => return conversation_error(error),
+                };
+                if let Some((provider, account)) = provider_affinity.as_ref() {
+                    if let Err(error) = state
+                        .conversations
+                        .mark_provider_conversation_synced(
+                            &thread_id,
+                            provider,
+                            account,
+                            stored.ordinal,
+                        )
+                        .await
+                    {
+                        return conversation_error(error);
+                    }
                 }
             }
             let response = json_response(StatusCode::OK, openai, Some(&route_id));
