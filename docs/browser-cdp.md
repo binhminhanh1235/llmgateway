@@ -172,7 +172,7 @@ It returns:
 
 For custom `browser-cdp` adapters that only implement `chat(request, context)`, a `text/event-stream` result remains a compatibility path and may be returned as a complete SSE string.
 
-v0.30 adds true incremental streaming for the built-in Gemini/Qwen adapters through additive contract methods:
+v0.30 adds true incremental streaming for the built-in Gemini/ChatGPT/Qwen adapters through additive contract methods:
 
 ```text
 streamStart(request, context)
@@ -198,7 +198,7 @@ first_byte_timeout_ms
 idle_stream_timeout_ms
 ```
 
-Custom adapters receive the route model as `model_label` by default. Built-in Gemini/Qwen adapters only receive a model label when the binding has an explicit `model_labels` mapping.
+Custom adapters receive the route model as `model_label` by default. Built-in Gemini/ChatGPT/Qwen adapters only receive a model label when the binding has an explicit `model_labels` mapping.
 
 ## Streaming timeouts
 
@@ -236,4 +236,4 @@ This separation prevents retry storms when the provider simply changed its UI.
 
 ## Built-in adapters
 
-For normal Gemini/Qwen usage, use `browser-gemini` / `browser-qwen` rather than copying their scripts into a custom adapter. See [Browser provider adapters](browser-provider-adapters.md).
+For normal Gemini/ChatGPT/Qwen usage, use `browser-gemini` / `browser-chatgpt` / `browser-qwen` rather than copying their scripts into a custom adapter. See [Browser provider adapters](browser-provider-adapters.md).
