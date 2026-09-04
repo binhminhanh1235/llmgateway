@@ -138,7 +138,7 @@ See [Browser streaming and cancellation](docs/browser-streaming.md) for the stre
 
 v0.31 makes multiple browser accounts behave like a smart local pool. Equal-quality browser routes rotate by least-recent successful account use, persistent threads can keep a healthy browser session sticky, recently failed browser routes re-enter with a bounded recovery penalty, and execution policy can be expressed as `prefer-browser`, `browser-only`, `balanced`, `prefer-api`, or `api-only`. The old `browser-first` / `api-first` names remain accepted aliases.
 
-Persistent llmgateway threads can also keep a provider-native Gemini conversation: the first turn captures the Gemini conversation URL, later turns reopen that native thread and send only the provider-missed/current delta, while llmgateway remains the canonical history store.
+Persistent llmgateway threads can also keep a provider-native Gemini conversation: the first turn captures the native Gemini chat identity, later turns reuse the same open Gemini tab when available, and only reopen the persisted native conversation after tab/runtime loss. New llmgateway chats get separate Gemini tabs/threads, while llmgateway remains the canonical history store.
 
 See [Browser-aware routing intelligence](docs/browser-aware-routing.md) for policy semantics, scoring order, fairness, recovery, context enforcement, and route-explain fields.
 
