@@ -332,10 +332,11 @@ pub async fn send_thread_message(
 
     let routed = match state
         .gateway
-        .execute_openai_chat_with_affinity(
+        .execute_openai_chat_with_thread_affinity(
             &requested_model,
             &request,
             thread_context.sticky_route.as_deref(),
+            &thread_id,
         )
         .await
     {
