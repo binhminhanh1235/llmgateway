@@ -128,11 +128,11 @@ fn observe_terminal_sse_done(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
             .map(|pos| (pos, 4));
-        let Some((frame_end, delimiter_len)) = match (lf_end, crlf_end) {
+        let Some((frame_end, delimiter_len)) = (match (lf_end, crlf_end) {
             (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
             (Some(value), None) | (None, Some(value)) => Some(value),
             (None, None) => None,
-        } else {
+        }) else {
             break;
         };
 
