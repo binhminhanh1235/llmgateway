@@ -126,7 +126,7 @@
         <div class="browser-session-actions">
           <button type="button" class="browser-primary-action" data-browser-action="${button.action}" data-session-id="${escapeAttr(session.id)}" ${button.disabled ? "disabled" : ""}>${escapeHtml(button.label)}</button>
           ${running ? `<button type="button" class="browser-secondary-action" data-browser-action="stop" data-session-id="${escapeAttr(session.id)}">Stop browser</button>` : ""}
-          ${session.status === "requires_attention" ? `<button type="button" class="browser-secondary-action" data-browser-action="reset" data-session-id="${escapeAttr(session.id)}">Reset</button>` : ""}
+          ${["requires_attention", "failed"].includes(session.status) ? `<button type="button" class="browser-secondary-action" data-browser-action="reset" data-session-id="${escapeAttr(session.id)}">Reset</button>` : ""}
         </div>
       </article>`;
   }
@@ -134,7 +134,7 @@
   function primaryAction(session, driver) {
     if (!session.enabled) return { action: "none", label: "Disabled", disabled: true };
     if (!driver?.available) return { action: "none", label: "Driver unavailable", disabled: true };
-    if (session.status === "login_in_progress") return { action: "verify", label: "Check login", disabled: false };
+    if (session.status === "starting" || (session.status === "login_required" && driver.status?.running)) return { action: "verify", label: "Check login", disabled: false };
     if (session.status === "ready") {
       return driver.status?.running
         ? { action: "verify", label: "Verify session", disabled: false }
@@ -145,7 +145,7 @@
 
   function sessionDetail(session, driver) {
     if (!session.enabled) return "This browser session is disabled in configuration.";
-    if (session.status === "login_in_progress") {
+    if (session.status === "starting" || session.status === "login_required") {
       return driver?.status?.running
         ? "Finish the normal login flow in the Chromium window. This page will detect completion automatically."
         : "The login browser is no longer running. Check the session or start login again.";
@@ -155,6 +155,9 @@
         ? `Connected · last verified ${relativeTime(session.last_verified_at)}`
         : "Connected and ready for a browser-backed provider adapter.";
     }
+    if (session.status === "degraded") return "The saved browser session is temporarily unavailable; llmgateway will try safe automatic recovery.";
+    if (session.status === "stopped") return "The browser was stopped intentionally. The isolated profile is preserved for the next launch.";
+    if (session.status === "failed") return "Automatic recovery failed. Reset the session, then launch the isolated profile again.";
     if (session.status === "requires_attention") {
       return "The session needs attention. Reset it, then start a normal browser login again.";
     }
@@ -164,7 +167,11 @@
   function lifecycleView(status) {
     switch (status) {
       case "ready": return { tone: "ready", label: "Connected" };
-      case "login_in_progress": return { tone: "working", label: "Signing in" };
+      case "starting": return { tone: "working", label: "Starting" };
+      case "login_required": return { tone: "working", label: "Login required" };
+      case "degraded": return { tone: "attention", label: "Recovering" };
+      case "failed": return { tone: "attention", label: "Recovery failed" };
+      case "stopped": return { tone: "idle", label: "Stopped" };
       case "requires_attention": return { tone: "attention", label: "Needs attention" };
       default: return { tone: "idle", label: "Not connected" };
     }
@@ -249,14 +256,14 @@
   }
 
   function syncLoginPolling() {
-    const pending = sessions.some((session) => session.status === "login_in_progress");
+    const pending = sessions.some((session) => ["starting", "login_required"].includes(session.status) && Boolean(driverState.get(session.id)?.status?.running));
     if (pending && isAccountsViewActive()) startLoginPolling();
     else stopLoginPolling();
   }
 
   async function pollPendingLogins() {
     if (!isAccountsViewActive() || loading) return;
-    const pending = sessions.filter((session) => session.status === "login_in_progress");
+    const pending = sessions.filter((session) => ["starting", "login_required"].includes(session.status) && Boolean(driverState.get(session.id)?.status?.running));
     if (!pending.length) {
       stopLoginPolling();
       return;
