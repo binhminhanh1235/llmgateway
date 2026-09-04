@@ -39,7 +39,6 @@ pub struct RoutedResponse {
     pub route: RouteConfig,
     pub usage_event_id: Option<String>,
     pub request_id: String,
-    pub is_stream: bool,
     pub started_at: Instant,
 }
 
@@ -337,7 +336,6 @@ impl Gateway {
                         route,
                         usage_event_id,
                         request_id,
-                        is_stream,
                         started_at,
                     });
                 }
@@ -514,10 +512,20 @@ impl Gateway {
                 finished: false,
             };
 
+            let mut sse_tail = Vec::<u8>::new();
             while let Some(item) = upstream.next().await {
                 match item {
                     Ok(bytes) => {
                         guard.observe(bytes.len());
+                        let mut scan = Vec::with_capacity(sse_tail.len() + bytes.len());
+                        scan.extend_from_slice(&sse_tail);
+                        scan.extend_from_slice(&bytes);
+                        if scan.windows(b"data: [DONE]".len()).any(|window| window == b"data: [DONE]") {
+                            guard.finish("completed", None).await;
+                        }
+                        let keep = scan.len().min(32);
+                        sse_tail.clear();
+                        sse_tail.extend_from_slice(&scan[scan.len().saturating_sub(keep)..]);
                         yield Ok::<_, std::io::Error>(bytes);
                     }
                     Err(error) => {
