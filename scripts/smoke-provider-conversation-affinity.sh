@@ -141,11 +141,17 @@ all_mappings = db.execute(
        ORDER BY created_at, thread_id"""
 ).fetchall()
 
+try:
+    with open("/tmp/llmgateway-provider-conversation.log", encoding="utf-8") as f:
+        gateway_log = f.read().splitlines()[-120:]
+except FileNotFoundError:
+    gateway_log = []
+
 assert opened[:2] == [
     "https://gemini.google.com/app",
     "https://gemini.google.com/app",
-], {"opened": opened, "stream_debug": stream_debug, "mappings": all_mappings}
-assert len(opened) == 2, {"opened": opened, "stream_debug": stream_debug, "mappings": all_mappings}
+], {"opened": opened, "stream_debug": stream_debug, "mappings": all_mappings, "gateway_log": gateway_log}
+assert len(opened) == 2, {"opened": opened, "stream_debug": stream_debug, "mappings": all_mappings, "gateway_log": gateway_log}
 
 with open(os.path.join(profile, "browser-requests.jsonl"), encoding="utf-8") as f:
     requests = [json.loads(line) for line in f if line.strip()]
