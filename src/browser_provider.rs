@@ -304,6 +304,10 @@ impl BrowserProviderRegistry {
         Ok(())
     }
 
+    pub async fn clear_diagnostics(&self) {
+        self.adapter_health.write().await.clear();
+    }
+
     fn config_snapshot(&self) -> BrowserProviderConfig {
         self.config
             .read()
