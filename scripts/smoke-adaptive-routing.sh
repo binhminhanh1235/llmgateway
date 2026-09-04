@@ -28,6 +28,7 @@ retrieval_enabled = false
 [routing]
 adaptive_enabled = true
 adaptive_min_samples = 2
+adaptive_history_samples = 10
 adaptive_ewma_alpha = 1.0
 adaptive_latency_target_ms = 50
 adaptive_max_penalty = 30
@@ -87,12 +88,18 @@ cargo build --quiet
 PID=$!
 trap 'kill "$PID" "$FAKE_PID" 2>/dev/null || true; rm -f data/llmgateway.db data/llmgateway.db-shm data/llmgateway.db-wal /tmp/llmgateway-adaptive-smoke.toml /tmp/adaptive.headers /tmp/adaptive.json' EXIT
 
-for _ in {1..60}; do
-  if curl -fsS http://127.0.0.1:7331/_llmgateway/health >/dev/null; then
-    break
-  fi
-  sleep 0.2
-done
+wait_ready() {
+  for _ in {1..60}; do
+    if curl -fsS http://127.0.0.1:7331/_llmgateway/health >/dev/null; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "gateway did not become ready" >&2
+  return 1
+}
+
+wait_ready
 
 request() {
   curl -fsS -D /tmp/adaptive.headers -o /tmp/adaptive.json     -X POST http://127.0.0.1:7331/v1/chat/completions     -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}"     -H "Content-Type: application/json"     -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"adaptive smoke"}]}'
@@ -103,6 +110,15 @@ FIRST=$(request)
 SECOND=$(request)
 test "$FIRST" = "slow-route"
 test "$SECOND" = "slow-route"
+
+# Restart against the same SQLite database. The new process must recover adaptive
+# samples from execution_attempts before it starts serving traffic.
+kill "$PID"
+wait "$PID" 2>/dev/null || true
+./target/debug/llmgateway >/tmp/llmgateway-adaptive-restart.log 2>&1 &
+PID=$!
+wait_ready
+grep -q 'restored adaptive route samples from execution trace' /tmp/llmgateway-adaptive-restart.log
 
 EXPLAIN=$(curl -fsS   -X POST http://127.0.0.1:7331/_llmgateway/routes/explain   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}"   -H "Content-Type: application/json"   -d '{"model":"llmgateway-auto"}')
 
@@ -127,4 +143,4 @@ assert fast["adaptive_penalty"] == 0, fast
 THIRD=$(request)
 test "$THIRD" = "fast-route"
 
-echo "llmgateway adaptive route scoring smoke test passed"
+echo "llmgateway persistent adaptive routing smoke test passed"
