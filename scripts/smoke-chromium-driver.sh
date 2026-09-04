@@ -16,17 +16,23 @@ cat >"$FAKE_CHROMIUM" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 profile=""
+debug_port=""
 for arg in "$@"; do
   case "$arg" in
     --user-data-dir=*) profile="${arg#--user-data-dir=}" ;;
+    --remote-debugging-port=*) debug_port="${arg#--remote-debugging-port=}" ;;
   esac
 done
 if [ -z "$profile" ]; then
   echo "missing --user-data-dir" >&2
   exit 2
 fi
+if [ -z "$debug_port" ] || [ "$debug_port" = "0" ]; then
+  echo "missing explicit --remote-debugging-port" >&2
+  exit 3
+fi
 mkdir -p "$profile"
-exec python3 - "$profile" <<'PY'
+exec python3 - "$profile" "$debug_port" <<'PY'
 import http.server
 import json
 import os
@@ -34,6 +40,7 @@ import socketserver
 import sys
 
 profile = sys.argv[1]
+requested_port = int(sys.argv[2])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -56,7 +63,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
+with socketserver.TCPServer(("127.0.0.1", requested_port), Handler) as server:
     port = server.server_address[1]
     with open(os.path.join(profile, "DevToolsActivePort"), "w", encoding="utf-8") as f:
         f.write(f"{port}\n/devtools/browser/fake\n")
