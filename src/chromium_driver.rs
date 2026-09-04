@@ -726,6 +726,11 @@ fn validate_chromium_config(config: &ChromiumConfig) -> Result<(), ChromiumDrive
             "chromium.startup_timeout_seconds must be between 1 and 120".into(),
         ));
     }
+    if config.reconcile_interval_seconds < 5 || config.reconcile_interval_seconds > 3600 {
+        return Err(ChromiumDriverError::InvalidConfig(
+            "chromium.reconcile_interval_seconds must be between 5 and 3600".into(),
+        ));
+    }
     for (session_id, session) in &config.sessions {
         if session_id.is_empty()
             || !session_id
@@ -907,6 +912,10 @@ fn default_startup_timeout_seconds() -> u64 {
     15
 }
 
+fn default_reconcile_interval_seconds() -> u64 {
+    15
+}
+
 #[cfg(test)]
 mod tests {
     use super::{read_debugger_port, sanitize_url, validate_chromium_config, ChromiumConfig, ChromiumSessionConfig};
@@ -914,7 +923,10 @@ mod tests {
 
     #[test]
     fn chromium_driver_is_opt_in_disabled() {
-        assert!(!ChromiumConfig::default().enabled);
+        let config = ChromiumConfig::default();
+        assert!(!config.enabled);
+        assert!(config.auto_recover);
+        assert_eq!(config.reconcile_interval_seconds, 15);
     }
 
     #[test]
@@ -948,6 +960,8 @@ mod tests {
             executable: None,
             extra_args: vec![],
             startup_timeout_seconds: 10,
+            auto_recover: true,
+            reconcile_interval_seconds: 15,
             sessions,
         };
         assert!(validate_chromium_config(&config).is_err());
