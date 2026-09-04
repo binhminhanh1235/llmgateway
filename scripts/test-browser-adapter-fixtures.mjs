@@ -354,6 +354,57 @@ async function testChatGPTFreshThreadForcesNewChat() {
   assert.equal(globalThis.location.pathname, "/");
 }
 
+async function testChatGPTFreshStreamSkipsRedundantNewChatAndSubmitsBeforeReturn() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const newChat = new FakeElement("New chat");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "#prompt-textarea": input,
+    "#composer-submit-button": send,
+    "a[data-testid='create-new-chat-button']": newChat,
+    "[data-message-author-role='assistant'] .markdown": []
+  };
+  let newChatClicks = 0;
+  let sendClicks = 0;
+  newChat.onClick = () => {
+    newChatClicks += 1;
+    globalThis.location.pathname = "/";
+  };
+  send.onClick = () => {
+    sendClicks += 1;
+    response.innerText = "S".repeat(180);
+    response.textContent = response.innerText;
+    nodes["[data-message-author-role='assistant'] .markdown"] = [response];
+  };
+
+  installPage({ host: "chatgpt.com", path: "/", nodes });
+  const adapter = loadAdapter("adapters/chatgpt-web.js");
+  const started = await adapter.streamStart({
+    model: "chatgpt-web-test",
+    stream: true,
+    messages: [{ role: "user", content: "fresh stream" }]
+  }, {
+    start_new_conversation: true,
+    response_timeout_ms: 1500,
+    response_stable_ms: 60
+  });
+
+  assert.equal(newChatClicks, 0, "fresh ChatGPT target must not navigate through New chat again");
+  assert.equal(sendClicks, 1, "streamStart must submit before returning its stream id");
+  assert.ok(started.stream_id);
+
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const first = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(first.error, null, JSON.stringify(first));
+  assert.ok(first.events.length >= 1, JSON.stringify(first));
+
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const second = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(second.error, null, JSON.stringify(second));
+  assert.equal(second.done, true, JSON.stringify(second));
+}
+
 async function testChatGPTReopenWaitsForStableHistory() {
   const input = new FakeElement();
   const oldOne = new FakeElement("old one");
@@ -844,6 +895,7 @@ await testGeminiToolBridge();
 await testChatGPTToolBridge();
 await testChatGPTModelPickerFlow();
 await testChatGPTFreshThreadForcesNewChat();
+await testChatGPTFreshStreamSkipsRedundantNewChatAndSubmitsBeforeReturn();
 await testChatGPTReopenWaitsForStableHistory();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
