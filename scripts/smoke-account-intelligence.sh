@@ -146,7 +146,9 @@ assert browser["routing_state"] == "unavailable", browser
 assert browser["readiness"]["effective_status"] == "unavailable", browser
 assert browser["readiness"]["routable"] is False, browser
 assert "browser_login_required" in browser["readiness"]["reasons"], browser
-assert browser["browser_session"]["id"] == "fake-web", browser\nassert browser["readiness"]["browser_session_id"] == "fake-web", browser\nassert browser["readiness"]["browser_session_status"] == "login_required", browser
+assert browser["browser_session"]["id"] == "fake-web", browser
+assert browser["readiness"]["browser_session_id"] == "fake-web", browser
+assert browser["readiness"]["browser_session_status"] == "login_required", browser
 assert browser["browser_session"]["status"] == "login_required", browser
 
 missing=accounts["missing-key-account"]
