@@ -276,7 +276,7 @@ Gemini model
 best eligible route
 ```
 
-When a sticky route fails with a retryable condition, fallback continues through other eligible routes and the successful route becomes the new affinity.
+When a sticky route fails with a retryable condition, fallback continues through other eligible routes and the successful route becomes the new affinity. v0.26 also lets a materially better task fit override an old sticky route; affinity is preserved when the old route and current best route have equal task adjustment.
 
 v0.26 adds task-aware routing on top of readiness, quota, configured priority, and adaptive latency/reliability. Requests are classified locally as coding, reasoning, long-context, simple chat, or general. Routes can advertise policy metadata such as `coding`, `reasoning`, `long-context`, `cheap`, and `fast`; unknown metadata remains neutral for backward compatibility. A known `context_window` that cannot fit the request is excluded before ranking.
 
