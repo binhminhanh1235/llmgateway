@@ -1134,16 +1134,15 @@ impl CdpBrowserAdapter {
         let deadline = Instant::now() + timeout_duration;
         loop {
             if !target.websocket_debugger_url.is_empty() {
-                if let Ok(Value::String(href)) = timeout(
+                let runtime_href = timeout(
                     Duration::from_secs(2),
                     evaluate_cdp(
                         &target.websocket_debugger_url,
                         "String(globalThis.location?.href || '')",
                     ),
                 )
-                .await
-                .ok()?
-                {
+                .await;
+                if let Ok(Ok(Value::String(href))) = runtime_href {
                     if is_native_conversation_url(new_chat_url, &href) {
                         return Some(href);
                     }
