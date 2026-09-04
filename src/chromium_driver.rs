@@ -169,6 +169,7 @@ pub struct ChromiumVerifyView {
     pub ready_match: Option<String>,
     pub auth_material_captured: bool,
     pub auth_material_error: Option<String>,
+    pub browser_closed_after_capture: bool,
     pub status: ChromiumStatusView,
 }
 
@@ -503,6 +504,7 @@ impl ChromiumDriver {
             ready_match: status.ready_match.clone(),
             auth_material_captured,
             auth_material_error,
+            browser_closed_after_capture: false,
             status,
         })
     }
