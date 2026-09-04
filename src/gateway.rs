@@ -140,16 +140,23 @@ impl Gateway {
             }
         };
 
+        let config = self.live_config.snapshot();
         let mut routes = self
             .router
-            .plan_for_body(requested_model, Some(body))
+            .plan_for_body_with_config(config.clone(), requested_model, Some(body))
             .await;
         if let Some(preferred_route) = preferred_route {
             if let Some(index) = routes.iter().position(|route| route.id == preferred_route) {
                 let keep_sticky = index == 0
                     || self
                         .router
-                        .sticky_route_matches_best_task_fit(requested_model, body, &routes[index], &routes[0]);
+                        .sticky_route_matches_best_task_fit_with_config(
+                            config.as_ref(),
+                            requested_model,
+                            body,
+                            &routes[index],
+                            &routes[0],
+                        );
                 if keep_sticky {
                     let preferred = routes.remove(index);
                     routes.insert(0, preferred);
@@ -164,7 +171,6 @@ impl Gateway {
         let upstream_body = sanitized_upstream_body(body);
         let estimated_input_tokens = QuotaUsageStore::estimate_input_tokens(&upstream_body);
         let mut last_error: Option<GatewayError> = None;
-        let config = self.live_config.snapshot();
 
         for (attempt_index, route) in routes.into_iter().enumerate() {
             let account = match config.account(&route.account) {
