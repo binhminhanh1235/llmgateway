@@ -3,7 +3,7 @@ use crate::{
     browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
-    execution_trace::{AttemptRecord, ExecutionTraceStore},
+    execution_trace::{AttemptRecord, ExecutionTraceError, ExecutionTraceStore},
     quota_usage::{QuotaUsageStore, UsageEvent},
     quota_usage_runtime,
     routing::Router,
@@ -75,6 +75,21 @@ impl Gateway {
             execution_traces,
             client,
         })
+    }
+
+    pub async fn restore_adaptive_from_traces(&self) -> Result<usize, ExecutionTraceError> {
+        let samples = self
+            .execution_traces
+            .adaptive_samples(self.config.routing.adaptive_history_samples)
+            .await?;
+        Ok(self
+            .router
+            .restore_adaptive_samples(
+                samples
+                    .into_iter()
+                    .map(|sample| (sample.route_id, sample.success, sample.duration_ms)),
+            )
+            .await)
     }
 
     pub async fn execute_openai_chat(
