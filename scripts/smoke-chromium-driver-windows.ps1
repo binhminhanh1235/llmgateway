@@ -133,15 +133,12 @@ try {
 
     $healthy = $false
     for ($i = 0; $i -lt 80; $i++) {
-        try {
-            $response = Invoke-WebRequest -Uri "http://127.0.0.1:7332/_llmgateway/health" -TimeoutSec 2
-            if ($response.StatusCode -eq 200) {
-                $healthy = $true
-                break
-            }
-        } catch {
-            Start-Sleep -Milliseconds 250
+        & curl.exe -fsS "http://127.0.0.1:7332/_llmgateway/health" *> $null
+        if ($LASTEXITCODE -eq 0) {
+            $healthy = $true
+            break
         }
+        Start-Sleep -Milliseconds 250
     }
     if (-not $healthy) {
         Show-GatewayLogs
