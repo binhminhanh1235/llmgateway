@@ -2564,6 +2564,49 @@ mod tests {
     }
 
     #[test]
+    fn gemini_native_conversation_url_is_distinct_from_new_chat() {
+        assert!(!is_native_conversation_url(
+            "https://gemini.google.com/app",
+            "https://gemini.google.com/app"
+        ));
+        assert!(is_native_conversation_url(
+            "https://gemini.google.com/app",
+            "https://gemini.google.com/app/abc123"
+        ));
+        assert!(!is_native_conversation_url(
+            "https://gemini.google.com/app",
+            "https://example.test/app/abc123"
+        ));
+    }
+
+    #[test]
+    fn incremental_browser_body_keeps_missed_turns_and_current_user() {
+        let body = json!({
+            "model": "gemini-web-default",
+            "messages": [
+                {"role":"system","content":"system"},
+                {"role":"user","content":"old user"},
+                {"role":"assistant","content":"old assistant"},
+                {"role":"user","content":"current user"}
+            ],
+            "stream": false
+        });
+        let missed = vec![
+            json!({"role":"user","content":"missed user"}),
+            json!({"role":"assistant","content":"missed assistant"})
+        ];
+        let delta = incremental_browser_body(&body, &missed);
+        assert_eq!(
+            delta["messages"],
+            json!([
+                {"role":"user","content":"missed user"},
+                {"role":"assistant","content":"missed assistant"},
+                {"role":"user","content":"current user"}
+            ])
+        );
+    }
+
+    #[test]
     fn contract_expression_requires_version_and_probe() {
         let expression = build_contract_expression(
             "globalThis.__LLMGATEWAY_ADAPTER__ = {meta:{contract_version:1,id:'x',provider:'x'},probe:async()=>({ok:true}),chat:async()=>({status:200,body:{ok:true}})};",
