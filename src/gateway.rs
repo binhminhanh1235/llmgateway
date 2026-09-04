@@ -120,7 +120,7 @@ impl Drop for ExecutionStreamGuard {
 
 #[derive(Debug, Error)]
 pub enum GatewayError {
-    #[error("unknown or unavailable model '{0}'")]
+    #[error("{0}")]
     NoRoute(String),
     #[error("missing credential environment variable '{0}'")]
     MissingCredential(String),
