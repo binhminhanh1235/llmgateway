@@ -1,14 +1,14 @@
-# Browser session foundation
+# Browser sessions
 
-llmgateway v0.12 adds the lifecycle and storage boundary needed for future Gemini/Qwen web adapters without putting browser cookies into the gateway database or API.
+Browser sessions are first-class llmgateway accounts whose authentication state stays inside an isolated Chromium profile.
+
+v0.27 turns the original persistence foundation into a reconciled runtime lifecycle. SQLite records metadata, but a browser-CDP route is eligible only when the live Chromium/CDP runtime is also reachable and an authenticated page matches the configured ready URL.
 
 ## Security boundary
 
-Browser session secrets belong to the browser profile, not to llmgateway application state.
-
 ```text
 SQLite
-  status
+  lifecycle status
   timestamps
   login attempt id
   last error
@@ -19,20 +19,16 @@ Isolated Chromium profile
   IndexedDB
   provider session state
 
-llmgateway API
-  lifecycle metadata only
-  never raw cookies
+llmgateway APIs
+  lifecycle/readiness metadata only
+  never raw browser credentials
 ```
 
 On Unix, llmgateway creates the profile root and enabled session directories with mode `0700`.
 
-The default profile root is:
+Never point `browser.profile_root` at your normal Chrome profile. Each llmgateway session should own its own isolated profile directory.
 
-```text
-data/browser-profiles
-```
-
-Browser sessions are opt-in. If `[browser]` is absent, the registry is disabled and the profile directory is not created.
+CAPTCHA, 2FA, passkeys, and other authentication challenges remain interactive and must be completed normally by the user.
 
 ## Configuration
 
@@ -42,84 +38,60 @@ enabled = true
 profile_root = "data/browser-profiles"
 
 [browser.sessions.gemini-web-primary]
-provider = "gemini"
+provider = "gemini-web"
 label = "Gemini web primary"
 login_url = "https://gemini.google.com/app"
 enabled = true
 
 [browser.sessions.qwen-web-primary]
-provider = "qwen"
+provider = "qwen-web"
 label = "Qwen web primary"
 login_url = "https://chat.qwen.ai/"
 enabled = true
 ```
 
-Session IDs may contain only ASCII letters, numbers, `.`, `-`, and `_`. This prevents a configured session ID from escaping the profile root through path traversal.
+Session IDs may contain only ASCII letters, numbers, `.`, `-`, and `_`. Non-local login URLs must use HTTPS.
 
-Non-local login URLs must use HTTPS.
-
-## Lifecycle
+## v0.27 lifecycle
 
 ```text
-requires_login
+login_required
       |
-      | POST .../login/start
+      | launch / login
       v
-login_in_progress
+   starting
       |
-      | normal browser login completed
+      | authenticated page verified
       v
-    ready
+     ready
       |
-      | adapter detects expiry / challenge / invalid session
-      v
-requires_attention
+      +---- unexpected Chromium/CDP loss ----> degraded
+      |                                         |
+      |                                         | auto recovery
+      |                                         v
+      |                                       ready
       |
-      | POST .../reset
-      v
-requires_login
+      +---- auth expiry / interactive issue ---> requires_attention
+      |
+      +---- deliberate Stop -------------------> stopped
+
+launch/recovery failure -----------------------> failed
 ```
 
-`login/start` prepares the isolated profile directory and creates a login-attempt ID. v0.12 deliberately does not launch or control Chromium yet.
+Only `ready` is routable.
 
-`login/complete` marks the lifecycle state ready. It does not prove that provider authentication is valid by itself. A future browser driver will call it only after validating the authenticated page/session.
+The API view also exposes `routable` so callers do not need to duplicate the lifecycle rule.
 
-CAPTCHA, 2FA, passkeys, and other login challenges must be completed normally by the user. Browser adapters must never attempt to bypass them.
+Legacy v0.12-v0.26 rows are migrated in place:
 
-## Admin API
+- `requires_login` becomes `login_required`;
+- `login_in_progress` becomes `starting`.
 
-```text
-GET  /_llmgateway/browser-sessions
-GET  /_llmgateway/browser-sessions/{session_id}
-POST /_llmgateway/browser-sessions/{session_id}/login/start
-POST /_llmgateway/browser-sessions/{session_id}/login/complete
-POST /_llmgateway/browser-sessions/{session_id}/verify
-POST /_llmgateway/browser-sessions/{session_id}/attention
-POST /_llmgateway/browser-sessions/{session_id}/reset
-```
+Profile data is not deleted during this migration.
 
-All endpoints require the normal llmgateway API key.
+## Persistence and restart behavior
 
-Example start response:
-
-```json
-{
-  "login_attempt_id": "browser_login_...",
-  "login_url": "https://gemini.google.com/app",
-  "profile_dir": "data/browser-profiles/gemini-web-primary",
-  "session": {
-    "id": "gemini-web-primary",
-    "status": "login_in_progress"
-  },
-  "instructions": ["..."]
-}
-```
-
-The response contains paths and lifecycle metadata, never cookie values.
-
-## Persistence
-
-SQLite table `browser_session_state` stores:
+The `browser_session_state` table stores only lifecycle metadata:
 
 - `session_id`
 - `provider_id`
@@ -131,20 +103,54 @@ SQLite table `browser_session_state` stores:
 - `last_error`
 - `updated_at`
 
-The profile remains on disk across gateway restarts, so the future browser driver can reopen the same authenticated browser state.
+The isolated profile remains on disk across gateway and Chromium restarts.
 
-Resetting lifecycle state does not delete the profile directory. This is intentional: reset means “require login/verification again”, not “destroy local browser data”. A destructive profile wipe should be a separate explicit operation in a later release.
+At gateway startup, v0.27 reconciles persisted state with the actual browser runtime:
 
-## What v0.12 does not do
+- a still-running authenticated Chromium instance is reconnected even though it is not in the new process map;
+- a stale `DevToolsActivePort` is not trusted;
+- a previously-ready session whose browser disappeared may be safely relaunched using the same profile;
+- the relaunched browser must be re-verified before the session returns to `ready`;
+- `stopped`, `login_required`, and `requires_attention` are intentional states and are not auto-launched.
 
-v0.12 does not reverse-engineer Gemini/Qwen private web endpoints and does not use browser sessions for chat routing yet.
+Reconciliation continues periodically while llmgateway is running, so a crashed browser can recover without restarting the gateway.
 
-The next adapter layer can build on this foundation with:
+## Admin API
 
-1. a Chromium process/driver using the isolated profile,
-2. authenticated-session verification,
-3. provider-specific chat transport behind the existing gateway provider abstraction,
-4. `requires_attention` transitions on session expiry or interactive challenges,
-5. route eligibility tied to browser-session readiness.
+```text
+GET  /_llmgateway/browser-sessions
+GET  /_llmgateway/browser-sessions/{session_id}
+POST /_llmgateway/browser-sessions/{session_id}/login/start
+POST /_llmgateway/browser-sessions/{session_id}/login/complete
+POST /_llmgateway/browser-sessions/{session_id}/verify
+POST /_llmgateway/browser-sessions/{session_id}/attention
+POST /_llmgateway/browser-sessions/{session_id}/reset
 
-Keeping those concerns separate makes the fragile web-integration layer replaceable while the conversation, routing, quota, and lifecycle layers remain stable.
+POST /_llmgateway/browser-sessions/{session_id}/driver/launch
+GET  /_llmgateway/browser-sessions/{session_id}/driver/status
+POST /_llmgateway/browser-sessions/{session_id}/driver/verify
+POST /_llmgateway/browser-sessions/{session_id}/driver/stop
+```
+
+All endpoints require the normal llmgateway API key.
+
+The legacy `login/complete` endpoint can still mark metadata ready for non-CDP integrations such as the local `browser-http` bridge. A `browser-cdp` route additionally requires live CDP readiness at route-planning time, so a stale/manual database state cannot make a dead CDP route eligible.
+
+## Account Readiness
+
+Browser lifecycle is exposed through the same Account Readiness object used by Router and the UI:
+
+- `browser_session_id`
+- `browser_session_status`
+- `browser_last_error`
+- `browser_ready`
+
+Unavailable browser accounts get specific reasons such as:
+
+- `browser_session_stopped`
+- `browser_login_required`
+- `browser_session_degraded`
+- `browser_session_requires_attention`
+- `browser_session_failed`
+
+This lets the UI explain why a browser route is unavailable without exposing secrets.
