@@ -444,11 +444,17 @@ impl Gateway {
                         &error,
                         GatewayError::Transport(_) | GatewayError::BrowserTransport(_)
                     );
+                    let route_cooldown_secs = match &error {
+                        GatewayError::BrowserAdapterIncompatible(_)
+                        | GatewayError::BrowserModelUnavailable(_) => 0,
+                        GatewayError::BrowserSessionUnavailable(_) => 2,
+                        _ => 10,
+                    };
                     self.router
                         .mark_failure(
                             &route.id,
                             error_text.clone(),
-                            10,
+                            route_cooldown_secs,
                             adaptive_latency_ms,
                             adaptive_failure,
                         )
