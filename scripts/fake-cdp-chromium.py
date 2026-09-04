@@ -151,7 +151,13 @@ def envelope_for(expression, target_id):
         with stream_lock:
             stream_seq += 1
             stream_id = f"ci-stream-{stream_seq}"
-            streams[stream_id] = {"poll": 0, "cancelled": False, "model": model}
+            streams[stream_id] = {
+                "poll": 0,
+                "cancelled": False,
+                "model": model,
+                "provider": provider,
+                "target_id": target_id,
+            }
         write_marker("stream-started", stream_id)
         return {
             "meta": meta,
@@ -189,11 +195,13 @@ def envelope_for(expression, target_id):
             state["poll"] += 1
             poll = state["poll"]
             model = state["model"]
+            stream_provider = state["provider"]
+            stream_target_id = state["target_id"]
 
         write_marker("stream-poll-count", poll)
         completion_id = "chatcmpl_browser_stream"
         if poll == 1:
-            ensure_native_conversation(target_id, provider)
+            ensure_native_conversation(stream_target_id, stream_provider)
             events = [{
                 "id": completion_id,
                 "object": "chat.completion.chunk",
