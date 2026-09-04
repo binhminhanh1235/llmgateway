@@ -1285,7 +1285,7 @@ impl CdpBrowserAdapter {
                     %error,
                     thread_id,
                     account = %request.account.id,
-                    "failed to persist Gemini native conversation affinity"
+                    "failed to persist browser provider native conversation affinity"
                 );
                 false
             }
@@ -2857,6 +2857,16 @@ mod tests {
         assert!(GEMINI_WEB_ADAPTER.contains("newResponseText(before, responses)"));
         assert!(GEMINI_WEB_ADAPTER.contains("div.markdown.markdown-main-panel"));
         assert!(GEMINI_WEB_ADAPTER.contains("reuse_native_conversation"));
+    }
+
+    #[test]
+    fn chatgpt_adapter_supports_fresh_and_reused_conversations() {
+        assert!(CHATGPT_WEB_ADAPTER.contains("start_new_conversation"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("ChatGPT New chat control was not found"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("[data-message-author-role='assistant'] .markdown"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("newResponseText(before, responses)"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("reuse_native_conversation"));
+        assert!(CHATGPT_WEB_ADAPTER.contains("#prompt-textarea"));
     }
 
     #[test]
