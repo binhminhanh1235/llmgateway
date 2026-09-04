@@ -837,6 +837,56 @@ struct CdpStreamPoll {
     error: Option<AdapterContractError>,
 }
 
+struct CdpStreamCleanup {
+    adapter: CdpBrowserAdapter,
+    target: CdpTarget,
+    account_id: String,
+    stream_id: String,
+    profile_dir: String,
+    ephemeral: bool,
+    armed: bool,
+}
+
+impl CdpStreamCleanup {
+    async fn complete(&mut self) {
+        self.armed = false;
+        if self.ephemeral {
+            self.adapter
+                .close_target(&self.profile_dir, &self.target.id)
+                .await;
+        }
+    }
+}
+
+impl Drop for CdpStreamCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let adapter = self.adapter.clone();
+        let target = self.target.clone();
+        let account_id = self.account_id.clone();
+        let stream_id = self.stream_id.clone();
+        let profile_dir = self.profile_dir.clone();
+        let ephemeral = self.ephemeral;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = adapter
+                    .evaluate_stream_control(
+                        &target,
+                        "chat_stream_cancel",
+                        &json!({"stream_id": stream_id}),
+                        &account_id,
+                    )
+                    .await;
+                if ephemeral {
+                    adapter.close_target(&profile_dir, &target.id).await;
+                }
+            });
+        }
+    }
+}
+
 impl CdpBrowserAdapter {
     fn custom() -> Result<Self, BrowserProviderError> {
         Self::new(CdpAdapterSpec {
@@ -1054,6 +1104,189 @@ impl CdpBrowserAdapter {
         Ok(envelope)
     }
 
+    async fn execute_streaming_chat(
+        &self,
+        request: &BrowserAdapterRequest,
+        target: CdpTarget,
+        script: String,
+        context: Value,
+        normalized_body: Value,
+        ephemeral: bool,
+    ) -> Result<reqwest::Response, BrowserProviderError> {
+        let envelope = self
+            .evaluate_contract(
+                &target,
+                &script,
+                "chat_stream_start",
+                Some(&normalized_body),
+                &context,
+                &request.account.id,
+            )
+            .await?;
+        if let Some(error) = envelope.error {
+            return contract_error_to_provider_error(
+                &request.account.id,
+                &request.route.model,
+                error,
+            );
+        }
+        let stream_value = envelope.stream.ok_or_else(|| {
+            BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "missing_stream_start".into(),
+                message: "adapter did not return browser stream start metadata".into(),
+            }
+        })?;
+        let start: CdpStreamStart = serde_json::from_value(stream_value).map_err(|error| {
+            BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "invalid_stream_start".into(),
+                message: error.to_string(),
+            }
+        })?;
+        if start.stream_id.trim().is_empty() {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "invalid_stream_start".into(),
+                message: "browser stream id cannot be empty".into(),
+            });
+        }
+
+        let status = reqwest::StatusCode::from_u16(start.status).map_err(|error| {
+            BrowserProviderError::Transport(format!("invalid browser stream HTTP status: {error}"))
+        })?;
+        let adapter = self.clone();
+        let account_id = request.account.id.clone();
+        let stream_id = start.stream_id.clone();
+        let profile_dir = request.profile_dir.clone();
+        let first_byte_timeout = Duration::from_millis(
+            request.binding.first_byte_timeout_ms.unwrap_or(30_000),
+        );
+        let idle_stream_timeout = Duration::from_millis(
+            request.binding.idle_stream_timeout_ms.unwrap_or(30_000),
+        );
+        let stream_target = target.clone();
+
+        let stream = async_stream::stream! {
+            let mut cleanup = CdpStreamCleanup {
+                adapter: adapter.clone(),
+                target: stream_target.clone(),
+                account_id: account_id.clone(),
+                stream_id: stream_id.clone(),
+                profile_dir,
+                ephemeral,
+                armed: true,
+            };
+            let mut saw_event = false;
+            let mut last_progress = Instant::now();
+
+            loop {
+                let limit = if saw_event {
+                    idle_stream_timeout
+                } else {
+                    first_byte_timeout
+                };
+                let elapsed = last_progress.elapsed();
+                if elapsed >= limit {
+                    let kind = if saw_event { "idle stream" } else { "first byte" };
+                    yield Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("browser {kind} timeout"),
+                    ));
+                    break;
+                }
+                let remaining = limit.saturating_sub(elapsed);
+                let polled = timeout(
+                    remaining,
+                    adapter.evaluate_stream_control(
+                        &stream_target,
+                        "chat_stream_poll",
+                        &json!({"stream_id": stream_id}),
+                        &account_id,
+                    ),
+                )
+                .await;
+
+                let envelope = match polled {
+                    Ok(Ok(envelope)) => envelope,
+                    Ok(Err(error)) => {
+                        yield Err(std::io::Error::other(error.to_string()));
+                        break;
+                    }
+                    Err(_) => {
+                        let kind = if saw_event { "idle stream" } else { "first byte" };
+                        yield Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("browser {kind} timeout"),
+                        ));
+                        break;
+                    }
+                };
+
+                if let Some(error) = envelope.error {
+                    yield Err(std::io::Error::other(format!(
+                        "{}: {}",
+                        error.code, error.message
+                    )));
+                    break;
+                }
+                let Some(stream_value) = envelope.stream else {
+                    yield Err(std::io::Error::other(
+                        "browser stream poll returned no stream payload",
+                    ));
+                    break;
+                };
+                let poll: CdpStreamPoll = match serde_json::from_value(stream_value) {
+                    Ok(poll) => poll,
+                    Err(error) => {
+                        yield Err(std::io::Error::other(format!(
+                            "invalid browser stream poll payload: {error}"
+                        )));
+                        break;
+                    }
+                };
+                if let Some(error) = poll.error {
+                    yield Err(std::io::Error::other(format!(
+                        "{}: {}",
+                        error.code, error.message
+                    )));
+                    break;
+                }
+
+                if !poll.events.is_empty() {
+                    saw_event = true;
+                    last_progress = Instant::now();
+                    for event in poll.events {
+                        match serde_json::to_string(&event) {
+                            Ok(data) => {
+                                yield Ok(Bytes::from(format!("data: {data}\n\n")));
+                            }
+                            Err(error) => {
+                                yield Err(std::io::Error::other(error.to_string()));
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                if poll.done {
+                    yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
+                    cleanup.complete().await;
+                    break;
+                }
+
+                sleep(Duration::from_millis(80)).await;
+            }
+        };
+
+        let response = HttpResponse::builder()
+            .status(status)
+            .header(CONTENT_TYPE, start.content_type)
+            .body(reqwest::Body::wrap_stream(stream))
+            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        Ok(reqwest::Response::from(response))
+    }
+
     fn diagnostics_from_envelope(
         &self,
         account_id: &str,
@@ -1186,7 +1419,7 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         request: BrowserAdapterRequest,
     ) -> Result<reqwest::Response, BrowserProviderError> {
         let script = self.script(&request.binding)?;
-        let mut normalized_body = request.body;
+        let mut normalized_body = request.body.clone();
         let object = normalized_body.as_object_mut().ok_or_else(|| {
             BrowserProviderError::InvalidConfig("chat request body must be a JSON object".into())
         })?;
@@ -1205,6 +1438,24 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
                     session_id: request.session_id.clone(),
                 })?
         };
+
+        if normalized_body
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && self.spec.builtin_script.is_some()
+        {
+            return self
+                .execute_streaming_chat(
+                    &request,
+                    target,
+                    script,
+                    context,
+                    normalized_body,
+                    ephemeral,
+                )
+                .await;
+        }
 
         let result = self
             .evaluate_contract(
@@ -1674,6 +1925,10 @@ fn default_ok_status() -> u16 {
 
 fn default_json_content_type() -> String {
     "application/json".into()
+}
+
+fn default_sse_content_type() -> String {
+    "text/event-stream".into()
 }
 
 #[cfg(test)]
