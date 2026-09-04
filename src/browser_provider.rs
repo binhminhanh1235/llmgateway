@@ -431,23 +431,45 @@ impl BrowserProviderRegistry {
                     .await;
             }
         };
-        if !session.enabled || session.status != "ready" {
-            // Session lifecycle can transition immediately during login/re-auth.
-            // Drop any prior ready probe so a later verified generation must be
-            // diagnosed again rather than borrowing stale adapter health.
+        if !session.enabled {
             self.invalidate_diagnostics(account_id).await;
             return unavailable_diagnostics(
                 account_id,
                 provider_kind,
                 adapter.adapter_id(),
                 &binding,
-                &format!("browser session is {}", session.status),
+                "browser session is disabled",
             );
         }
+        if session.status != "ready" {
+            let can_reprobe = adapter.is_cdp()
+                && cdp_session_status_probeable(&session.status)
+                && self.cdp_session_live(&binding.session).await;
+            if !can_reprobe {
+                // Session lifecycle can transition immediately during login/re-auth.
+                // Drop any prior ready probe so a later verified generation must be
+                // diagnosed again rather than borrowing stale adapter health.
+                self.invalidate_diagnostics(account_id).await;
+                return unavailable_diagnostics(
+                    account_id,
+                    provider_kind,
+                    adapter.adapter_id(),
+                    &binding,
+                    &format!("browser session is {}", session.status),
+                );
+            }
+        }
 
-        let session_marker = session.updated_at.clone();
+        let mut session_marker = session.updated_at.clone();
         if let Some(cached) = self.adapter_health.read().await.get(account_id).cloned() {
-            if cached.checked_at.elapsed() < Duration::from_secs(ADAPTER_HEALTH_TTL_SECONDS)
+            let cache_ttl = if session.status == "ready" {
+                Duration::from_secs(ADAPTER_HEALTH_TTL_SECONDS)
+            } else {
+                // Recoverable non-ready states must re-probe quickly after the user
+                // completes login or the provider page repairs itself.
+                Duration::from_secs(2)
+            };
+            if cached.checked_at.elapsed() < cache_ttl
                 && cached.session_marker == session_marker
                 && cached.diagnostics.provider_kind == provider_kind
             {
@@ -458,6 +480,20 @@ impl BrowserProviderRegistry {
         let diagnostics = adapter
             .diagnose(account_id, &session.profile_dir, &binding)
             .await;
+
+        if diagnostics.status == "ready" && session.status != "ready" {
+            if let Ok(recovered) = store.mark_ready(&binding.session).await {
+                session_marker = recovered.updated_at;
+            }
+        } else if diagnostics.status == "login_required" && session.status != "login_required" {
+            if let Ok(updated) = store
+                .mark_login_required(&binding.session, Some(&diagnostics.message))
+                .await
+            {
+                session_marker = updated.updated_at;
+            }
+        }
+
         self.cache_session_diagnostics(diagnostics, session_marker).await
     }
 
@@ -510,11 +546,11 @@ impl BrowserProviderRegistry {
         let Some(store) = browser_session_runtime::get() else {
             return false;
         };
-        let session_ready = match store.session(&binding.session).await {
-            Ok(session) => session.enabled && session.status == "ready",
-            Err(_) => false,
+        let session = match store.session(&binding.session).await {
+            Ok(session) => session,
+            Err(_) => return false,
         };
-        if !session_ready {
+        if !session.enabled {
             return false;
         }
 
@@ -523,25 +559,26 @@ impl BrowserProviderRegistry {
             None => return false,
         };
         if adapter.is_cdp() {
-            let Some(driver) = chromium_driver_runtime::get() else {
+            if !cdp_session_status_probeable(&session.status) {
                 return false;
-            };
-            let live = driver
-                .status(&binding.session)
-                .await
-                .is_ok_and(|status| {
-                    status.running
-                        && status.debugger_reachable
-                        && status.ready_match.is_some()
-                });
-            if !live {
+            }
+            if !self.cdp_session_live(&binding.session).await {
                 return false;
             }
             let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
             return diagnostics.status == "ready";
         }
 
-        true
+        session.status == "ready"
+    }
+
+    async fn cdp_session_live(&self, session_id: &str) -> bool {
+        let Some(driver) = chromium_driver_runtime::get() else {
+            return false;
+        };
+        driver.status(session_id).await.is_ok_and(|status| {
+            status.running && status.debugger_reachable && status.ready_match.is_some()
+        })
     }
 
     pub async fn mark_degraded(
@@ -564,6 +601,34 @@ impl BrowserProviderRegistry {
         };
         store
             .mark_degraded(&binding.session, error)
+            .await
+            .map_err(|_| BrowserProviderError::SessionUnavailable {
+                account_id: account_id.to_string(),
+                session_id: binding.session.clone(),
+            })?;
+        Ok(())
+    }
+
+    pub async fn mark_login_required(
+        &self,
+        account_id: &str,
+        error: &str,
+    ) -> Result<(), BrowserProviderError> {
+        self.invalidate_diagnostics(account_id).await;
+        let binding = self
+            .config_snapshot()
+            .bindings
+            .get(account_id)
+            .cloned()
+            .ok_or_else(|| BrowserProviderError::MissingBinding(account_id.to_string()))?;
+        let Some(store) = browser_session_runtime::get() else {
+            return Err(BrowserProviderError::SessionUnavailable {
+                account_id: account_id.to_string(),
+                session_id: binding.session.clone(),
+            });
+        };
+        store
+            .mark_login_required(&binding.session, Some(error))
             .await
             .map_err(|_| BrowserProviderError::SessionUnavailable {
                 account_id: account_id.to_string(),
@@ -664,7 +729,7 @@ impl BrowserProviderRegistry {
             Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
                 let status = if code == "login_required" {
                     let _ = self
-                        .require_attention(
+                        .mark_login_required(
                             &account.id,
                             &format!("browser adapter login required: {message}"),
                         )
@@ -2059,6 +2124,13 @@ fn contract_error_to_provider_error(
 }
 
 
+fn cdp_session_status_probeable(status: &str) -> bool {
+    matches!(
+        status,
+        "ready" | "degraded" | "requires_attention" | "login_required"
+    )
+}
+
 fn read_debugger_port(profile_dir: &str) -> Result<u16, BrowserProviderError> {
     let path = Path::new(profile_dir).join("DevToolsActivePort");
     let raw = fs::read_to_string(&path).map_err(|error| {
@@ -2205,6 +2277,16 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
     use uuid::Uuid;
+
+    #[test]
+    fn cdp_session_recovery_states_are_probeable() {
+        for status in ["ready", "degraded", "requires_attention", "login_required"] {
+            assert!(cdp_session_status_probeable(status), "{status}");
+        }
+        for status in ["starting", "stopped", "failed"] {
+            assert!(!cdp_session_status_probeable(status), "{status}");
+        }
+    }
 
     #[test]
     fn browser_kind_is_explicit() {

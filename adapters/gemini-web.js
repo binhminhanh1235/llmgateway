@@ -3,17 +3,23 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04";
+  const ADAPTER_VERSION = "2026.09.04.2";
 
   const defaults = {
     input: [
       "div[aria-label='Enter a prompt for Gemini']",
+      "[aria-label='Enter a prompt here']",
+      "div.ql-editor[contenteditable='true']",
+      "div.ql-editor",
       "div.ql-editor[role='textbox'][contenteditable='true']",
+      "rich-textarea .ql-editor[contenteditable='true']",
       "rich-textarea [contenteditable='true']",
+      "[contenteditable='true'][aria-label*='prompt' i]",
       "[contenteditable='true'][role='textbox']"
     ],
     send: [
       "button[aria-label='Send message']",
+      "button[aria-label*='Send' i]",
       "button.send-button",
       ".send-button"
     ],
@@ -30,7 +36,9 @@
       "button[aria-label*='Stop']"
     ],
     login: [
-      "a[href*='accounts.google.com']",
+      "a[href*='accounts.google.com/ServiceLogin']",
+      "a[href*='accounts.google.com/v3/signin']",
+      "a[href*='accounts.google.com/signin']",
       "form[action*='ServiceLogin']",
       "input[type='password']"
     ],
@@ -69,6 +77,19 @@
     }
     return out;
   };
+  const isVisible = (node) => {
+    if (!node || node.hidden || node.getAttribute?.("aria-hidden") === "true") return false;
+    try {
+      const style = globalThis.getComputedStyle?.(node);
+      if (style && (style.display === "none" || style.visibility === "hidden")) return false;
+    } catch (_) {}
+    try {
+      const rects = node.getClientRects?.();
+      if (rects && rects.length === 0) return false;
+    } catch (_) {}
+    return true;
+  };
+  const loginIndicator = (context) => queryAll(context, "login").find(isVisible) || null;
   const waitFor = async (fn, timeoutMs = 30000, pollMs = 120) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -316,7 +337,7 @@
 
         const send = await waitFor(() => queryFirst(context, "send"), 5000);
         if (!send) {
-          if (queryFirst(context, "login")) throw new Error("LOGIN_REQUIRED: Gemini session expired");
+          if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: Gemini session expired");
           throw new Error("ADAPTER_INCOMPATIBLE: Gemini send control was not found");
         }
         send.click();
@@ -331,7 +352,7 @@
             try { stop?.click(); } catch (_) {}
             throw new Error("STREAM_CANCELLED: client disconnected or cancelled");
           }
-          if (queryFirst(context, "login")) {
+          if (loginIndicator(context)) {
             throw new Error("LOGIN_REQUIRED: Gemini session expired while waiting for a response");
           }
           const responses = responseTexts(context);
@@ -452,11 +473,11 @@
         return { ok: false, code: "wrong_page", message: "Expected gemini.google.com but found " + currentHost };
       }
       await waitFor(
-        () => queryFirst(context, "input") || queryFirst(context, "login"),
+        () => queryFirst(context, "input") || loginIndicator(context),
         probeTimeoutMs
       );
       const composer = queryFirst(context, "input");
-      const loginVisible = Boolean(queryFirst(context, "login"));
+      const loginVisible = Boolean(loginIndicator(context));
       if (!composer) {
         return {
           ok: false,
@@ -499,7 +520,7 @@
 
       const send = await waitFor(() => queryFirst(context, "send"), 5000);
       if (!send) {
-        if (queryFirst(context, "login")) throw new Error("LOGIN_REQUIRED: Gemini session expired");
+        if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: Gemini session expired");
         throw new Error("ADAPTER_INCOMPATIBLE: Gemini send control was not found");
       }
       send.click();
@@ -509,7 +530,7 @@
       let stableSince = 0;
       let answer = "";
       while (Date.now() - startedAt < Number(context?.response_timeout_ms || 180000)) {
-        if (queryFirst(context, "login")) {
+        if (loginIndicator(context)) {
           throw new Error("LOGIN_REQUIRED: Gemini session expired while waiting for a response");
         }
         const responses = responseTexts(context);

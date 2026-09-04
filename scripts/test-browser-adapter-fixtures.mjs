@@ -8,6 +8,7 @@ class FakeElement {
     this.textContent = text;
     this.value = "";
     this.parentElement = null;
+    this.hidden = false;
   }
   focus() {}
   click() { if (typeof this.onClick === "function") this.onClick(); }
@@ -68,6 +69,14 @@ async function testGemini() {
   assert.equal(probe.page_signature, "gemini-composer-v1");
 
   installPage({
+    host: "gemini.google.com",
+    nodes: { "[aria-label='Enter a prompt here']": input }
+  });
+  adapter = loadAdapter("adapters/gemini-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, true, probe.message);
+
+  installPage({
     host: "",
     nodes: { "div[aria-label='Enter a prompt for Gemini']": input }
   });
@@ -90,9 +99,20 @@ async function testGemini() {
   assert.equal(probe.ok, false);
   assert.equal(probe.code, "adapter_incompatible");
 
+  const hiddenLogin = new FakeElement("Sign in");
+  hiddenLogin.hidden = true;
   installPage({
     host: "gemini.google.com",
-    nodes: { "a[href*='accounts.google.com']": new FakeElement("Sign in") }
+    nodes: { "a[href*='accounts.google.com/ServiceLogin']": hiddenLogin }
+  });
+  adapter = loadAdapter("adapters/gemini-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "adapter_incompatible");
+
+  installPage({
+    host: "gemini.google.com",
+    nodes: { "a[href*='accounts.google.com/ServiceLogin']": new FakeElement("Sign in") }
   });
   adapter = loadAdapter("adapters/gemini-web.js");
   probe = await adapter.probe({ probe_timeout_ms: 20 });
@@ -318,7 +338,7 @@ async function testMidRequestLoginExpiry() {
     "div.markdown.markdown-main-panel": new FakeElement("")
   };
   nodes["button[aria-label='Send message']"].onClick = () => {
-    nodes["a[href*='accounts.google.com']"] = new FakeElement("Sign in");
+    nodes["a[href*='accounts.google.com/ServiceLogin']"] = new FakeElement("Sign in");
   };
   installPage({ host: "gemini.google.com", nodes });
   const adapter = loadAdapter("adapters/gemini-web.js");

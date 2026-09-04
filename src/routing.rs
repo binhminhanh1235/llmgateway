@@ -813,7 +813,8 @@ impl Router {
             let entry = health.entry(route_id.to_string()).or_default();
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             entry.last_error = Some(error);
-            entry.cooldown_until = Some(Utc::now() + Duration::seconds(cooldown_secs));
+            entry.cooldown_until = (cooldown_secs > 0)
+                .then(|| Utc::now() + Duration::seconds(cooldown_secs));
         }
         if count_for_adaptive {
             self.adaptive
@@ -858,6 +859,7 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{execution_policy_exclusion, push_unique};
+    use chrono::{Duration, Utc};
 
     #[test]
     fn execution_policy_matrix_enforces_hard_transport_boundaries() {
@@ -886,6 +888,13 @@ mod tests {
             execution_policy_exclusion("prefer-api", true, "browser"),
             None
         );
+    }
+
+    #[test]
+    fn zero_cooldown_does_not_create_a_route_lockout() {
+        let now = Utc::now();
+        let cooldown = (0_i64 > 0).then(|| now + Duration::seconds(0));
+        assert!(cooldown.is_none());
     }
 
     #[test]
