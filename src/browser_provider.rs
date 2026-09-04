@@ -3350,6 +3350,7 @@ mod tests {
     fn test_binding() -> BrowserAccountBinding {
         BrowserAccountBinding {
             session: "fixture-session".into(),
+            transport_mode: BrowserTransportMode::BrowserOnly,
             target_url_prefix: None,
             adapter_script: None,
             adapter_contract_version: Some(BROWSER_ADAPTER_CONTRACT_VERSION),
