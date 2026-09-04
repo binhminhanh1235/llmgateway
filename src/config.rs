@@ -126,6 +126,14 @@ pub struct RoutingConfig {
     pub execution_preference: String,
     #[serde(default = "default_true")]
     pub api_fallback: bool,
+    #[serde(default = "default_true")]
+    pub browser_fairness_enabled: bool,
+    #[serde(default = "default_routing_browser_recovery_penalty")]
+    pub browser_recovery_penalty: i32,
+    #[serde(default = "default_routing_browser_recovery_max_penalty")]
+    pub browser_recovery_max_penalty: i32,
+    #[serde(default = "default_true")]
+    pub browser_sticky_affinity: bool,
 }
 
 impl Default for RoutingConfig {
@@ -147,6 +155,22 @@ impl Default for RoutingConfig {
             task_simple_max_input_tokens: default_routing_task_simple_max_input_tokens(),
             execution_preference: default_routing_execution_preference(),
             api_fallback: true,
+            browser_fairness_enabled: true,
+            browser_recovery_penalty: default_routing_browser_recovery_penalty(),
+            browser_recovery_max_penalty: default_routing_browser_recovery_max_penalty(),
+            browser_sticky_affinity: true,
+        }
+    }
+}
+
+impl RoutingConfig {
+    pub fn execution_policy(&self) -> &'static str {
+        match self.execution_preference.as_str() {
+            "browser-first" | "prefer-browser" => "prefer-browser",
+            "browser-only" => "browser-only",
+            "api-first" | "prefer-api" => "prefer-api",
+            "api-only" => "api-only",
+            _ => "balanced",
         }
     }
 }
@@ -391,11 +415,27 @@ impl AppConfig {
         }
         if !matches!(
             self.routing.execution_preference.as_str(),
-            "browser-first" | "balanced" | "api-first"
+            "browser-first"
+                | "prefer-browser"
+                | "browser-only"
+                | "balanced"
+                | "api-first"
+                | "prefer-api"
+                | "api-only"
         ) {
             return Err(ConfigError::Invalid(
-                "routing.execution_preference must be 'browser-first', 'balanced', or 'api-first'"
+                "routing.execution_preference must be one of 'browser-first', 'prefer-browser', 'browser-only', 'balanced', 'api-first', 'prefer-api', or 'api-only'"
                     .into(),
+            ));
+        }
+        if self.routing.browser_recovery_penalty < 0 {
+            return Err(ConfigError::Invalid(
+                "routing.browser_recovery_penalty must be non-negative".into(),
+            ));
+        }
+        if self.routing.browser_recovery_max_penalty < self.routing.browser_recovery_penalty {
+            return Err(ConfigError::Invalid(
+                "routing.browser_recovery_max_penalty must be greater than or equal to routing.browser_recovery_penalty".into(),
             ));
         }
 
@@ -625,6 +665,8 @@ fn default_routing_task_mismatch_penalty() -> i32 { 12 }
 fn default_routing_task_long_context_threshold_tokens() -> usize { 12_000 }
 fn default_routing_task_simple_max_input_tokens() -> usize { 800 }
 fn default_routing_execution_preference() -> String { "browser-first".into() }
+fn default_routing_browser_recovery_penalty() -> i32 { 8 }
+fn default_routing_browser_recovery_max_penalty() -> i32 { 40 }
 
 #[cfg(test)]
 mod tests {
@@ -787,6 +829,11 @@ enabled = true"#,
         assert_eq!(config.routing.task_long_context_threshold_tokens, 12_000);
         assert_eq!(config.routing.task_simple_max_input_tokens, 800);
         assert_eq!(config.routing.execution_preference, "browser-first");
+        assert_eq!(config.routing.execution_policy(), "prefer-browser");
         assert!(config.routing.api_fallback);
+        assert!(config.routing.browser_fairness_enabled);
+        assert_eq!(config.routing.browser_recovery_penalty, 8);
+        assert_eq!(config.routing.browser_recovery_max_penalty, 40);
+        assert!(config.routing.browser_sticky_affinity);
     }
 }
