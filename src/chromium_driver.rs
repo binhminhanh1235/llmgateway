@@ -1161,7 +1161,7 @@ impl ChromiumDriver {
         }
     }
 
-    async fn devtools_pages(&self, port: u16) -> Result<Vec<ChromiumPageView>, ChromiumDriverError> {
+    async fn devtools_targets(&self, port: u16) -> Result<Vec<DevToolsTarget>, ChromiumDriverError> {
         let response = self
             .client
             .get(format!("http://127.0.0.1:{port}/json/list"))
@@ -1174,11 +1174,16 @@ impl ChromiumDriver {
                 response.status()
             )));
         }
-        let targets: Vec<DevToolsTarget> = response
+        response
             .json()
             .await
-            .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))?;
-        Ok(targets
+            .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))
+    }
+
+    async fn devtools_pages(&self, port: u16) -> Result<Vec<ChromiumPageView>, ChromiumDriverError> {
+        Ok(self
+            .devtools_targets(port)
+            .await?
             .into_iter()
             .filter(|target| target.kind == "page" && !target.url.is_empty())
             .map(|target| ChromiumPageView {
