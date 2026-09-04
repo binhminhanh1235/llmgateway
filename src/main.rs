@@ -3,6 +3,8 @@ mod admin;
 mod admin_api;
 mod api;
 mod browser_account_setup;
+mod browser_auth;
+mod browser_auth_runtime;
 mod browser_provider;
 mod browser_provider_runtime;
 mod browser_session;
@@ -53,6 +55,7 @@ use axum::{
 use browser_account_setup::{
     browser_account_setup_presets, create_browser_account_setup, set_browser_account_enabled,
 };
+use browser_auth::BrowserAuthVault;
 use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
 use browser_session::{BrowserConfig, BrowserSessionStore};
 use browser_session_api::{
@@ -107,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
     let usage_config = UsageConfig::load_from_gateway_config(&config_path)?;
     let browser_config = BrowserConfig::load_from_gateway_config(&config_path)?;
+    let browser_auth_vault_root = browser_config.auth_vault_root.clone();
     let browser_provider_config = BrowserProviderConfig::load_from_gateway_config(&config_path)?;
     let chromium_config = ChromiumConfig::load_from_gateway_config(&config_path)?;
     let config = Arc::new(AppConfig::load(&config_path)?);
@@ -126,7 +130,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let browser_sessions = Arc::new(BrowserSessionStore::connect(config.clone(), browser_config).await?);
     let browser_session_count = browser_sessions.summary().await?.sessions.len();
-    let chromium_driver = Arc::new(ChromiumDriver::new(chromium_config, browser_sessions.clone())?);
+    let browser_auth_vault = Arc::new(BrowserAuthVault::open(&browser_auth_vault_root)?);
+    browser_auth_runtime::install(browser_auth_vault.clone())
+        .map_err(|_| "browser auth vault was already initialized")?;
+    let chromium_driver = Arc::new(ChromiumDriver::new(
+        chromium_config,
+        browser_sessions.clone(),
+        browser_auth_vault,
+    )?);
     let chromium_driver_enabled = chromium_driver.enabled();
     let startup_browser_reconcile = chromium_driver.reconcile_all().await;
     chromium_driver_runtime::install(chromium_driver.clone())
