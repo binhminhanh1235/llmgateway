@@ -578,6 +578,17 @@ impl BrowserProviderRegistry {
                 self.invalidate_diagnostics(&account.id).await;
             }
             Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
+                let status = if code == "login_required" {
+                    let _ = self
+                        .require_attention(
+                            &account.id,
+                            &format!("browser adapter login required: {message}"),
+                        )
+                        .await;
+                    "login_required"
+                } else {
+                    "adapter_incompatible"
+                };
                 self.cache_diagnostics(BrowserAdapterDiagnostics {
                     account_id: account.id.clone(),
                     provider_kind: provider.kind.clone(),
@@ -585,7 +596,7 @@ impl BrowserProviderRegistry {
                     adapter_version: None,
                     contract_version: None,
                     expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
-                    status: "adapter_incompatible".into(),
+                    status: status.into(),
                     message: format!("{code}: {message}"),
                     page_signature: None,
                     target_url_prefix: effective_target_url_prefix(&provider.kind, binding),
