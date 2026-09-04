@@ -18,6 +18,7 @@ mod context_engine;
 mod context_runtime;
 mod conversation;
 mod conversation_api;
+mod conversation_runtime;
 mod embedding_retrieval;
 mod embedding_runtime;
 mod execution_trace;
@@ -115,6 +116,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let catalog = Arc::new(ModelCatalog::connect(live_config.clone()).await?);
     catalog.seed_from_config().await?;
     let conversations = Arc::new(ConversationStore::connect(config.clone()).await?);
+    conversation_runtime::install(conversations.clone())
+        .map_err(|_| "conversation store was already initialized")?;
     let execution_traces = Arc::new(ExecutionTraceStore::connect(config.clone()).await?);
 
     let quota_usage = Arc::new(QuotaUsageStore::connect(config.clone(), usage_config).await?);

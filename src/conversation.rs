@@ -77,6 +77,17 @@ pub struct ResponseContext {
     pub route_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderConversation {
+    pub thread_id: String,
+    pub provider: String,
+    pub account_id: String,
+    pub conversation_url: String,
+    pub last_synced_ordinal: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 impl ConversationStore {
     pub async fn connect(config: Arc<AppConfig>) -> Result<Self, ConversationError> {
         ensure_sqlite_parent(&config.storage.database_url)?;
@@ -137,6 +148,22 @@ impl ConversationStore {
                 messages_json TEXT NOT NULL,
                 route_id TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS provider_conversations (
+                thread_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                conversation_url TEXT NOT NULL,
+                last_synced_ordinal INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(thread_id, provider, account_id),
+                FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
             )",
         )
         .execute(&self.pool)
@@ -232,6 +259,87 @@ impl ConversationStore {
             sticky_route: thread.sticky_route,
             messages: thread.messages.into_iter().map(|message| message.message).collect(),
         })
+    }
+
+    pub async fn provider_conversation(
+        &self,
+        thread_id: &str,
+        provider: &str,
+        account_id: &str,
+    ) -> Result<Option<ProviderConversation>, ConversationError> {
+        let row = sqlx::query(
+            "SELECT thread_id, provider, account_id, conversation_url, last_synced_ordinal,
+                    created_at, updated_at
+             FROM provider_conversations
+             WHERE thread_id = ? AND provider = ? AND account_id = ?",
+        )
+        .bind(thread_id)
+        .bind(provider)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            Ok(ProviderConversation {
+                thread_id: row.try_get("thread_id")?,
+                provider: row.try_get("provider")?,
+                account_id: row.try_get("account_id")?,
+                conversation_url: row.try_get("conversation_url")?,
+                last_synced_ordinal: row.try_get("last_synced_ordinal")?,
+                created_at: row.try_get("created_at")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn upsert_provider_conversation(
+        &self,
+        thread_id: &str,
+        provider: &str,
+        account_id: &str,
+        conversation_url: &str,
+    ) -> Result<(), ConversationError> {
+        if !self.thread_exists(thread_id).await? {
+            return Err(ConversationError::ThreadNotFound(thread_id.to_string()));
+        }
+        sqlx::query(
+            "INSERT INTO provider_conversations
+             (thread_id, provider, account_id, conversation_url)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(thread_id, provider, account_id) DO UPDATE SET
+               conversation_url = excluded.conversation_url,
+               updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(thread_id)
+        .bind(provider)
+        .bind(account_id)
+        .bind(conversation_url)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_provider_conversation_synced(
+        &self,
+        thread_id: &str,
+        provider: &str,
+        account_id: &str,
+        through_ordinal: i64,
+    ) -> Result<(), ConversationError> {
+        sqlx::query(
+            "UPDATE provider_conversations
+             SET last_synced_ordinal = MAX(last_synced_ordinal, ?),
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE thread_id = ? AND provider = ? AND account_id = ?",
+        )
+        .bind(through_ordinal)
+        .bind(thread_id)
+        .bind(provider)
+        .bind(account_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn append_message(

@@ -34,6 +34,9 @@ stream_seq = 0
 streams = {}
 runtime_host_lock = threading.Lock()
 runtime_host_attempts = {}
+target_lock = threading.Lock()
+target_urls = {"fake-page": page_url}
+conversation_seq = 0
 
 def expression_request(expression):
     match = re.search(r"const __request = (.*?);\n", expression, re.S)
@@ -51,6 +54,41 @@ def write_marker(name, value="1"):
     except Exception:
         pass
 
+def append_marker(name, value):
+    try:
+        with open(os.path.join(profile, name), "a", encoding="utf-8") as f:
+            f.write(str(value) + "\n")
+    except Exception:
+        pass
+
+def target_url_for(target_id):
+    with target_lock:
+        return target_urls.get(target_id, page_url)
+
+def set_target_url(target_id, value):
+    with target_lock:
+        target_urls[target_id] = value
+
+def remove_target(target_id):
+    if target_id == "fake-page":
+        return
+    with target_lock:
+        target_urls.pop(target_id, None)
+
+def ensure_native_conversation(target_id, provider):
+    global conversation_seq
+    if provider != "gemini":
+        return
+    current = target_url_for(target_id)
+    parsed = urlparse(current)
+    if parsed.hostname != "gemini.google.com" or parsed.path.rstrip("/") != "/app":
+        return
+    with target_lock:
+        conversation_seq += 1
+        native = f"https://gemini.google.com/app/ci-thread-{conversation_seq}"
+        target_urls[target_id] = native
+    append_marker("native-conversations.log", native)
+
 def adapter_identity(expression):
     if "gemini-web" in expression or '"provider":"gemini"' in expression:
         return "gemini-web", "gemini", "gemini-web-default"
@@ -58,7 +96,7 @@ def adapter_identity(expression):
 
 def runtime_evaluate_value(expression, target_id):
     if expression.strip() == "String(globalThis.location?.hostname || '')":
-        host = urlparse(page_url).hostname or ""
+        host = urlparse(target_url_for(target_id)).hostname or ""
         with runtime_host_lock:
             attempts = runtime_host_attempts.get(target_id, 0) + 1
             runtime_host_attempts[target_id] = attempts
@@ -67,9 +105,9 @@ def runtime_evaluate_value(expression, target_id):
         if target_id == "fake-ephemeral" and attempts == 1:
             return ""
         return host
-    return envelope_for(expression)
+    return envelope_for(expression, target_id)
 
-def envelope_for(expression):
+def envelope_for(expression, target_id):
     global stream_seq
     adapter_id, provider, model = adapter_identity(expression)
     meta = {
@@ -87,6 +125,8 @@ def envelope_for(expression):
 
     if 'const __operation = "chat_stream_start"' in expression:
         request = expression_request(expression)
+        append_marker("browser-requests.jsonl", json.dumps({"target_id": target_id, "messages": request.get("messages", [])}, ensure_ascii=False))
+        ensure_native_conversation(target_id, provider)
         prompt_text = json.dumps(request.get("messages", []), ensure_ascii=False)
         if "force-browser-stream-fallback" in prompt_text:
             write_marker("stream-start-failed", "forced")
@@ -191,6 +231,9 @@ def envelope_for(expression):
         return {"meta": meta, "stream": {"cancelled": state is not None}}
 
     if 'const __operation = "chat"' in expression:
+        request = expression_request(expression)
+        append_marker("browser-requests.jsonl", json.dumps({"target_id": target_id, "messages": request.get("messages", [])}, ensure_ascii=False))
+        ensure_native_conversation(target_id, provider)
         return {
             "meta": meta,
             "probe": probe,
@@ -257,7 +300,7 @@ def target(port, target_id="fake-page"):
     return {
         "id": target_id,
         "type": "page",
-        "url": page_url,
+        "url": target_url_for(target_id),
         "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/{target_id}",
     }
 
@@ -325,13 +368,20 @@ class Handler(socketserver.StreamRequestHandler):
         port = self.server.server_address[1]
         parsed = urlparse(path)
         if method == "GET" and parsed.path == "/json/list":
-            body = json.dumps([target(port)]).encode()
+            with target_lock:
+                ids = list(target_urls.keys())
+            body = json.dumps([target(port, target_id) for target_id in ids]).encode()
             self.http_response(200, body, "application/json")
         elif method == "PUT" and parsed.path == "/json/new":
+            requested_url = parsed.query or page_url
+            set_target_url("fake-ephemeral", requested_url)
+            append_marker("opened-targets.log", requested_url)
             body = json.dumps(target(port, "fake-ephemeral")).encode()
             self.http_response(200, body, "application/json")
         elif method == "GET" and parsed.path.startswith("/json/close/"):
-            write_marker("target-closed", parsed.path.rsplit("/", 1)[-1])
+            target_id = parsed.path.rsplit("/", 1)[-1]
+            write_marker("target-closed", target_id)
+            remove_target(target_id)
             self.http_response(200, b"Target is closing", "text/plain")
         else:
             self.http_response(404, b"", "text/plain")

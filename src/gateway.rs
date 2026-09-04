@@ -207,6 +207,33 @@ impl Gateway {
         body: &Value,
         preferred_route: Option<&str>,
     ) -> Result<RoutedResponse, GatewayError> {
+        self.execute_openai_chat_with_context(requested_model, body, preferred_route, None)
+            .await
+    }
+
+    pub async fn execute_openai_chat_with_thread_affinity(
+        &self,
+        requested_model: &str,
+        body: &Value,
+        preferred_route: Option<&str>,
+        thread_id: &str,
+    ) -> Result<RoutedResponse, GatewayError> {
+        self.execute_openai_chat_with_context(
+            requested_model,
+            body,
+            preferred_route,
+            Some(thread_id),
+        )
+        .await
+    }
+
+    async fn execute_openai_chat_with_context(
+        &self,
+        requested_model: &str,
+        body: &Value,
+        preferred_route: Option<&str>,
+        thread_id: Option<&str>,
+    ) -> Result<RoutedResponse, GatewayError> {
         let started_at = Instant::now();
         let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         let request_id = match self
@@ -284,7 +311,13 @@ impl Gateway {
 
             let attempt_started = Instant::now();
             match self
-                .send_route_chat(provider, account, &route, &upstream_body)
+                .send_route_chat(
+                    provider,
+                    account,
+                    &route,
+                    &upstream_body,
+                    thread_id,
+                )
                 .await
             {
                 Ok(response) if response.status().is_success() => {
@@ -634,6 +667,7 @@ impl Gateway {
         account: &AccountConfig,
         route: &RouteConfig,
         body: &Value,
+        thread_id: Option<&str>,
     ) -> Result<reqwest::Response, GatewayError> {
         match provider.kind.as_str() {
             "openai-compatible" => self.send_openai_chat(provider, account, route, body).await,
@@ -644,7 +678,7 @@ impl Gateway {
                     )
                 })?;
                 registry
-                    .execute_chat(provider, account, route, body)
+                    .execute_chat(provider, account, route, body, thread_id)
                     .await
                     .map_err(map_browser_provider_error)
             }

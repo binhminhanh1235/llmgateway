@@ -1,5 +1,5 @@
 use crate::{
-    browser_session_runtime, chromium_driver_runtime,
+    browser_session_runtime, chromium_driver_runtime, conversation_runtime,
     config::{AccountConfig, ProviderConfig, RouteConfig},
 };
 use async_trait::async_trait;
@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
+use tracing::warn;
 use tokio::{
     sync::RwLock,
     time::{sleep, timeout},
@@ -141,6 +142,7 @@ pub struct BrowserAdapterRequest {
     pub session_id: String,
     pub profile_dir: String,
     pub binding: BrowserAccountBinding,
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -671,6 +673,7 @@ impl BrowserProviderRegistry {
         account: &AccountConfig,
         route: &RouteConfig,
         body: &Value,
+        thread_id: Option<&str>,
     ) -> Result<reqwest::Response, BrowserProviderError> {
         let adapter = self
             .adapters
@@ -719,6 +722,7 @@ impl BrowserProviderRegistry {
                 session_id: binding.session.clone(),
                 profile_dir: session.profile_dir,
                 binding: binding.clone(),
+                thread_id: thread_id.map(str::to_string),
             })
             .await;
 
@@ -1078,16 +1082,11 @@ impl CdpBrowserAdapter {
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))
     }
 
-    async fn open_ephemeral_target(
+    async fn open_target_url(
         &self,
         profile_dir: &str,
+        url: &str,
     ) -> Result<CdpTarget, BrowserProviderError> {
-        let url = self.spec.new_chat_url.ok_or_else(|| {
-            BrowserProviderError::InvalidConfig(format!(
-                "{} does not define an ephemeral new-chat URL",
-                self.spec.kind
-            ))
-        })?;
         let port = read_debugger_port(profile_dir)?;
         let endpoint = format!("http://127.0.0.1:{port}/json/new?{url}");
         let response = self
@@ -1106,6 +1105,90 @@ impl CdpBrowserAdapter {
             .json::<CdpTarget>()
             .await
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))
+    }
+
+    async fn open_ephemeral_target(
+        &self,
+        profile_dir: &str,
+    ) -> Result<CdpTarget, BrowserProviderError> {
+        let url = self.spec.new_chat_url.ok_or_else(|| {
+            BrowserProviderError::InvalidConfig(format!(
+                "{} does not define an ephemeral new-chat URL",
+                self.spec.kind
+            ))
+        })?;
+        self.open_target_url(profile_dir, url).await
+    }
+
+    fn supports_native_conversation_affinity(&self) -> bool {
+        self.spec.kind == "browser-gemini"
+    }
+
+    async fn discover_native_conversation_url(
+        &self,
+        profile_dir: &str,
+        target_id: &str,
+        timeout_duration: Duration,
+    ) -> Option<String> {
+        let new_chat_url = self.spec.new_chat_url?;
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            if let Ok(targets) = self.targets(profile_dir).await {
+                if let Some(target) = targets.into_iter().find(|target| target.id == target_id) {
+                    if is_native_conversation_url(new_chat_url, &target.url) {
+                        return Some(target.url);
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn persist_native_conversation(
+        &self,
+        request: &BrowserAdapterRequest,
+        target: &CdpTarget,
+        wait: Duration,
+    ) {
+        if !self.supports_native_conversation_affinity() {
+            return;
+        }
+        let Some(thread_id) = request.thread_id.as_deref() else {
+            return;
+        };
+        let Some(store) = conversation_runtime::get() else {
+            return;
+        };
+        let Some(conversation_url) = self
+            .discover_native_conversation_url(&request.profile_dir, &target.id, wait)
+            .await
+        else {
+            warn!(
+                thread_id,
+                account = %request.account.id,
+                "Gemini conversation URL was not observed after sending the turn"
+            );
+            return;
+        };
+        if let Err(error) = store
+            .upsert_provider_conversation(
+                thread_id,
+                &request.provider.id,
+                &request.account.id,
+                &conversation_url,
+            )
+            .await
+        {
+            warn!(
+                %error,
+                thread_id,
+                account = %request.account.id,
+                "failed to persist Gemini native conversation affinity"
+            );
+        }
     }
 
     async fn wait_for_target_navigation(
@@ -1407,6 +1490,11 @@ impl CdpBrowserAdapter {
             });
         }
 
+        if request.thread_id.is_some() && self.supports_native_conversation_affinity() {
+            self.persist_native_conversation(request, &target, Duration::from_secs(2))
+                .await;
+        }
+
         let status = match reqwest::StatusCode::from_u16(start.status) {
             Ok(status) => status,
             Err(error) => {
@@ -1702,8 +1790,91 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         object.insert("model".into(), Value::String(request.route.model.clone()));
 
         let context = self.context(&request.binding, Some(&request.route.model));
-        let ephemeral = self.use_ephemeral_chat(&request.binding);
-        let target = if ephemeral {
+        let thread_affinity = request
+            .thread_id
+            .as_deref()
+            .filter(|_| self.supports_native_conversation_affinity());
+        let mut unsynced_messages = Vec::new();
+        let existing_conversation = if let Some(thread_id) = thread_affinity {
+            match conversation_runtime::get() {
+                Some(store) => {
+                    let conversation = store
+                        .provider_conversation(thread_id, &request.provider.id, &request.account.id)
+                        .await
+                        .map_err(|error| {
+                            BrowserProviderError::Transport(format!(
+                                "provider conversation lookup failed: {error}"
+                            ))
+                        })?;
+                    if let Some(conversation) = conversation.as_ref() {
+                        let detail = store.thread(thread_id).await.map_err(|error| {
+                            BrowserProviderError::Transport(format!(
+                                "provider conversation history lookup failed: {error}"
+                            ))
+                        })?;
+                        unsynced_messages = detail
+                            .messages
+                            .into_iter()
+                            .filter(|message| message.ordinal > conversation.last_synced_ordinal)
+                            .map(|message| message.message)
+                            .collect();
+                    }
+                    conversation
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        if existing_conversation.is_some() {
+            normalized_body = incremental_browser_body(&normalized_body, &unsynced_messages);
+        }
+
+        let persistent_url = existing_conversation
+            .as_ref()
+            .map(|conversation| conversation.conversation_url.as_str());
+        let ephemeral = thread_affinity.is_some() || self.use_ephemeral_chat(&request.binding);
+        let target = if let Some(url) = persistent_url {
+            let Some(prefix) = self.target_url_prefix(&request.binding) else {
+                return Err(BrowserProviderError::InvalidConfig(
+                    "native browser conversation affinity requires a target URL prefix".into(),
+                ));
+            };
+            if !url.starts_with(prefix) {
+                return Err(BrowserProviderError::InvalidConfig(format!(
+                    "stored provider conversation URL does not match configured target prefix: {}",
+                    diagnostic_target_location(url)
+                )));
+            }
+            let opened = self.open_target_url(&request.profile_dir, url).await?;
+            let navigation_timeout = Duration::from_millis(
+                request.binding.probe_timeout_ms.unwrap_or(8_000).max(15_000),
+            );
+            match self
+                .wait_for_target_navigation(
+                    &request.profile_dir,
+                    opened.clone(),
+                    self.target_url_prefix(&request.binding),
+                    navigation_timeout,
+                )
+                .await
+            {
+                Ok(target) => target,
+                Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
+                    self.close_target(&request.profile_dir, &opened.id).await;
+                    return Err(BrowserProviderError::AdapterIncompatible {
+                        account_id: request.account.id.clone(),
+                        code,
+                        message,
+                    });
+                }
+                Err(error) => {
+                    self.close_target(&request.profile_dir, &opened.id).await;
+                    return Err(error);
+                }
+            }
+        } else if ephemeral {
             let opened = self.open_ephemeral_target(&request.profile_dir).await?;
             let navigation_timeout = Duration::from_millis(
                 request.binding.probe_timeout_ms.unwrap_or(8_000).max(15_000),
@@ -1783,6 +1954,10 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
                 &request.account.id,
             )
             .await;
+        if result.is_ok() && thread_affinity.is_some() {
+            self.persist_native_conversation(&request, &target, Duration::from_secs(2))
+                .await;
+        }
         if ephemeral {
             self.close_target(&request.profile_dir, &target.id).await;
         }
@@ -1801,6 +1976,44 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
 }
 
 
+
+fn incremental_browser_body(body: &Value, unsynced_messages: &[Value]) -> Value {
+    let mut incremental = body.clone();
+    let Some(object) = incremental.as_object_mut() else {
+        return incremental;
+    };
+    let Some(messages) = object.get("messages").and_then(Value::as_array) else {
+        return incremental;
+    };
+    if messages.is_empty() {
+        return incremental;
+    }
+    let start = messages
+        .iter()
+        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .unwrap_or(messages.len() - 1);
+    let mut delta = unsynced_messages.to_vec();
+    delta.extend_from_slice(&messages[start..]);
+    object.insert("messages".into(), Value::Array(delta));
+    incremental
+}
+
+fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
+    let Ok(base) = Url::parse(new_chat_url) else {
+        return false;
+    };
+    let Ok(url) = Url::parse(candidate) else {
+        return false;
+    };
+    if base.scheme() != url.scheme() || base.host_str() != url.host_str() {
+        return false;
+    }
+    let base_path = base.path().trim_end_matches('/');
+    let candidate_path = url.path().trim_end_matches('/');
+    candidate_path
+        .strip_prefix(base_path)
+        .is_some_and(|suffix| suffix.starts_with('/') && suffix.len() > 1)
+}
 
 fn diagnostic_target_location(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -2348,6 +2561,49 @@ mod tests {
         assert_eq!(qwen.adapter_id(), "qwen-web");
         assert!(qwen.spec.ephemeral_default);
         assert_eq!(qwen.spec.new_chat_url, Some("https://chat.qwen.ai/c/new-chat"));
+    }
+
+    #[test]
+    fn gemini_native_conversation_url_is_distinct_from_new_chat() {
+        assert!(!is_native_conversation_url(
+            "https://gemini.google.com/app",
+            "https://gemini.google.com/app"
+        ));
+        assert!(is_native_conversation_url(
+            "https://gemini.google.com/app",
+            "https://gemini.google.com/app/abc123"
+        ));
+        assert!(!is_native_conversation_url(
+            "https://gemini.google.com/app",
+            "https://example.test/app/abc123"
+        ));
+    }
+
+    #[test]
+    fn incremental_browser_body_keeps_missed_turns_and_current_user() {
+        let body = json!({
+            "model": "gemini-web-default",
+            "messages": [
+                {"role":"system","content":"system"},
+                {"role":"user","content":"old user"},
+                {"role":"assistant","content":"old assistant"},
+                {"role":"user","content":"current user"}
+            ],
+            "stream": false
+        });
+        let missed = vec![
+            json!({"role":"user","content":"missed user"}),
+            json!({"role":"assistant","content":"missed assistant"})
+        ];
+        let delta = incremental_browser_body(&body, &missed);
+        assert_eq!(
+            delta["messages"],
+            json!([
+                {"role":"user","content":"missed user"},
+                {"role":"assistant","content":"missed assistant"},
+                {"role":"user","content":"current user"}
+            ])
+        );
     }
 
     #[test]

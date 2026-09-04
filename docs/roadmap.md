@@ -93,9 +93,12 @@ Already implemented:
 - explicit prefer-browser / browser-only / balanced / prefer-api / api-only policies;
 - Model Catalog enrichment of configured route capability/context metadata;
 - browser-aware route-explain policy, fairness and recovery diagnostics;
-- deterministic multi-browser routing/fallback E2E coverage.
+- deterministic multi-browser routing/fallback E2E coverage;
+- provider-native Gemini conversation affinity for persistent llmgateway threads;
+- persisted per-thread/provider/account native conversation URLs with sync cursors;
+- delta replay for provider-missed turns across browser-account failover.
 
-The remaining browser work is now mostly **client policy, usage/cost intelligence, and production hardening**, rather than browser execution plumbing.
+The remaining browser work is now mostly **client policy, usage/cost intelligence, broader provider-native conversation support, and production hardening**, rather than browser execution plumbing.
 
 ---
 

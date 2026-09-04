@@ -36,6 +36,7 @@ jobs:
       - run: bash scripts/smoke-first-class-browser-account.sh
       - run: bash scripts/smoke-browser-reliability.sh
       - run: bash scripts/smoke-browser-routing-intelligence.sh
+      - run: bash scripts/smoke-provider-conversation-affinity.sh
       - run: bash scripts/smoke-account-intelligence.sh
       - run: bash scripts/smoke-routing-trace.sh
       - run: bash scripts/smoke-execution-trace.sh
