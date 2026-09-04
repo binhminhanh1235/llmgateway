@@ -49,10 +49,22 @@ pub struct ExecutionTraceSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ExecutionStreamTrace {
+    pub first_byte_ms: Option<i64>,
+    pub chunk_count: i64,
+    pub byte_count: i64,
+    pub outcome: String,
+    pub partial_response: bool,
+    pub error: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ExecutionTrace {
     #[serde(flatten)]
     pub summary: ExecutionTraceSummary,
     pub attempts: Vec<ExecutionAttempt>,
+    pub stream: Option<ExecutionStreamTrace>,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +156,21 @@ impl ExecutionTraceStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS execution_streams (
+                request_id TEXT PRIMARY KEY,
+                first_byte_ms INTEGER,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                byte_count INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT NOT NULL DEFAULT 'streaming',
+                partial_response INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(request_id) REFERENCES execution_requests(request_id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -212,6 +239,98 @@ impl ExecutionTraceStore {
         Ok(())
     }
 
+    pub async fn start_stream(
+        &self,
+        request_id: &str,
+        selected_route: &str,
+    ) -> Result<(), ExecutionTraceError> {
+        let now = now_string();
+        sqlx::query(
+            "INSERT INTO execution_streams
+             (request_id, outcome, partial_response, updated_at)
+             VALUES (?, 'streaming', 0, ?)
+             ON CONFLICT(request_id) DO UPDATE SET
+                first_byte_ms = NULL,
+                chunk_count = 0,
+                byte_count = 0,
+                outcome = 'streaming',
+                partial_response = 0,
+                error = NULL,
+                updated_at = excluded.updated_at",
+        )
+        .bind(request_id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "UPDATE execution_requests SET
+                status = 'streaming', selected_route = ?, final_error = NULL, completed_at = NULL
+             WHERE request_id = ?",
+        )
+        .bind(selected_route)
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn finish_stream(
+        &self,
+        request_id: &str,
+        selected_route: &str,
+        first_byte_ms: Option<u128>,
+        chunk_count: u64,
+        byte_count: u64,
+        outcome: &str,
+        partial_response: bool,
+        error: Option<&str>,
+    ) -> Result<(), ExecutionTraceError> {
+        let now = now_string();
+        sqlx::query(
+            "INSERT INTO execution_streams
+             (request_id, first_byte_ms, chunk_count, byte_count, outcome,
+              partial_response, error, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(request_id) DO UPDATE SET
+                first_byte_ms = excluded.first_byte_ms,
+                chunk_count = excluded.chunk_count,
+                byte_count = excluded.byte_count,
+                outcome = excluded.outcome,
+                partial_response = excluded.partial_response,
+                error = excluded.error,
+                updated_at = excluded.updated_at",
+        )
+        .bind(request_id)
+        .bind(first_byte_ms.map(|value| value.min(i64::MAX as u128) as i64))
+        .bind(chunk_count.min(i64::MAX as u64) as i64)
+        .bind(byte_count.min(i64::MAX as u64) as i64)
+        .bind(outcome)
+        .bind(if partial_response { 1_i64 } else { 0_i64 })
+        .bind(error.map(truncate_error))
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        let request_status = match outcome {
+            "completed" => "success",
+            "cancelled" => "cancelled",
+            _ => "failed",
+        };
+        sqlx::query(
+            "UPDATE execution_requests SET
+                status = ?, selected_route = ?, final_error = ?, completed_at = ?
+             WHERE request_id = ?",
+        )
+        .bind(request_status)
+        .bind(selected_route)
+        .bind(error.map(truncate_error))
+        .bind(now)
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn get(&self, request_id: &str) -> Result<ExecutionTrace, ExecutionTraceError> {
         let summary = self.summary(request_id).await?;
         let rows = sqlx::query(
@@ -237,7 +356,28 @@ impl ExecutionTraceStore {
                 created_at: row.get("created_at"),
             })
             .collect();
-        Ok(ExecutionTrace { summary, attempts })
+        let stream = sqlx::query(
+            "SELECT first_byte_ms, chunk_count, byte_count, outcome,
+                    partial_response, error, updated_at
+             FROM execution_streams WHERE request_id = ?",
+        )
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|row| ExecutionStreamTrace {
+            first_byte_ms: row.get("first_byte_ms"),
+            chunk_count: row.get("chunk_count"),
+            byte_count: row.get("byte_count"),
+            outcome: row.get("outcome"),
+            partial_response: row.get::<i64, _>("partial_response") != 0,
+            error: row.get("error"),
+            updated_at: row.get("updated_at"),
+        });
+        Ok(ExecutionTrace {
+            summary,
+            attempts,
+            stream,
+        })
     }
 
     pub async fn adaptive_samples(
