@@ -90,6 +90,18 @@ done
 AUTH=(-H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 JSON=(-H "Content-Type: application/json")
 
+MISSING_BODY=/tmp/llmgateway-browser-account-missing.json
+MISSING_STATUS=$(curl -sS -o "$MISSING_BODY" -w '%{http_code}' -X PATCH \
+  http://127.0.0.1:7331/_llmgateway/browser-account-setup/nonexistent-account \
+  "${AUTH[@]}" "${JSON[@]}" -d '{"enabled":false}')
+test "$MISSING_STATUS" = "404"
+python3 - "$MISSING_BODY" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    payload=json.load(f)
+assert payload["error"]["type"] == "not_found_error", payload
+PY
+
 PRESETS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-account-setup/providers "${AUTH[@]}")
 printf '%s' "$PRESETS" | python3 -c '
 import json,sys
