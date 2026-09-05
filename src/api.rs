@@ -3,6 +3,7 @@ use crate::{
     compat::{anthropic, responses},
     conversation::{ConversationError, ConversationStore},
     gateway::{Gateway, GatewayError},
+    quota_usage_runtime,
     response_state::{response_to_openai_assistant, responses_stream_with_capture},
 };
 use axum::{
@@ -194,8 +195,10 @@ pub async fn openai_responses(
                     &request_id,
                 )
             } else {
+                let usage_event_id = routed.usage_event_id.clone();
                 match routed.response.json::<Value>().await {
                     Ok(openai) => {
+                        update_provider_usage(usage_event_id.as_deref(), &openai).await;
                         let response = responses::from_openai_response(&openai, &requested_model);
                         let mut history = history_before_response;
                         if let Some(assistant) = openai_assistant_message(&openai) {
@@ -279,8 +282,10 @@ pub async fn anthropic_messages(
                     &request_id,
                 )
             } else {
+                let usage_event_id = routed.usage_event_id.clone();
                 match routed.response.json::<Value>().await {
                     Ok(openai) => {
+                        update_provider_usage(usage_event_id.as_deref(), &openai).await;
                         let anthropic = anthropic::from_openai_response(&openai, &requested_model);
                         json_response_with_request(
                             StatusCode::OK,
@@ -439,6 +444,15 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "threads":threads,
         "routes":routes
     }))
+}
+
+async fn update_provider_usage(event_id: Option<&str>, response: &Value) {
+    let (Some(event_id), Some(usage)) = (event_id, quota_usage_runtime::get()) else {
+        return;
+    };
+    if let Err(error) = usage.update_provider_usage(event_id, response).await {
+        tracing::warn!(%error, event_id, "failed to update provider usage");
+    }
 }
 
 pub(crate) async fn normalize_json_rejections(
