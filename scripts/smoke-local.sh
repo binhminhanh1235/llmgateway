@@ -72,7 +72,15 @@ account = "fake-primary"
 model = "fake-model"
 priority = 10
 enabled = true
-capabilities = ["chat", "tools", "coding"]
+capabilities = ["chat", "tools", "coding", "vision"]
+
+[[routes]]
+id = "fake-text-route"
+account = "fake-primary"
+model = "fake-model"
+priority = 20
+enabled = true
+capabilities = ["chat"]
 
 [virtual_models.llmgateway-auto]
 routes = ["fake-route"]
@@ -82,6 +90,9 @@ routes = ["fake-route"]
 
 [virtual_models.llmgateway-best]
 routes = ["fake-route"]
+
+[virtual_models.llmgateway-text-only]
+routes = ["fake-text-route"]
 EOF
 
 python3 scripts/fake-openai.py >/tmp/llmgateway-fake.log 2>&1 &
