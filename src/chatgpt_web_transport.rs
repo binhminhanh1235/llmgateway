@@ -2114,6 +2114,57 @@ mod tests {
     }
 
     #[test]
+    fn model_catalog_maps_auto_and_preserves_physical_slugs() {
+        let models = parse_chatgpt_model_catalog(&json!({
+            "models": [
+                {
+                    "slug": "auto",
+                    "title": "Auto",
+                    "max_tokens": 32768
+                },
+                {
+                    "slug": "gpt-5-thinking",
+                    "title": "GPT-5 Thinking",
+                    "description": "Reasoning model",
+                    "max_tokens": 196000
+                },
+                {
+                    "slug": "hidden-model",
+                    "title": "Hidden",
+                    "hidden": true
+                }
+            ]
+        }));
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].external_id, CHATGPT_DIRECT_MODEL);
+        assert_eq!(models[0].display_name, "Auto");
+        let thinking = models
+            .iter()
+            .find(|model| model.external_id == "gpt-5-thinking")
+            .unwrap();
+        assert_eq!(thinking.display_name, "GPT-5 Thinking");
+        assert_eq!(thinking.context_window, Some(196000));
+        assert!(thinking.capabilities.contains(&"reasoning".to_string()));
+        assert!(thinking.capabilities.contains(&"coding".to_string()));
+    }
+
+    #[test]
+    fn model_catalog_keeps_legacy_default_when_auto_row_is_absent() {
+        let models = parse_chatgpt_model_catalog(&json!({
+            "models": [{"slug":"gpt-5","title":"GPT-5"}]
+        }));
+        assert_eq!(models[0].external_id, CHATGPT_DIRECT_MODEL);
+        assert!(models.iter().any(|model| model.external_id == "gpt-5"));
+    }
+
+    #[test]
+    fn wire_model_maps_only_legacy_default_to_auto() {
+        assert_eq!(chatgpt_wire_model(CHATGPT_DIRECT_MODEL), CHATGPT_WEB_MODEL);
+        assert_eq!(chatgpt_wire_model("chatgpt-web/auto"), CHATGPT_WEB_MODEL);
+        assert_eq!(chatgpt_wire_model("gpt-5-thinking"), "gpt-5-thinking");
+    }
+
+    #[test]
     fn browser_challenges_are_detected_without_solving_them() {
         assert!(challenge_required(Some(&json!({"required":true,"dx":"abc"}))));
         assert!(!challenge_required(Some(&json!({"required":false}))));
