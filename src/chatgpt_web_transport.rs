@@ -18,7 +18,12 @@ use reqwest::{
     Client, Response, Url,
 };
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const CHATGPT_HOST: &str = "chatgpt.com";
@@ -37,10 +42,12 @@ const CHATGPT_ADAPTER_VERSION: &str = "experimental-1";
 const CHATGPT_DIRECT_MODEL: &str = "chatgpt-web-default";
 const CHATGPT_WEB_MODEL: &str = "auto";
 const POW_MAX_ATTEMPTS: u32 = 500_000;
+const PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 pub struct ChatGptWebHttpAdapter {
     client: Client,
+    preflight_cache: Arc<Mutex<HashMap<String, CachedPreflight>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +65,13 @@ struct ChatGptSession {
 struct SentinelRequirements {
     token: String,
     proof_token: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedPreflight {
+    created_at: Instant,
+    session: ChatGptSession,
+    requirements: SentinelRequirements,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -100,7 +114,62 @@ impl ChatGptWebHttpAdapter {
             .connect_timeout(Duration::from_secs(5))
             .build()
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            preflight_cache: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    async fn build_preflight(
+        &self,
+        material: &BrowserAuthMaterial,
+        account_id: &str,
+        timeout_duration: Duration,
+    ) -> Result<CachedPreflight, BrowserProviderError> {
+        let session = self
+            .init_session(material, account_id, timeout_duration)
+            .await?;
+        let requirements = self
+            .requirements(&session, account_id, timeout_duration)
+            .await?;
+        Ok(CachedPreflight {
+            created_at: Instant::now(),
+            session,
+            requirements,
+        })
+    }
+
+    async fn warm_preflight(
+        &self,
+        cache_key: &str,
+        material: &BrowserAuthMaterial,
+        account_id: &str,
+        timeout_duration: Duration,
+    ) -> Result<(), BrowserProviderError> {
+        let preflight = self
+            .build_preflight(material, account_id, timeout_duration)
+            .await?;
+        self.preflight_cache
+            .lock()
+            .await
+            .insert(cache_key.to_string(), preflight);
+        Ok(())
+    }
+
+    async fn take_or_build_preflight(
+        &self,
+        cache_key: &str,
+        material: &BrowserAuthMaterial,
+        account_id: &str,
+        timeout_duration: Duration,
+    ) -> Result<CachedPreflight, BrowserProviderError> {
+        if let Some(cached) = self.preflight_cache.lock().await.remove(cache_key) {
+            if cached.created_at.elapsed() <= PREFLIGHT_CACHE_TTL {
+                return Ok(cached);
+            }
+        }
+        self.build_preflight(material, account_id, timeout_duration)
+            .await
     }
 
     fn vault() -> Result<&'static Arc<BrowserAuthVault>, BrowserProviderError> {
@@ -1076,20 +1145,13 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
 
         let result = async {
             let material = self.auth_material(&binding.session, account_id)?;
-            let session = self
-                .init_session(
-                    &material,
-                    account_id,
-                    Duration::from_millis(binding.probe_timeout_ms.unwrap_or(8_000).max(3_000)),
-                )
-                .await?;
-            self.requirements(
-                &session,
+            self.warm_preflight(
+                &binding.session,
+                &material,
                 account_id,
                 Duration::from_millis(binding.probe_timeout_ms.unwrap_or(8_000).max(3_000)),
             )
-            .await?;
-            Ok::<(), BrowserProviderError>(())
+            .await
         }
         .await;
 
@@ -1124,20 +1186,16 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
         }
 
         let material = self.auth_material(&request.session_id, &request.account.id)?;
-        let session = self
-            .init_session(
+        let preflight = self
+            .take_or_build_preflight(
+                &request.session_id,
                 &material,
                 &request.account.id,
                 Duration::from_millis(request.binding.probe_timeout_ms.unwrap_or(8_000).max(3_000)),
             )
             .await?;
-        let requirements = self
-            .requirements(
-                &session,
-                &request.account.id,
-                Duration::from_millis(request.binding.probe_timeout_ms.unwrap_or(8_000).max(3_000)),
-            )
-            .await?;
+        let session = preflight.session;
+        let requirements = preflight.requirements;
         let native = self.native_conversation(&request, &session).await?;
         let prompt = serialize_prompt(&request.body, native.conversation_id.is_some())?;
         let user_message = chatgpt_user_message(&prompt);
