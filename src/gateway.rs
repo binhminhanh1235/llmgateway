@@ -118,9 +118,9 @@ impl Drop for ExecutionStreamGuard {
     }
 }
 
-fn observe_terminal_sse_done(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
+fn observe_terminal_sse_completion(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
     buffer.extend_from_slice(chunk);
-    let mut saw_done = false;
+    let mut saw_terminal = false;
 
     loop {
         let lf_end = buffer.windows(2).position(|window| window == b"\n\n").map(|pos| (pos, 2));
@@ -137,15 +137,33 @@ fn observe_terminal_sse_done(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
         };
 
         let frame = String::from_utf8_lossy(&buffer[..frame_end]);
-        let is_done = frame.lines().any(|line| {
-            line.strip_prefix("data:")
-                .is_some_and(|payload| payload.trim() == "[DONE]")
+        let is_terminal = frame.lines().any(|line| {
+            let Some(payload) = line.strip_prefix("data:") else {
+                return false;
+            };
+            let payload = payload.trim();
+            if payload == "[DONE]" {
+                return true;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(payload) else {
+                return false;
+            };
+            value
+                .get("choices")
+                .and_then(Value::as_array)
+                .is_some_and(|choices| {
+                    choices.iter().any(|choice| {
+                        choice
+                            .get("finish_reason")
+                            .is_some_and(|reason| !reason.is_null())
+                    })
+                })
         });
         buffer.drain(..frame_end + delimiter_len);
-        saw_done |= is_done;
+        saw_terminal |= is_terminal;
     }
 
-    saw_done
+    saw_terminal
 }
 
 
@@ -616,13 +634,13 @@ impl Gateway {
             };
 
             let mut sse_buffer = Vec::<u8>::new();
-            let mut saw_done = false;
+            let mut saw_terminal = false;
             while let Some(item) = upstream.next().await {
                 match item {
                     Ok(bytes) => {
                         guard.observe(bytes.len());
-                        if observe_terminal_sse_done(&mut sse_buffer, &bytes) {
-                            saw_done = true;
+                        if observe_terminal_sse_completion(&mut sse_buffer, &bytes) {
+                            saw_terminal = true;
                             guard.finish("completed", None).await;
                         }
                         yield Ok::<_, std::io::Error>(bytes);
@@ -640,11 +658,11 @@ impl Gateway {
                 }
             }
 
-            if !saw_done {
+            if !saw_terminal {
                 guard
                     .finish(
                         "failed",
-                        Some("upstream stream ended before terminal [DONE] frame"),
+                        Some("upstream stream ended before terminal completion frame"),
                     )
                     .await;
             }
@@ -899,14 +917,27 @@ mod stream_trace_tests {
     use super::{observe_terminal_sse_done, stream_error_message, upstream_stream_error_sse};
 
     #[test]
-    fn terminal_done_detector_requires_a_complete_sse_data_frame() {
+    fn terminal_detector_requires_a_complete_sse_data_frame() {
         let mut buffer = Vec::new();
-        assert!(!observe_terminal_sse_done(
+        assert!(!observe_terminal_sse_completion(
             &mut buffer,
             b"data: {\"message\":\"please wait for data: [DONE]\"}\n\n",
         ));
-        assert!(!observe_terminal_sse_done(&mut buffer, b"data: [DO"));
-        assert!(observe_terminal_sse_done(&mut buffer, b"NE]\n\n"));
+        assert!(!observe_terminal_sse_completion(&mut buffer, b"data: [DO"));
+        assert!(observe_terminal_sse_completion(&mut buffer, b"NE]\n\n"));
+    }
+
+    #[test]
+    fn terminal_detector_accepts_finish_reason_without_done_marker() {
+        let mut buffer = Vec::new();
+        assert!(!observe_terminal_sse_completion(
+            &mut buffer,
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+        ));
+        assert!(observe_terminal_sse_completion(
+            &mut buffer,
+            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        ));
     }
 
     #[derive(Debug)]
@@ -953,7 +984,7 @@ mod stream_trace_tests {
     #[test]
     fn terminal_done_detector_accepts_crlf_frames() {
         let mut buffer = Vec::new();
-        assert!(observe_terminal_sse_done(
+        assert!(observe_terminal_sse_completion(
             &mut buffer,
             b"event: message\r\ndata: [DONE]\r\n\r\n",
         ));
