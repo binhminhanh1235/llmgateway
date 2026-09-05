@@ -4561,18 +4561,36 @@ mod browser_transport_policy_tests {
     }
 
     #[test]
-    fn chatgpt_http_preferred_never_reopens_browser_on_direct_failure() {
+    fn chatgpt_http_preferred_reopens_browser_only_for_interactive_failure() {
+        let challenge = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "browser_challenge_required".into(),
+            message: "turnstile".into(),
+        };
+        let generic = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "conversation_prepare_failed".into(),
+            message: "prepare".into(),
+        };
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::HttpPreferred,
+            &challenge,
+        ));
         assert!(!direct_failure_can_open_browser(
             "browser-chatgpt",
-            BrowserTransportMode::HttpPreferred
+            BrowserTransportMode::HttpPreferred,
+            &generic,
         ));
         assert!(direct_failure_can_open_browser(
             "browser-chatgpt",
-            BrowserTransportMode::Auto
+            BrowserTransportMode::Auto,
+            &generic,
         ));
         assert!(direct_failure_can_open_browser(
             "browser-gemini",
-            BrowserTransportMode::HttpPreferred
+            BrowserTransportMode::HttpPreferred,
+            &generic,
         ));
     }
 
