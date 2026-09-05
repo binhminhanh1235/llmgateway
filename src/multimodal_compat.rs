@@ -1,7 +1,7 @@
 use crate::{
     compat::{anthropic, responses},
     multimodal::{
-        validate_foundation_execution, InputContent, Modality, MultimodalError,
+        validate_vision_execution, InputContent, Modality, MultimodalError,
         MultimodalMessage, MultimodalRequest, ToolCall,
     },
 };
@@ -30,7 +30,6 @@ pub fn normalize_chat_request(
 pub fn normalize_responses_request(
     body: &Value,
 ) -> Result<NormalizedTextRequest, MultimodalError> {
-    reject_responses_non_text_input(body)?;
     reject_requested_output_modalities(body)?;
     let (requested_model, execution) =
         responses::to_openai_request(body).map_err(MultimodalError::InvalidRequest)?;
@@ -51,7 +50,7 @@ fn normalize_current_execution(
     requested_model: String,
 ) -> Result<NormalizedTextRequest, MultimodalError> {
     let canonical = canonical_from_current_execution(&execution_template, requested_model)?;
-    validate_foundation_execution(&canonical)?;
+    validate_vision_execution(&canonical)?;
     Ok(NormalizedTextRequest {
         canonical,
         execution_template,
@@ -155,9 +154,31 @@ fn parse_content(content: &Value) -> Result<Vec<InputContent>, MultimodalError> 
                                 normalized.push(InputContent::Text { text });
                             }
                             "image" | "image_url" | "input_image" => {
-                                return Err(MultimodalError::UnsupportedInputModality(
-                                    Modality::Image,
-                                ));
+                                let artifact_id = object
+                                    .get("file_id")
+                                    .or_else(|| object.get("artifact_id"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                                    .or_else(|| {
+                                        object.get("image_url").and_then(|image_url| {
+                                            image_url
+                                                .as_str()
+                                                .or_else(|| image_url.get("url").and_then(Value::as_str))
+                                                .and_then(|url| {
+                                                    url.strip_prefix("llmgateway://artifact/")
+                                                        .map(str::to_string)
+                                                })
+                                        })
+                                    })
+                                    .ok_or_else(|| {
+                                        MultimodalError::InvalidRequest(
+                                            "image content must be resolved to a gateway artifact before canonical normalization".into(),
+                                        )
+                                    })?;
+                                normalized.push(InputContent::Image {
+                                    artifact_id,
+                                    mime_type: None,
+                                });
                             }
                             "file" | "input_file" | "document" => {
                                 return Err(MultimodalError::UnsupportedInputModality(
@@ -233,50 +254,6 @@ fn modality_from_name(name: &str) -> Option<Modality> {
         "audio" => Some(Modality::Audio),
         _ => None,
     }
-}
-
-fn reject_responses_non_text_input(body: &Value) -> Result<(), MultimodalError> {
-    let Some(input) = body.get("input") else {
-        return Ok(());
-    };
-    scan_responses_input(input)
-}
-
-fn scan_responses_input(value: &Value) -> Result<(), MultimodalError> {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                scan_responses_input(item)?;
-            }
-        }
-        Value::Object(object) => {
-            if let Some(kind) = object.get("type").and_then(Value::as_str) {
-                match kind {
-                    "input_image" | "image" | "image_url" => {
-                        return Err(MultimodalError::UnsupportedInputModality(
-                            Modality::Image,
-                        ));
-                    }
-                    "input_file" | "file" | "document" => {
-                        return Err(MultimodalError::UnsupportedInputModality(
-                            Modality::File,
-                        ));
-                    }
-                    "input_audio" | "audio" => {
-                        return Err(MultimodalError::UnsupportedInputModality(
-                            Modality::Audio,
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(content) = object.get("content") {
-                scan_responses_input(content)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 fn reject_anthropic_non_text_input(body: &Value) -> Result<(), MultimodalError> {
@@ -421,8 +398,27 @@ mod tests {
     }
 
     #[test]
-    fn known_multimodal_inputs_fail_with_capability_errors() {
+    fn resolved_image_inputs_share_the_canonical_boundary() {
         let chat = normalize_chat_request(
+            &json!({
+                "model":"llmgateway-auto",
+                "messages":[{
+                    "role":"user",
+                    "content":[
+                        {"type":"text","text":"describe"},
+                        {"type":"image_url","image_url":{"url":"llmgateway://artifact/file_123"}}
+                    ]
+                }]
+            }),
+            "llmgateway-auto",
+        )
+        .unwrap();
+        assert!(matches!(
+            chat.canonical.messages[0].content[1],
+            InputContent::Image { ref artifact_id, .. } if artifact_id == "file_123"
+        ));
+
+        let unresolved = normalize_chat_request(
             &json!({
                 "model":"llmgateway-auto",
                 "messages":[{
@@ -433,7 +429,7 @@ mod tests {
             "llmgateway-auto",
         )
         .unwrap_err();
-        assert_eq!(chat.code(), "unsupported_input_modality");
+        assert_eq!(unresolved.code(), "invalid_request_error");
 
         let responses = normalize_responses_request(&json!({
             "model":"llmgateway-auto",
