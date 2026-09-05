@@ -2349,6 +2349,51 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn html_json_response_is_classified_as_browser_challenge() {
+        let response = HttpResponse::builder()
+            .status(200)
+            .header(CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(reqwest::Body::from("<!doctype html><html><title>Just a moment</title></html>"))
+            .unwrap();
+        let error = parse_chatgpt_json_response(
+            reqwest::Response::from(response),
+            "account-a",
+            "sentinel_prepare_invalid",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BrowserProviderError::AdapterIncompatible { ref code, .. }
+                if code == "browser_challenge_required"
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_json_response_keeps_stage_specific_code_and_detail() {
+        let response = HttpResponse::builder()
+            .status(200)
+            .header(CONTENT_TYPE, "application/json")
+            .body(reqwest::Body::from("{not-json"))
+            .unwrap();
+        let error = parse_chatgpt_json_response(
+            reqwest::Response::from(response),
+            "account-a",
+            "conversation_prepare_invalid",
+        )
+        .await
+        .unwrap_err();
+        match error {
+            BrowserProviderError::AdapterIncompatible { code, message, .. } => {
+                assert_eq!(code, "conversation_prepare_invalid");
+                assert!(message.contains("invalid JSON"));
+                assert!(!message.contains("{not-json"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
     #[test]
     fn sentinel_config_has_current_wire_shape() {
         let config = sentinel_config(&test_session());
