@@ -52,7 +52,6 @@ pub struct GeminiWebHttpAdapter {
 struct GeminiModelRecipe {
     external_id: String,
     display_name: String,
-    description: String,
     model_id: String,
     capacity: i64,
     capacity_field: usize,
@@ -1271,7 +1270,6 @@ fn parse_model_recipe(
         } else {
             display_name
         },
-        description,
         model_id,
         capacity,
         capacity_field,
@@ -1797,7 +1795,6 @@ mod tests {
         let pro = GeminiModelRecipe {
             external_id: "gemini-web-pro".into(),
             display_name: "Pro".into(),
-            description: String::new(),
             model_id: "opaque-pro".into(),
             capacity: 2,
             capacity_field: 12,
@@ -1808,7 +1805,6 @@ mod tests {
         let flash = GeminiModelRecipe {
             external_id: "gemini-web-flash".into(),
             display_name: "Flash".into(),
-            description: String::new(),
             model_id: "opaque-flash".into(),
             capacity: 1,
             capacity_field: 12,
@@ -1830,8 +1826,7 @@ mod tests {
             models: vec![GeminiModelRecipe {
                 external_id: "gemini-web-pro".into(),
                 display_name: "Pro".into(),
-                description: String::new(),
-                model_id: "opaque-pro".into(),
+                    model_id: "opaque-pro".into(),
                 capacity: 2,
                 capacity_field: 12,
                 model_number: 3,

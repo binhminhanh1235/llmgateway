@@ -78,6 +78,11 @@ pub async fn reset_account_quota(
 
 fn usage_error(error: UsageError) -> Response<Body> {
     match error {
+        UsageError::AccountNotFound(account_id) => json_error(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            &format!("unknown account '{account_id}'"),
+        ),
         UsageError::InvalidConfig(message) => {
             json_error(StatusCode::BAD_REQUEST, "usage_error", &message)
         }

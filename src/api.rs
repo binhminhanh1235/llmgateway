@@ -3,11 +3,13 @@ use crate::{
     compat::{anthropic, responses},
     conversation::{ConversationError, ConversationStore},
     gateway::{Gateway, GatewayError},
+    quota_usage_runtime,
     response_state::{response_to_openai_assistant, responses_stream_with_capture},
 };
 use axum::{
-    body::Body,
-    extract::{Path, State},
+    body::{to_bytes, Body},
+    extract::{Path, Request, State},
+    middleware::Next,
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         HeaderMap, HeaderValue, Response, StatusCode,
@@ -193,8 +195,10 @@ pub async fn openai_responses(
                     &request_id,
                 )
             } else {
+                let usage_event_id = routed.usage_event_id.clone();
                 match routed.response.json::<Value>().await {
                     Ok(openai) => {
+                        update_provider_usage(usage_event_id.as_deref(), &openai).await;
                         let response = responses::from_openai_response(&openai, &requested_model);
                         let mut history = history_before_response;
                         if let Some(assistant) = openai_assistant_message(&openai) {
@@ -278,8 +282,10 @@ pub async fn anthropic_messages(
                     &request_id,
                 )
             } else {
+                let usage_event_id = routed.usage_event_id.clone();
                 match routed.response.json::<Value>().await {
                     Ok(openai) => {
+                        update_provider_usage(usage_event_id.as_deref(), &openai).await;
                         let anthropic = anthropic::from_openai_response(&openai, &requested_model);
                         json_response_with_request(
                             StatusCode::OK,
@@ -440,6 +446,72 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
+async fn update_provider_usage(event_id: Option<&str>, response: &Value) {
+    let (Some(event_id), Some(usage)) = (event_id, quota_usage_runtime::get()) else {
+        return;
+    };
+    if let Err(error) = usage.update_provider_usage(event_id, response).await {
+        tracing::warn!(%error, event_id, "failed to update provider usage");
+    }
+}
+
+pub(crate) async fn normalize_json_rejections(
+    request: Request,
+    next: Next,
+) -> Response<Body> {
+    let request_is_json = request
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("application/json"));
+
+    let response = next.run(request).await;
+    if !request_is_json
+        || !matches!(
+            response.status(),
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+        )
+    {
+        return response;
+    }
+
+    let is_plain_text = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/plain"));
+    if !is_plain_text {
+        return response;
+    }
+
+    let status = response.status();
+    let (_, body) = response.into_parts();
+    let raw = match to_bytes(body, 1024 * 1024).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
+        Err(error) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "request_body_error",
+                &format!("failed to read rejected request body: {error}"),
+            )
+        }
+    };
+    let message = normalize_json_rejection_message(&raw);
+    json_error(status, "invalid_request_error", &message)
+}
+
+fn normalize_json_rejection_message(raw: &str) -> String {
+    if let Some(detail) = raw.strip_prefix("Failed to parse the request body as JSON: ") {
+        return format!("Failed to parse request JSON: {detail}");
+    }
+    if let Some(detail) =
+        raw.strip_prefix("Failed to deserialize the JSON body into the target type: ")
+    {
+        return format!("Invalid request JSON: {detail}");
+    }
+    format!("Invalid request JSON: {raw}")
+}
+
 pub(crate) fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), Response<Body>> {
     let bearer = headers
         .get(AUTHORIZATION)
@@ -513,6 +585,11 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
 
 fn catalog_error(error: CatalogError) -> Response<Body> {
     match error {
+        CatalogError::AccountNotFound(account_id) => json_error(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            &format!("unknown account '{account_id}'"),
+        ),
         CatalogError::InvalidConfig(message) => {
             json_error(StatusCode::BAD_REQUEST, "catalog_error", &message)
         }

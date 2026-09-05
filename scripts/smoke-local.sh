@@ -80,6 +80,77 @@ for _ in {1..40}; do
   sleep 0.2
 done
 
+ERROR_HEADERS=/tmp/llmgateway-error-contract.headers
+ERROR_BODY=/tmp/llmgateway-error-contract.json
+
+assert_json_error() {
+  local expected_status="$1"
+  local expected_type="$2"
+  local actual_status="$3"
+  test "$actual_status" = "$expected_status"
+  grep -qi '^content-type: application/json' "$ERROR_HEADERS"
+  python3 - "$ERROR_BODY" "$expected_type" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    payload=json.load(f)
+assert payload["error"]["type"] == sys.argv[2], payload
+assert isinstance(payload["error"]["message"], str) and payload["error"]["message"], payload
+PY
+}
+
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
+  http://127.0.0.1:7331/v1/threads/nonexistent-thread-id/retrieve \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"test"}')
+assert_json_error 404 not_found_error "$STATUS"
+
+for endpoint in \
+  "/_llmgateway/accounts/nonexistent-account-xyz/usage" \
+  "/_llmgateway/accounts/nonexistent-account-xyz/models"; do
+  STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' \
+    "http://127.0.0.1:7331${endpoint}" \
+    -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+  assert_json_error 404 not_found_error "$STATUS"
+done
+
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
+  http://127.0.0.1:7331/_llmgateway/accounts/nonexistent-account-xyz/quota/reset \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+assert_json_error 404 not_found_error "$STATUS"
+
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
+  http://127.0.0.1:7331/_llmgateway/accounts/nonexistent-account-xyz/models/refresh \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+assert_json_error 404 not_found_error "$STATUS"
+
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X PATCH \
+  http://127.0.0.1:7331/_llmgateway/accounts/nonexistent-account-xyz/models \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"fake/fake-model","enabled":false}')
+assert_json_error 404 not_found_error "$STATUS"
+
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
+  http://127.0.0.1:7331/v1/chat/completions \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{malformed-json}')
+assert_json_error 400 invalid_request_error "$STATUS"
+python3 - "$ERROR_BODY" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    payload=json.load(f)
+assert payload["error"]["message"].startswith("Failed to parse request JSON:"), payload
+PY
+
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
+  http://127.0.0.1:7331/_llmgateway/browser-sessions/nonexistent-session/attention \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{}')
+assert_json_error 422 invalid_request_error "$STATUS"
+
 curl -fsS http://127.0.0.1:7331/ | grep -q "llmgateway"
 curl -fsS http://127.0.0.1:7331/ui/app.js | grep -q "llmgateway.threads.v1"
 curl -fsS http://127.0.0.1:7331/v1/models \

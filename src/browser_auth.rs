@@ -167,11 +167,7 @@ impl BrowserAuthVault {
         })
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn contains(&self, session_id: &str) -> bool {
+     pub fn contains(&self, session_id: &str) -> bool {
         self.entry_path(session_id)
             .is_ok_and(|path| path.is_file())
     }
@@ -236,15 +232,7 @@ impl BrowserAuthVault {
         Ok(material)
     }
 
-    pub fn delete(&self, session_id: &str) -> Result<(), BrowserAuthVaultError> {
-        let path = self.entry_path(session_id)?;
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-        Ok(())
-    }
-
-    fn entry_path(&self, session_id: &str) -> Result<PathBuf, BrowserAuthVaultError> {
+     fn entry_path(&self, session_id: &str) -> Result<PathBuf, BrowserAuthVaultError> {
         validate_session_id(session_id)?;
         Ok(self.root.join(format!("{session_id}.auth")))
     }

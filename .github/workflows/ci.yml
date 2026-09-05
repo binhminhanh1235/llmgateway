@@ -30,7 +30,7 @@ jobs:
       - run: bash -n scripts/live-browserless-acceptance.sh
       - run: bash -n scripts/live-gemini-model-selection.sh
       - run: bash -n scripts/smoke-gemini-recovery.sh
-      - run: cargo check --all-targets
+      - run: RUSTFLAGS="-D warnings" cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
       - run: bash scripts/smoke-provider-conversation-affinity.sh

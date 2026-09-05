@@ -27,6 +27,13 @@ pub async fn set_account_model(
         );
     }
 
+    if state.gateway.config_snapshot().account(&account_id).is_none() {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            json!({"error":{"type":"not_found_error","message":format!("unknown account '{account_id}'")}}),
+        );
+    }
+
     match set_account_model_enabled(
         &state.gateway.config,
         &account_id,

@@ -30,6 +30,8 @@ pub struct ModelCatalog {
 pub enum CatalogError {
     #[error("catalog database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("unknown account '{0}'")]
+    AccountNotFound(String),
     #[error("invalid catalog configuration: {0}")]
     InvalidConfig(String),
     #[error("missing credential environment variable '{0}'")]
@@ -226,7 +228,7 @@ impl ModelCatalog {
         let config = self.config.snapshot();
         let account = config
             .account(account_id)
-            .ok_or_else(|| CatalogError::InvalidConfig(format!("unknown account '{account_id}'")))?;
+            .ok_or_else(|| CatalogError::AccountNotFound(account_id.to_string()))?;
         let provider = config.provider(&account.provider).ok_or_else(|| {
             CatalogError::InvalidConfig(format!("unknown provider '{}'", account.provider))
         })?;
@@ -404,7 +406,7 @@ impl ModelCatalog {
     pub async fn account_models(&self, account_id: &str) -> Result<Vec<CatalogModelView>, CatalogError> {
         let config = self.config.snapshot();
         if config.account(account_id).is_none() {
-            return Err(CatalogError::InvalidConfig(format!("unknown account '{account_id}'")));
+            return Err(CatalogError::AccountNotFound(account_id.to_string()));
         }
         let all = self.models().await?;
         Ok(all

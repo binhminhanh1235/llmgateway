@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::{collections::{HashMap, HashSet}, env, fs, net::IpAddr, path::Path};
+use std::{collections::HashMap, env, fs, net::IpAddr, path::Path};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -236,10 +236,6 @@ pub struct AccountConfig {
 }
 
 impl AccountConfig {
-    pub fn discovery_enabled(&self, provider: &ProviderConfig) -> bool {
-        self.discover_models && !provider.is_browser()
-    }
-
     pub fn credential_required(&self, provider: &ProviderConfig) -> bool {
         !provider.is_browser()
     }
@@ -762,7 +758,7 @@ enabled = true"#,
         let provider = config.provider("browser").unwrap();
         assert!(account.api_key_env.is_empty());
         assert!(!account.discover_models);
-        assert!(!account.discovery_enabled(provider));
+        assert!(!(account.discover_models && !provider.is_browser()));
         assert!(!account.credential_required(provider));
         assert_eq!(provider.transport(), "browser");
     }
@@ -786,7 +782,7 @@ enabled = true"#,
         let account = config.account("account").unwrap();
         let provider = config.provider("api").unwrap();
         assert!(account.discover_models);
-        assert!(account.discovery_enabled(provider));
+        assert!(account.discover_models && !provider.is_browser());
         assert!(account.credential_required(provider));
         assert_eq!(provider.transport(), "api");
     }

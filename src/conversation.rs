@@ -63,16 +63,12 @@ pub struct ThreadDetail {
 
 #[derive(Clone, Debug)]
 pub struct ThreadContext {
-    pub id: String,
     pub model: String,
     pub sticky_route: Option<String>,
-    pub messages: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ResponseContext {
-    pub response_id: String,
-    pub requested_model: String,
     pub messages: Vec<Value>,
     pub route_id: Option<String>,
 }
@@ -269,10 +265,8 @@ impl ConversationStore {
     pub async fn context(&self, id: &str) -> Result<ThreadContext, ConversationError> {
         let thread = self.thread(id).await?;
         Ok(ThreadContext {
-            id: thread.id,
             model: thread.model,
             sticky_route: thread.sticky_route,
-            messages: thread.messages.into_iter().map(|message| message.message).collect(),
         })
     }
 
@@ -564,7 +558,7 @@ impl ConversationStore {
 
     pub async fn response_context(&self, response_id: &str) -> Result<ResponseContext, ConversationError> {
         let row = sqlx::query(
-            "SELECT response_id, requested_model, messages_json, route_id
+            "SELECT messages_json, route_id
              FROM response_contexts WHERE response_id = ?",
         )
         .bind(response_id)
@@ -575,8 +569,6 @@ impl ConversationStore {
         let messages = serde_json::from_str(&raw)
             .map_err(|error| ConversationError::InvalidJson(error.to_string()))?;
         Ok(ResponseContext {
-            response_id: row.try_get("response_id")?,
-            requested_model: row.try_get("requested_model")?,
             messages,
             route_id: row.try_get("route_id")?,
         })
