@@ -81,7 +81,7 @@ function Send-Message([string]$ThreadId, [object]$Model, [string]$Prompt) {
         model = [string]$Model.id
         stream = $false
     }
-    $expectedRoute = "discovered:$AccountId:$($Model.external_id)"
+    $expectedRoute = "discovered:${AccountId}:$($Model.external_id)"
     $actualRoute = [string]$response.Headers["x-llmgateway-route"]
     Assert-True ($actualRoute -eq $expectedRoute) "model '$($Model.id)' routed via '$actualRoute', expected '$expectedRoute'"
     $body = $response.Content | ConvertFrom-Json
