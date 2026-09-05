@@ -211,8 +211,8 @@ assert x["desired_policy"] == "browser-only", x
 assert x["configured_mode"] == "browser-only", x
 '
 
-for SPEC in "gemini gemini-toggle Gemini" "chatgpt chatgpt-toggle ChatGPT"; do
-  read -r PROVIDER ACCOUNT LABEL <<<"$SPEC"
+for SPEC in "gemini gemini-toggle Gemini auto" "chatgpt chatgpt-toggle ChatGPT http-preferred"; do
+  read -r PROVIDER ACCOUNT LABEL EXPECTED_BROWSERLESS_MODE <<<"$SPEC"
   curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-account-setup \
     "${AUTH[@]}" "${JSON[@]}" \
     -d "{\"provider\":\"${PROVIDER}\",\"account_id\":\"${ACCOUNT}\",\"label\":\"${LABEL} Toggle\",\"priority\":50}" >/dev/null
@@ -234,10 +234,11 @@ assert x["browserless"]["supported"] is True, x
   printf '%s' "$ON" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
+expected=sys.argv[1]
 assert x["desired_policy"] == "browserless-preferred", x
-assert x["configured_mode"] == "auto", x
-assert x["browserless"]["recommended_mode"] == "auto", x
-'
+assert x["configured_mode"] == expected, (expected,x)
+assert x["browserless"]["recommended_mode"] == expected, (expected,x)
+' "$EXPECTED_BROWSERLESS_MODE"
 done
 
 ACCOUNTS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/accounts "${AUTH[@]}")
