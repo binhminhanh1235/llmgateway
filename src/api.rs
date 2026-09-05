@@ -778,12 +778,11 @@ fn presented_api_key(headers: &HeaderMap) -> Option<&str> {
         .or_else(|| headers.get("x-api-key").and_then(|value| value.to_str().ok()))
 }
 
-pub(crate) 
 fn multimodal_error(error: MultimodalError) -> Response<Body> {
     json_error(StatusCode::BAD_REQUEST, error.code(), &error.to_string())
 }
 
-fn client_policy_error(error: ClientPolicyError) -> Response<Body> {
+pub(crate) fn client_policy_error(error: ClientPolicyError) -> Response<Body> {
     match error {
         ClientPolicyError::Unauthorized => json_error(
             StatusCode::UNAUTHORIZED,
