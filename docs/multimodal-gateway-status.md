@@ -31,7 +31,7 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 | Phase | Task | Status | Dependency | Exit gate |
 |---|---|---|---|---|
 | P0 | [#70 Multimodal Foundation](https://github.com/binhminhanh1235/llmgateway/issues/70) | **DONE / VERIFIED** | none | canonical contracts + structured capabilities + compatibility tests + exact-head CI |
-| P1 | [#71 ArtifactStore and Files API](https://github.com/binhminhanh1235/llmgateway/issues/71) | **IN PROGRESS** | P0 DONE / VERIFIED | durable files API, dedup, persistence, MIME/size/security tests |
+| P1 | [#71 ArtifactStore and Files API](https://github.com/binhminhanh1235/llmgateway/issues/71) | **VERIFYING** | P0 DONE / VERIFIED | durable files API, dedup, persistence, MIME/size/security tests |
 | P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **BLOCKED** | P1 DONE / VERIFIED | API + UI image input + deterministic fixtures + verified live adapter |
 | P3 | [#73 General File Attachments](https://github.com/binhminhanh1235/llmgateway/issues/73) | **BLOCKED** | P2 DONE / VERIFIED | native PDF path + extraction fallback + provider binding isolation |
 | P4 | [#74 Voice Input and Safe Voice Commands](https://github.com/binhminhanh1235/llmgateway/issues/74) | **BLOCKED** | P3 DONE / VERIFIED | STT + microphone + allowlisted command dispatcher |
@@ -55,7 +55,7 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 - Deterministic tests cover Responses normalization, Chat/Responses equivalence, Anthropic normalization, current execution round-trip semantics, stable structured capability serialization, legacy capability compatibility, and unsupported modality errors.
 - Full implementation exact-head CI: workflow CI #1345 / run `33975834628` on `aa13c0fb7f3e3db44f86ef5238e9f75f1a207410`: **PASS** on Rust + Windows, including strict cargo check, Clippy, all-target tests, OpenAI SDK, browser/browserless, streaming, native affinity, routing/traces, client policies, local multimodal assertions, and Docker build.
 - The final status-only checkpoint commit is evidence-only. Its exact-head CI run is recorded in issue #70 after completion so no code-evidence commit is mutated merely to embed its own future run ID.
-- P1 #71 is **IN PROGRESS** by explicit user instruction. P2 #72 and every later phase remain **BLOCKED / NOT STARTED**.
+- P1 #71 is **VERIFYING** after implementation CI passed. P2 #72 and every later phase remain **BLOCKED / NOT STARTED**.
 - `main` remains untouched. No multimodal work may be merged to `main` without a separate explicit user authorization.
 
 ## Update protocol
@@ -72,3 +72,24 @@ At every meaningful checkpoint:
 8. never merge to `main` without explicit user authorization.
 
 - P1 start checkpoint: `main` = `46e70faf3b4a8034ca278f049f0af4b3e256e477`; branch = `64d5f53f9e0da182d3dfc0a7e4f1d3b948ba94e8`; ahead 8 / behind 0; no reconcile required.
+
+
+## P1 ArtifactStore and Files API verification
+
+- Exact main re-check: `46e70faf3b4a8034ca278f049f0af4b3e256e477`.
+- P1 implementation head: `d5d008d16a9b0781951484795ac177dfbd681a2b`; branch is behind main by 0 commits.
+- Durable provider-neutral ArtifactStore is implemented in `src/artifact_store.rs` using the shared SQLite database plus a configurable data-root-backed content-addressed blob store.
+- Artifact metadata includes logical file id, owner client id, safe filename, MIME type, size, SHA-256, purpose/source, lifecycle state and timestamps. Public Files API responses never expose absolute or relative filesystem paths.
+- SHA-256 content addressing deduplicates identical physical blobs while preserving distinct logical file records.
+- Persistent tables cover artifact blobs, artifacts, artifact references and provider artifact bindings. Reference guards block unsafe delete; provider bindings are deterministically removed with the logical artifact; startup cleanup removes orphaned blob rows/files.
+- Authenticated Files API is wired at `POST /v1/files`, `GET /v1/files/{file_id}`, `GET /v1/files/{file_id}/content`, and `DELETE /v1/files/{file_id}`.
+- Client ownership isolation is enforced: a client cannot read another client's artifact; the API returns a non-leaking 404. Admin-key access remains global.
+- Multipart upload is bounded at the Axum body layer and again by exact per-file/total request limits before artifact persistence.
+- MIME sniffing validates declared content and rejects configured dangerous executable MIME types. Configurable MIME allow/deny lists and attachment limits are exposed through `GET /v1/capabilities`.
+- Remote URL ingestion remains disabled and configuration rejects enabling it until SSRF controls exist in a later explicitly scoped phase.
+- Unit acceptance covers deduplication, metadata/content survival after ArtifactStore restart, ownership isolation, reference-safe delete, provider-binding cleanup, oversize rejection, MIME mismatch and executable rejection before metadata persistence.
+- API smoke acceptance covers unauthenticated rejection, upload/metadata/content round-trip, cross-client isolation, duplicate physical-blob count, MIME spoof rejection, oversize rejection, dedup-safe partial delete and final blob cleanup.
+- Implementation CI #1402 / run `33977856797` on exact implementation head `d5d008d16a9b0781951484795ac177dfbd681a2b`: **PASS** on Rust + Windows, including strict `-D warnings`, Clippy, all-target tests, Files API smoke, all existing browser/browserless/streaming/routing/client-policy smokes and Docker build.
+- This status-only evidence commit requires one final exact-head CI. Its run ID will be recorded on issue #71 after completion, without mutating the verified branch head merely to embed its own future run ID.
+- P2 #72 and all later phases remain **BLOCKED / NOT STARTED**. No P2 work has begun.
+- `main` remains untouched. No multimodal work is merged without separate explicit user authorization.
