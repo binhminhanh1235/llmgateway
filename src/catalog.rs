@@ -320,11 +320,24 @@ impl ModelCatalog {
         discovered: &[DiscoveredModel],
     ) -> Result<(), CatalogError> {
         let mut tx = self.pool.begin().await?;
+        // A refresh is an authoritative snapshot for dynamically discovered
+        // models. Keeping old discovered rows as "unavailable" makes stale
+        // backend execution slugs linger forever in Accounts and can produce
+        // duplicate public labels after ChatGPT changes its picker metadata.
+        // Configured routes are preserved, but stale discovery-only bindings
+        // are removed completely.
         sqlx::query(
             "UPDATE account_models SET
                 discovered = 0,
-                availability = CASE WHEN configured = 1 THEN 'unknown' ELSE 'unavailable' END
-             WHERE account_id = ?",
+                availability = 'unknown'
+             WHERE account_id = ? AND configured = 1",
+        )
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM account_models
+             WHERE account_id = ? AND configured = 0",
         )
         .bind(account_id)
         .execute(&mut *tx)
@@ -351,6 +364,19 @@ impl ModelCatalog {
             .execute(&self.pool)
             .await?;
         }
+
+        // Remove catalog rows that no account references anymore. This keeps a
+        // refresh from leaving stale ChatGPT backend variants visible in the
+        // global Models view while preserving models shared by other accounts.
+        sqlx::query(
+            "DELETE FROM models
+             WHERE NOT EXISTS (
+                SELECT 1 FROM account_models
+                WHERE account_models.canonical_model_id = models.canonical_id
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

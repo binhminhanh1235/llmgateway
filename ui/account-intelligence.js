@@ -122,6 +122,9 @@
     if (reasons.has("browser_adapter_login_required")) {
       return { level: "warning", label: "Login required", note: account.browser_adapter?.message || "Sign in again in the browser" };
     }
+    if (reasons.has("browser_verification_required")) {
+      return { level: "warning", label: "Verification required", note: account.browser_adapter?.message || readiness.browser_adapter_message || "Open the authenticated browser to complete provider verification" };
+    }
     if (reasons.has("browser_adapter_unavailable")) {
       return { level: "danger", label: "Adapter unavailable", note: account.browser_adapter?.message || "Browser adapter is not available" };
     }

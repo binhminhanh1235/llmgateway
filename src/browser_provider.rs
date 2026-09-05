@@ -26,7 +26,7 @@ use std::{
 use thiserror::Error;
 use tracing::warn;
 use tokio::{
-    sync::RwLock,
+    sync::{Mutex as AsyncMutex, OwnedMutexGuard, RwLock},
     time::{sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -361,6 +361,8 @@ pub struct BrowserProviderRegistry {
     adapter_health: Arc<RwLock<BTreeMap<String, CachedAdapterDiagnostics>>>,
     last_transport: Arc<RwLock<BTreeMap<String, BrowserTransportExecution>>>,
     discovered_models: Arc<StdRwLock<BTreeMap<String, BTreeSet<String>>>>,
+    discovered_model_labels: Arc<StdRwLock<BTreeMap<String, BTreeMap<String, String>>>>,
+    browser_fallback_locks: Arc<StdRwLock<BTreeMap<String, Arc<AsyncMutex<()>>>>>,
     model_catalog_refresh_required: Arc<StdRwLock<BTreeSet<String>>>,
 }
 
@@ -498,6 +500,8 @@ impl BrowserProviderRegistry {
             adapter_health: Arc::new(RwLock::new(BTreeMap::new())),
             last_transport: Arc::new(RwLock::new(BTreeMap::new())),
             discovered_models: Arc::new(StdRwLock::new(BTreeMap::new())),
+            discovered_model_labels: Arc::new(StdRwLock::new(BTreeMap::new())),
+            browser_fallback_locks: Arc::new(StdRwLock::new(BTreeMap::new())),
             model_catalog_refresh_required: Arc::new(StdRwLock::new(BTreeSet::new())),
         })
     }
@@ -826,6 +830,27 @@ impl BrowserProviderRegistry {
                 .map(|model| model.external_id.clone())
                 .collect(),
         );
+        drop(guard);
+
+        self.discovered_model_labels
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                account_id.to_string(),
+                models
+                    .iter()
+                    .map(|model| (model.external_id.clone(), model.display_name.clone()))
+                    .collect(),
+            );
+    }
+
+    fn discovered_model_label(&self, account_id: &str, model: &str) -> Option<String> {
+        self.discovered_model_labels
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(account_id)
+            .and_then(|labels| labels.get(model))
+            .cloned()
     }
 
     pub fn session_id_for_account(&self, account_id: &str) -> Option<String> {
@@ -1118,6 +1143,22 @@ impl BrowserProviderRegistry {
             ) {
                 return true;
             }
+            if provider_kind == "browser-chatgpt"
+                && diagnostics.status == "requires_attention"
+                && matches!(
+                    binding.transport_mode,
+                    BrowserTransportMode::HttpPreferred | BrowserTransportMode::Auto
+                )
+                && self
+                    .adapters
+                    .get(provider_kind)
+                    .is_some_and(|adapter| adapter.is_cdp())
+            {
+                // A Sentinel challenge is a recoverable browser-verification state,
+                // not an unroutable account. Keep the route eligible so execute_chat
+                // can open the authenticated browser only for the challenged turn.
+                return true;
+            }
         }
 
         let adapter = match self.adapters.get(provider_kind) {
@@ -1136,6 +1177,17 @@ impl BrowserProviderRegistry {
         }
 
         session.status == "ready"
+    }
+
+    fn browser_fallback_lock(&self, session_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self
+            .browser_fallback_locks
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
     }
 
     async fn cdp_session_live(&self, session_id: &str) -> bool {
@@ -1301,7 +1353,7 @@ impl BrowserProviderRegistry {
             .get(&provider.kind)
             .cloned()
             .ok_or_else(|| BrowserProviderError::UnsupportedAdapter(provider.kind.clone()))?;
-        let binding = self
+        let mut binding = self
             .config_snapshot()
             .bindings
             .get(&account.id)
@@ -1322,6 +1374,15 @@ impl BrowserProviderRegistry {
                 account_id: account.id.clone(),
                 model: route.model.clone(),
             });
+        }
+
+        // Dynamic discovery owns the public picker label. Carry that label into
+        // the CDP fallback request so ChatGPT selects "GPT-5.6 Sol" / "Terra"
+        // instead of trying to find an internal wire slug such as gpt-5-6.
+        if !binding.model_labels.contains_key(&route.model) {
+            if let Some(label) = self.discovered_model_label(&account.id, &route.model) {
+                binding.model_labels.insert(route.model.clone(), label);
+            }
         }
 
         let Some(store) = browser_session_runtime::get() else {
@@ -1375,8 +1436,13 @@ impl BrowserProviderRegistry {
                 .get(&account.id)
                 .is_some_and(|models| models.contains(&route.model))
                 && !binding.models.iter().any(|model| model == &route.model);
-            let direct_failure_can_open_browser =
-                direct_failure_can_open_browser(&provider.kind, binding.transport_mode);
+            let direct_failure_can_open_browser = direct_result.as_ref().err().is_some_and(|error| {
+                direct_failure_can_open_browser(
+                    &provider.kind,
+                    binding.transport_mode,
+                    error,
+                )
+            });
             let safe_fallback_candidate = direct_failure_can_open_browser
                 && direct_result.as_ref().err().is_some_and(|error| {
                     direct_error_allows_browser_fallback(
@@ -1385,6 +1451,18 @@ impl BrowserProviderRegistry {
                         browser_adapter.is_cdp(),
                     )
                 });
+            // Serialize browser recovery for a session all the way through the
+            // response body. Previously a prior fallback response could drop its
+            // auto-stop guard while the next fallback was already using CDP. The
+            // resulting Chromium kill surfaced as:
+            // "WebSocket protocol error: Connection reset without closing handshake".
+            let fallback_lock = safe_fallback_candidate
+                .then(|| self.browser_fallback_lock(&binding.session));
+            let fallback_guard = if let Some(lock) = fallback_lock.as_ref() {
+                Some(lock.clone().lock_owned().await)
+            } else {
+                None
+            };
             let browser_was_live = safe_fallback_candidate
                 && self.cdp_session_live(&binding.session).await;
             let safe_browser_fallback = if safe_fallback_candidate {
@@ -1396,29 +1474,48 @@ impl BrowserProviderRegistry {
             if safe_browser_fallback {
                 browser_fallback_used = true;
                 used_adapter = browser_adapter.clone();
+                let stop_after_response = !browser_was_live;
                 if let Err(error) = self.mark_direct_state_unsynced(&adapter_request).await {
-                    if !browser_was_live {
-                        stop_browser_runtime_soon(binding.session.clone());
+                    if let Some(guard) = fallback_guard {
+                        drop(guard);
+                    }
+                    if stop_after_response {
+                        if let Some(lock) = fallback_lock {
+                            schedule_browser_runtime_stop(binding.session.clone(), lock);
+                        }
                     }
                     Err(error)
                 } else {
                     let fallback_result = browser_adapter.execute_chat(adapter_request).await;
-                    if browser_was_live {
-                        fallback_result
-                    } else {
-                        match fallback_result {
-                            Ok(response) => wrap_response_with_browser_stop(
+                    match fallback_result {
+                        Ok(response) => {
+                            let lock = fallback_lock.expect("fallback lock exists when browser fallback is active");
+                            let guard = fallback_guard.expect("fallback guard exists when browser fallback is active");
+                            wrap_response_with_browser_runtime_guard(
                                 response,
                                 binding.session.clone(),
-                            ),
-                            Err(error) => {
-                                stop_browser_runtime_soon(binding.session.clone());
-                                Err(error)
+                                lock,
+                                guard,
+                                stop_after_response,
+                            )
+                        }
+                        Err(error) => {
+                            if let Some(guard) = fallback_guard {
+                                drop(guard);
                             }
+                            if stop_after_response {
+                                if let Some(lock) = fallback_lock {
+                                    schedule_browser_runtime_stop(binding.session.clone(), lock);
+                                }
+                            }
+                            Err(error)
                         }
                     }
                 }
             } else {
+                if let Some(guard) = fallback_guard {
+                    drop(guard);
+                }
                 direct_result
             }
         } else {
@@ -1446,7 +1543,13 @@ impl BrowserProviderRegistry {
                         .await;
                     "login_required"
                 } else if code == "browser_challenge_required" {
-                    "browser_fallback_required"
+                    let _ = self
+                        .require_attention(
+                            &account.id,
+                            &format!("browser verification required: {message}"),
+                        )
+                        .await;
+                    "requires_attention"
                 } else {
                     "adapter_incompatible"
                 };
@@ -1483,46 +1586,72 @@ impl BrowserProviderRegistry {
 }
 
 
-struct BrowserFallbackStopGuard {
-    session_id: Option<String>,
+struct BrowserFallbackRuntimeGuard {
+    session_id: String,
+    lock: Arc<AsyncMutex<()>>,
+    lock_guard: Option<OwnedMutexGuard<()>>,
+    stop_on_drop: bool,
 }
 
-impl BrowserFallbackStopGuard {
-    fn new(session_id: String) -> Self {
+impl BrowserFallbackRuntimeGuard {
+    fn new(
+        session_id: String,
+        lock: Arc<AsyncMutex<()>>,
+        lock_guard: OwnedMutexGuard<()>,
+        stop_on_drop: bool,
+    ) -> Self {
         Self {
-            session_id: Some(session_id),
+            session_id,
+            lock,
+            lock_guard: Some(lock_guard),
+            stop_on_drop,
         }
     }
 }
 
-impl Drop for BrowserFallbackStopGuard {
+impl Drop for BrowserFallbackRuntimeGuard {
     fn drop(&mut self) {
-        if let Some(session_id) = self.session_id.take() {
-            stop_browser_runtime_soon(session_id);
+        // Release the current request's lease before scheduling a stop. Any newer
+        // recovery request can acquire the same session lock first and complete
+        // its CDP work before the stop task is allowed to terminate Chromium.
+        if let Some(guard) = self.lock_guard.take() {
+            drop(guard);
+        }
+        if self.stop_on_drop {
+            schedule_browser_runtime_stop(self.session_id.clone(), self.lock.clone());
         }
     }
 }
 
-fn stop_browser_runtime_soon(session_id: String) {
+fn schedule_browser_runtime_stop(session_id: String, lock: Arc<AsyncMutex<()>>) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
     handle.spawn(async move {
+        let _lease = lock.lock_owned().await;
         if let Some(driver) = chromium_driver_runtime::get() {
             let _ = driver.stop(&session_id).await;
         }
     });
 }
 
-fn wrap_response_with_browser_stop(
+fn wrap_response_with_browser_runtime_guard(
     response: reqwest::Response,
     session_id: String,
+    lock: Arc<AsyncMutex<()>>,
+    lock_guard: OwnedMutexGuard<()>,
+    stop_on_drop: bool,
 ) -> Result<reqwest::Response, BrowserProviderError> {
     let status = response.status();
     let headers = response.headers().clone();
-    // Construct the guard outside the generator so the response owns it even if
-    // the body is dropped before its first poll.
-    let guard = BrowserFallbackStopGuard::new(session_id);
+    // The guard lives for the response body, which is required for browser-backed
+    // streaming responses whose subsequent polls still use the same CDP runtime.
+    let guard = BrowserFallbackRuntimeGuard::new(
+        session_id,
+        lock,
+        lock_guard,
+        stop_on_drop,
+    );
     let stream = async_stream::stream! {
         let _guard = guard;
         let mut body = response.bytes_stream();
@@ -1866,6 +1995,16 @@ impl CdpBrowserAdapter {
     fn model_label(&self, binding: &BrowserAccountBinding, model: &str) -> Option<String> {
         if let Some(label) = binding.model_labels.get(model) {
             return Some(label.clone());
+        }
+        if self.spec.provider == "chatgpt" {
+            return Some(
+                if model == "chatgpt-web-default" {
+                    "Auto"
+                } else {
+                    model
+                }
+                .to_string(),
+            );
         }
         if self.spec.builtin_script.is_none() {
             return Some(model.to_string());
@@ -3487,38 +3626,57 @@ fn contract_error_to_provider_error(
 }
 
 
+fn chatgpt_pre_submit_browser_recovery_code(code: &str) -> bool {
+    matches!(
+        code,
+        "login_required"
+            | "browser_challenge_required"
+            | "session_bootstrap_failed"
+            | "session_bootstrap_invalid"
+            | "upstream_waf_rejected"
+            | "upstream_rejected"
+            | "sentinel_prepare_failed"
+            | "sentinel_prepare_invalid"
+            | "sentinel_pow_invalid"
+            | "sentinel_pow_failed"
+            | "sentinel_finalize_failed"
+            | "sentinel_finalize_invalid"
+            | "conversation_prepare_failed"
+            | "conversation_prepare_invalid"
+    )
+}
+
 fn direct_failure_can_open_browser(
     provider_kind: &str,
     mode: BrowserTransportMode,
+    error: &BrowserProviderError,
 ) -> bool {
-    provider_kind != "browser-chatgpt" || matches!(mode, BrowserTransportMode::Auto)
+    if provider_kind != "browser-chatgpt" {
+        return true;
+    }
+    match mode {
+        BrowserTransportMode::Auto => true,
+        BrowserTransportMode::HttpPreferred => matches!(
+            error,
+            BrowserProviderError::AdapterIncompatible { code, .. }
+                if chatgpt_pre_submit_browser_recovery_code(code)
+        ),
+        BrowserTransportMode::BrowserOnly => false,
+    }
 }
 
 fn direct_error_allows_browser_fallback(
     error: &BrowserProviderError,
-    dynamic_model: bool,
+    _dynamic_model: bool,
     browser_adapter_is_cdp: bool,
 ) -> bool {
-    if dynamic_model || !browser_adapter_is_cdp {
+    if !browser_adapter_is_cdp {
         return false;
     }
     let BrowserProviderError::AdapterIncompatible { code, .. } = error else {
         return false;
     };
-    matches!(
-        code.as_str(),
-        "login_required"
-            | "browser_challenge_required"
-            | "adapter_incompatible"
-            | "upstream_waf_rejected"
-            | "upstream_rejected"
-            | "sentinel_prepare_invalid"
-            | "sentinel_pow_invalid"
-            | "sentinel_pow_failed"
-            | "sentinel_finalize_invalid"
-            | "conversation_prepare_failed"
-            | "conversation_prepare_invalid"
-    )
+    chatgpt_pre_submit_browser_recovery_code(code)
 }
 
 fn cdp_session_status_probeable(status: &str) -> bool {
@@ -3563,7 +3721,11 @@ async fn evaluate_cdp(
 ) -> Result<Value, BrowserProviderError> {
     let (mut socket, _) = connect_async(websocket_url)
         .await
-        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        .map_err(|error| {
+            BrowserProviderError::Transport(format!(
+                "CDP websocket connect failed: {error}"
+            ))
+        })?;
     let request_id = 1u64;
     let command = json!({
         "id": request_id,
@@ -3578,11 +3740,19 @@ async fn evaluate_cdp(
     socket
         .send(Message::Text(command.to_string().into()))
         .await
-        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        .map_err(|error| {
+            BrowserProviderError::Transport(format!(
+                "CDP websocket send failed: {error}"
+            ))
+        })?;
 
     let value = timeout(Duration::from_secs(CDP_EXECUTION_TIMEOUT_SECONDS), async {
         while let Some(message) = socket.next().await {
-            let message = message.map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+            let message = message.map_err(|error| {
+                BrowserProviderError::Transport(format!(
+                    "CDP websocket receive failed: {error}"
+                ))
+            })?;
             match message {
                 Message::Text(text) => {
                     let payload: Value = serde_json::from_str(text.as_ref())
@@ -3712,8 +3882,67 @@ mod tests {
         assert!(!direct_error_allows_browser_fallback(&unsynced, false, true));
         assert!(!direct_error_allows_browser_fallback(&unavailable, false, true));
         assert!(!direct_error_allows_browser_fallback(&transport, false, true));
-        assert!(!direct_error_allows_browser_fallback(&challenge, true, true));
+        assert!(direct_error_allows_browser_fallback(&challenge, true, true));
         assert!(!direct_error_allows_browser_fallback(&challenge, false, false));
+    }
+
+    #[test]
+    fn chatgpt_http_preferred_opens_browser_for_safe_pre_submit_recovery() {
+        let challenge = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "browser_challenge_required".into(),
+            message: "turnstile".into(),
+        };
+        let login = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "login_required".into(),
+            message: "login".into(),
+        };
+        let generic = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "conversation_prepare_failed".into(),
+            message: "prepare".into(),
+        };
+
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::HttpPreferred,
+            &challenge,
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::HttpPreferred,
+            &login,
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::HttpPreferred,
+            &generic,
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::Auto,
+            &generic,
+        ));
+    }
+
+    #[test]
+    fn discovered_model_can_browser_recover_only_for_login_or_challenge() {
+        let challenge = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "browser_challenge_required".into(),
+            message: "turnstile".into(),
+        };
+        let generic = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "conversation_prepare_failed".into(),
+            message: "prepare".into(),
+        };
+        assert!(direct_error_allows_browser_fallback(&challenge, true, true));
+        assert!(
+            direct_error_allows_browser_fallback(&generic, true, true),
+            "discovered models retain their public picker labels, so pre-submit prepare failures may safely recover through CDP"
+        );
     }
 
     #[test]
@@ -3724,6 +3953,29 @@ mod tests {
         for status in ["starting", "stopped", "failed"] {
             assert!(!cdp_session_status_probeable(status), "{status}");
         }
+    }
+
+    #[tokio::test]
+    async fn browser_fallback_lock_serializes_same_session_runtime() {
+        let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
+        let first = registry.browser_fallback_lock("session-a");
+        let second = registry.browser_fallback_lock("session-a");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let first_guard = first.clone().lock_owned().await;
+        assert!(
+            timeout(Duration::from_millis(25), second.clone().lock_owned())
+                .await
+                .is_err(),
+            "same-session fallback must wait while another response still owns CDP"
+        );
+        drop(first_guard);
+        assert!(
+            timeout(Duration::from_millis(250), second.lock_owned())
+                .await
+                .is_ok(),
+            "same-session fallback lock must release after the response completes"
+        );
     }
 
     #[test]
@@ -3758,6 +4010,25 @@ mod tests {
             .select_target(&targets, Some("https://example.test/chat"))
             .unwrap();
         assert_eq!(selected.websocket_debugger_url, "ws://127.0.0.1/two");
+    }
+
+    #[test]
+    fn discovered_model_labels_are_retained_for_chatgpt_browser_recovery() {
+        let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
+        registry.remember_discovered_models(
+            "account",
+            &[BrowserDiscoveredModel {
+                external_id: "gpt-5-6".into(),
+                display_name: "GPT-5.6 Sol".into(),
+                owned_by: "OpenAI".into(),
+                context_window: Some(128000),
+                capabilities: vec!["chat".into(), "reasoning".into()],
+            }],
+        );
+        assert_eq!(
+            registry.discovered_model_label("account", "gpt-5-6").as_deref(),
+            Some("GPT-5.6 Sol")
+        );
     }
 
     #[test]
@@ -4448,18 +4719,36 @@ mod browser_transport_policy_tests {
     }
 
     #[test]
-    fn chatgpt_http_preferred_never_reopens_browser_on_direct_failure() {
-        assert!(!direct_failure_can_open_browser(
+    fn chatgpt_http_preferred_reopens_browser_for_safe_pre_submit_failure() {
+        let challenge = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "browser_challenge_required".into(),
+            message: "turnstile".into(),
+        };
+        let generic = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "conversation_prepare_failed".into(),
+            message: "prepare".into(),
+        };
+        assert!(direct_failure_can_open_browser(
             "browser-chatgpt",
-            BrowserTransportMode::HttpPreferred
+            BrowserTransportMode::HttpPreferred,
+            &challenge,
         ));
         assert!(direct_failure_can_open_browser(
             "browser-chatgpt",
-            BrowserTransportMode::Auto
+            BrowserTransportMode::HttpPreferred,
+            &generic,
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::Auto,
+            &generic,
         ));
         assert!(direct_failure_can_open_browser(
             "browser-gemini",
-            BrowserTransportMode::HttpPreferred
+            BrowserTransportMode::HttpPreferred,
+            &generic,
         ));
     }
 

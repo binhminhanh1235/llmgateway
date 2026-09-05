@@ -489,6 +489,10 @@
       const rows = (account.models || []).map((model) => {
         const binding = model.accounts?.find((candidate) => candidate.account_id === account.id);
         if (!binding) return "";
+        // Do not render tombstones left by an older discovery snapshot. A row
+        // that is neither configured nor currently discovered is not a model
+        // the account can select, even if an older database still contains it.
+        if (!binding.configured && !binding.discovered && binding.availability === "unavailable") return "";
         const badges = [binding.availability, ...(model.capabilities || []).slice(0, 3)].map((badge, i) => `<span class="badge ${i === 0 ? escapeAttr(binding.availability) : ""}">${escapeHtml(badge)}</span>`).join("");
         return `<div class="account-model-row"><div><div class="model-name">${escapeHtml(model.display_name || model.external_id)}</div><div class="model-meta">${badges}</div></div><label class="toggle"><input type="checkbox" data-toggle-account="${escapeAttr(account.id)}" data-toggle-model="${escapeAttr(model.id)}" ${binding.enabled ? "checked" : ""}/><span class="toggle-track"></span></label></div>`;
       }).join("") || '<div class="account-model-row"><div class="model-meta">No models discovered yet</div></div>';

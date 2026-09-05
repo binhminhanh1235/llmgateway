@@ -125,6 +125,9 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
             let reason = match readiness.browser_adapter_status.as_deref() {
                 Some("adapter_incompatible") => "browser_adapter_incompatible",
                 Some("login_required") => "browser_adapter_login_required",
+                Some("requires_attention") | Some("browser_fallback_required") => {
+                    "browser_verification_required"
+                }
                 Some("unsupported") | Some("unconfigured") => "browser_adapter_unavailable",
                 _ => match readiness.browser_session_status.as_deref() {
                     Some("stopped") => "browser_session_stopped",
