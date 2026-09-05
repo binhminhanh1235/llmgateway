@@ -3906,6 +3906,25 @@ mod tests {
     }
 
     #[test]
+    fn discovered_model_labels_are_retained_for_chatgpt_browser_recovery() {
+        let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
+        registry.remember_discovered_models(
+            "account",
+            &[BrowserDiscoveredModel {
+                external_id: "gpt-5-6".into(),
+                display_name: "GPT-5.6 Sol".into(),
+                owned_by: "OpenAI".into(),
+                context_window: Some(128000),
+                capabilities: vec!["chat".into(), "reasoning".into()],
+            }],
+        );
+        assert_eq!(
+            registry.discovered_model_label("account", "gpt-5-6").as_deref(),
+            Some("GPT-5.6 Sol")
+        );
+    }
+
+    #[test]
     fn browser_binding_model_allowlist_is_enforced() {
         let mut binding = test_binding();
         binding.models = vec!["model-a".into(), "model-b".into()];
