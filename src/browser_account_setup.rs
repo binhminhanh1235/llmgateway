@@ -7,6 +7,7 @@ use crate::{
     browser_session::BrowserConfig,
     browser_session_runtime,
     chromium_driver::ChromiumConfig,
+    chromium_driver_api,
     chromium_driver_runtime,
     config::AppConfig,
 };
@@ -320,6 +321,13 @@ pub async fn set_account_transport_policy(
         );
     }
     registry.clear_last_transport_execution(&account_id).await;
+    if policy == BrowserTransportPolicy::BrowserlessPreferred {
+        if let Some(session_id) = registry.session_id_for_account(&account_id) {
+            let _ =
+                chromium_driver_api::release_session_browser_if_direct_ready(&state, &session_id)
+                    .await;
+        }
+    }
     match registry
         .account_transport_state(&provider_kind, &account_id)
         .await
