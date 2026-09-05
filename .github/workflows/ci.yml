@@ -28,6 +28,7 @@ jobs:
       - run: node --check adapters/qwen-web.js
       - run: node scripts/test-browser-adapter-fixtures.mjs
       - run: bash -n scripts/live-browserless-acceptance.sh
+      - run: bash -n scripts/live-gemini-model-selection.sh
       - run: cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
@@ -66,6 +67,11 @@ jobs:
           $errors = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile(
             (Resolve-Path 'scripts/live-browserless-acceptance.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/live-gemini-model-selection.ps1'),
             [ref]$tokens,
             [ref]$errors
           )
