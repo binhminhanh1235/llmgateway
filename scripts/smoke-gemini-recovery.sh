@@ -311,7 +311,7 @@ import json,sys
 thread=json.load(open("/tmp/gemini-recovery-thread-after-cancel.json",encoding="utf-8"))
 assistants=[m for m in thread["messages"] if m["role"]=="assistant"]
 assert len(assistants) == int(sys.argv[1]), assistants
-assert all(str(m.get("content") or "").strip() for m in assistants), assistants
+assert all(str((m.get("message") or {}).get("content") or "").strip() for m in assistants), assistants
 PY
 
 echo "[gemini-recovery] Scenario 5: next turn starts from safe fresh native state"
