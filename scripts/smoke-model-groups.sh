@@ -39,7 +39,7 @@ discover_models = false
 [[routes]]
 id = "slow-primary"
 account = "group-account"
-model = "fake-model"
+model = "model-primary"
 priority = 100
 enabled = true
 capabilities = ["chat"]
@@ -47,7 +47,7 @@ capabilities = ["chat"]
 [[routes]]
 id = "fast-fallback"
 account = "group-account"
-model = "fake-model"
+model = "model-fallback"
 priority = 1
 enabled = true
 capabilities = ["chat"]
@@ -73,13 +73,24 @@ done
 AUTH=(-H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 JSON=(-H "Content-Type: application/json")
 
+GROUPS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
+printf '%s' "$GROUPS" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+ids={m["id"] for m in x["models"]}
+assert "fake/model-primary" in ids, x
+assert "fake/model-fallback" in ids, x
+assert all("route" not in m["display_name"].lower() for m in x["models"]), x
+'
+
 CREATE=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}" "${JSON[@]}" \
-  -d '{"id":"ci-tiered","tiers":[{"priority":10,"routes":["slow-primary"]},{"priority":20,"routes":["fast-fallback"]}]}')
+  -d '{"id":"ci-tiered","tiers":[{"priority":10,"models":["fake/model-primary","fake/model-fallback"]}]}')
 printf '%s' "$CREATE" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
 assert x["group"]["id"] == "ci-tiered", x
-assert x["group"]["mode"] == "tiered", x
+assert x["group"]["mode"] == "model-tiered", x
+assert x["group"]["tiers"][0]["models"] == ["fake/model-primary","fake/model-fallback"], x
 assert x["restart_required"] is False, x
 '
 
@@ -98,12 +109,14 @@ x=json.load(sys.stdin)
 c={r["route_id"]:r for r in x["candidates"]}
 assert x["selected_route"] == "slow-primary", x
 assert c["slow-primary"]["group_tier_priority"] == 10, c
-assert c["fast-fallback"]["group_tier_priority"] == 20, c
+assert c["fast-fallback"]["group_tier_priority"] == 10, c
+assert c["slow-primary"]["group_model_order"] == 0, c
+assert c["fast-fallback"]["group_model_order"] == 1, c
 assert c["slow-primary"]["final_score"] > c["fast-fallback"]["final_score"], c
 '
 
 curl -fsS -X PUT http://127.0.0.1:7331/_llmgateway/model-groups/ci-tiered "${AUTH[@]}" "${JSON[@]}" \
-  -d '{"tiers":[{"priority":10,"routes":["fast-fallback"]},{"priority":20,"routes":["slow-primary"]}]}' >/tmp/model-group-update.json
+  -d '{"tiers":[{"priority":10,"models":["fake/model-fallback","fake/model-primary"]}]}' >/tmp/model-group-update.json
 
 EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain "${AUTH[@]}" "${JSON[@]}" \
   -d '{"model":"ci-tiered"}')
@@ -111,6 +124,9 @@ printf '%s' "$EXPLAIN" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
 assert x["selected_route"] == "fast-fallback", x
+c={r["route_id"]:r for r in x["candidates"]}
+assert c["fast-fallback"]["group_model_order"] == 0, c
+assert c["slow-primary"]["group_model_order"] == 1, c
 '
 
 curl -fsS -X DELETE http://127.0.0.1:7331/_llmgateway/model-groups/ci-tiered "${AUTH[@]}" \
@@ -123,4 +139,4 @@ x=json.load(sys.stdin)
 assert "ci-tiered" not in {m["id"] for m in x["data"]}, x
 '
 
-echo "llmgateway model group CRUD + hot activation smoke test passed"
+echo "llmgateway active-model group CRUD + ordered fallback smoke test passed"
