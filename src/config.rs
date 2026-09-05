@@ -840,7 +840,10 @@ enabled = true"#,
             assert!(provider.is_browser());
             assert_eq!(provider.transport(), "browser");
             assert!(!account.credential_required(provider));
-            if matches!(kind, "browser-gemini" | "browser-qwen") {
+            if matches!(
+                kind,
+                "browser-gemini" | "browser-chatgpt" | "browser-qwen"
+            ) {
                 assert!(account.discover_models);
             } else {
                 assert!(!account.discover_models);
