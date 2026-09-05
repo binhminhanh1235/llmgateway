@@ -31,8 +31,8 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 | Phase | Task | Status | Dependency | Exit gate |
 |---|---|---|---|---|
 | P0 | [#70 Multimodal Foundation](https://github.com/binhminhanh1235/llmgateway/issues/70) | **DONE / VERIFIED** | none | canonical contracts + structured capabilities + compatibility tests + exact-head CI |
-| P1 | [#71 ArtifactStore and Files API](https://github.com/binhminhanh1235/llmgateway/issues/71) | **VERIFYING** | P0 DONE / VERIFIED | durable files API, dedup, persistence, MIME/size/security tests |
-| P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **BLOCKED** | P1 DONE / VERIFIED | API + UI image input + deterministic fixtures + verified live adapter |
+| P1 | [#71 ArtifactStore and Files API](https://github.com/binhminhanh1235/llmgateway/issues/71) | **DONE / VERIFIED** | P0 DONE / VERIFIED | durable files API, dedup, persistence, MIME/size/security tests |
+| P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **IN PROGRESS** | P1 DONE / VERIFIED | API + UI image input + deterministic fixtures + verified live adapter |
 | P3 | [#73 General File Attachments](https://github.com/binhminhanh1235/llmgateway/issues/73) | **BLOCKED** | P2 DONE / VERIFIED | native PDF path + extraction fallback + provider binding isolation |
 | P4 | [#74 Voice Input and Safe Voice Commands](https://github.com/binhminhanh1235/llmgateway/issues/74) | **BLOCKED** | P3 DONE / VERIFIED | STT + microphone + allowlisted command dispatcher |
 | P5 | [#75 Image Generation and Editing](https://github.com/binhminhanh1235/llmgateway/issues/75) | **BLOCKED** | P4 DONE / VERIFIED | Responses + Images APIs share core; generation/edit verified |
@@ -55,7 +55,7 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 - Deterministic tests cover Responses normalization, Chat/Responses equivalence, Anthropic normalization, current execution round-trip semantics, stable structured capability serialization, legacy capability compatibility, and unsupported modality errors.
 - Full implementation exact-head CI: workflow CI #1345 / run `33975834628` on `aa13c0fb7f3e3db44f86ef5238e9f75f1a207410`: **PASS** on Rust + Windows, including strict cargo check, Clippy, all-target tests, OpenAI SDK, browser/browserless, streaming, native affinity, routing/traces, client policies, local multimodal assertions, and Docker build.
 - The final status-only checkpoint commit is evidence-only. Its exact-head CI run is recorded in issue #70 after completion so no code-evidence commit is mutated merely to embed its own future run ID.
-- P1 #71 is **VERIFYING** after implementation CI passed. P2 #72 and every later phase remain **BLOCKED / NOT STARTED**.
+- P1 #71 is **DONE / VERIFIED**. P2 #72 is **IN PROGRESS** by explicit user instruction. P3 #73 and every later phase remain **BLOCKED / NOT STARTED**.
 - `main` remains untouched. No multimodal work may be merged to `main` without a separate explicit user authorization.
 
 ## Update protocol
@@ -93,3 +93,7 @@ At every meaningful checkpoint:
 - This status-only evidence commit requires one final exact-head CI. Its run ID will be recorded on issue #71 after completion, without mutating the verified branch head merely to embed its own future run ID.
 - P2 #72 and all later phases remain **BLOCKED / NOT STARTED**. No P2 work has begun.
 - `main` remains untouched. No multimodal work is merged without separate explicit user authorization.
+
+
+- P2 start checkpoint: `main` = `46e70faf3b4a8034ca278f049f0af4b3e256e477`; branch = `7f3712f46e6a88163991bd662a961046d51ff8f6`; ahead 21 / behind 0; no reconcile required.
+- P1 final exact-head CI #1403 / run `33978273008`: **PASS**.
