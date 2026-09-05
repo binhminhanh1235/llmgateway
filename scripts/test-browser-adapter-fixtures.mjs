@@ -23,6 +23,20 @@ class FakeElement {
 
 class FakeTextAreaElement extends FakeElement {}
 class FakeInputElement extends FakeElement {}
+class FakeFile {
+  constructor(parts, name, options = {}) {
+    this.parts = parts;
+    this.name = name;
+    this.type = options.type || "";
+    this.size = parts.reduce((sum, part) => sum + (part?.byteLength ?? part?.length ?? 0), 0);
+  }
+}
+class FakeDataTransfer {
+  constructor() {
+    this.files = [];
+    this.items = { add: (file) => { this.files.push(file); } };
+  }
+}
 class FakeSessionStorage {
   constructor() { this.values = new Map(); }
   getItem(key) { return this.values.has(key) ? this.values.get(key) : null; }
@@ -33,6 +47,9 @@ class FakeSessionStorage {
 
 globalThis.HTMLTextAreaElement = FakeTextAreaElement;
 globalThis.HTMLInputElement = FakeInputElement;
+globalThis.File = FakeFile;
+globalThis.DataTransfer = FakeDataTransfer;
+globalThis.atob = (value) => Buffer.from(String(value), "base64").toString("binary");
 globalThis.InputEvent = class {
   constructor(type, init = {}) { this.type = type; Object.assign(this, init); }
 };
@@ -392,6 +409,75 @@ async function testQwenEnterFallbackWithoutSendControl() {
 
   assert.equal(enterKeydowns, 1, "Enter fallback must submit exactly once");
   assert.equal(result.body.choices[0].message.content, "enter-submit-ok");
+}
+
+async function testVisionAttachmentUploadBeforeSubmit() {
+  const fixtures = [
+    {
+      adapterPath: "adapters/chatgpt-web.js",
+      host: "chatgpt.com",
+      pagePath: "/",
+      inputSelector: "#prompt-textarea",
+      fileSelector: "input[type='file'][accept*='image']",
+      sendSelector: "#composer-submit-button",
+      responseSelector: "[data-message-author-role='assistant'] .markdown",
+      context: { response_timeout_ms: 1600, response_stable_ms: 40 }
+    },
+    {
+      adapterPath: "adapters/gemini-web.js",
+      host: "gemini.google.com",
+      pagePath: "/app",
+      inputSelector: "div[aria-label='Enter a prompt for Gemini']",
+      fileSelector: "input[type='file'][accept*='image']",
+      sendSelector: "button[aria-label='Send message']",
+      responseSelector: "div.markdown.markdown-main-panel",
+      context: { response_timeout_ms: 1600, response_stable_ms: 40 }
+    }
+  ];
+
+  for (const fixture of fixtures) {
+    const input = new FakeElement();
+    const fileInput = new FakeInputElement();
+    fileInput.multiple = true;
+    const send = new FakeElement("Send");
+    const response = new FakeElement("");
+    const nodes = {
+      [fixture.inputSelector]: input,
+      [fixture.fileSelector]: fileInput,
+      [fixture.sendSelector]: send,
+      [fixture.responseSelector]: []
+    };
+    const sequence = [];
+    fileInput.onDispatch = (event) => {
+      if (event.type === "change") sequence.push("attached");
+      return true;
+    };
+    send.onClick = () => {
+      sequence.push("submitted");
+      response.innerText = "vision-fixture-ok";
+      response.textContent = response.innerText;
+      nodes[fixture.responseSelector] = [response];
+    };
+
+    installPage({ host: fixture.host, path: fixture.pagePath, nodes });
+    const adapter = loadAdapter(fixture.adapterPath);
+    const result = await adapter.chat({
+      model: "vision-test",
+      stream: false,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "Describe this image" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } }
+        ]
+      }]
+    }, fixture.context);
+
+    assert.deepEqual(sequence, ["attached", "submitted"], fixture.adapterPath);
+    assert.equal(fileInput.files.length, 1, fixture.adapterPath);
+    assert.equal(fileInput.files[0].type, "image/png", fixture.adapterPath);
+    assert.equal(result.body.choices[0].message.content, "vision-fixture-ok", fixture.adapterPath);
+  }
 }
 
 async function testGeminiToolBridge() {
@@ -1231,6 +1317,7 @@ await testQwen();
 await testDeepSeek();
 await testQwenReactComposerSubmit();
 await testQwenEnterFallbackWithoutSendControl();
+await testVisionAttachmentUploadBeforeSubmit();
 await testGeminiToolBridge();
 await testChatGPTToolBridge();
 await testChatGPTModelPickerFlow();
