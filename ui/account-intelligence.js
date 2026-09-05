@@ -53,7 +53,13 @@
         else card.querySelector(".account-card-header > div")?.appendChild(strip);
       }
 
-      const state = classify(account);
+      const effectiveTransport = account.browser_transport?.effective_transport || null;
+      const directHttp = effectiveTransport === "direct-http";
+      const browserFallback = effectiveTransport === "browser-fallback";
+      const transportLabel = directHttp
+        ? "Direct HTTP"
+        : (browserFallback ? "Browser fallback" : (account.transport === "browser" ? "Browser" : "API"));
+      const state = classify(account, effectiveTransport);
       const readiness = account.readiness || {};
       const session = account.browser_session;
       const adapter = account.browser_adapter;
@@ -68,7 +74,7 @@
       const routeText = routeCount ? `${healthyRoutes}/${routeCount} routes healthy` : "dynamic routes";
 
       strip.innerHTML = `
-        <span class="account-intel-chip transport-${escapeAttr(account.transport)}">${account.transport === "browser" ? "Browser" : "API"}</span>
+        <span class="account-intel-chip transport-${escapeAttr(directHttp ? "direct-http" : account.transport)}">${escapeHtml(transportLabel)}</span>
         <span class="account-intel-chip state-${escapeAttr(state.level)}"><span class="account-intel-dot"></span>${escapeHtml(state.label)}</span>
         <span class="account-intel-detail">${escapeHtml(credential)}</span>
         ${adapterText ? `<span class="account-intel-detail">${escapeHtml(adapterText)}</span>` : ""}
@@ -81,7 +87,7 @@
     }
   }
 
-  function classify(account) {
+  function classify(account, effectiveTransport = null) {
     const readiness = account.readiness || {};
     const status = readiness.effective_status || account.routing_state || "unavailable";
     const reasons = new Set(readiness.reasons || []);
@@ -90,7 +96,13 @@
       return { level: "muted", label: "Disabled", note: "This account is disabled" };
     }
     if (status === "ready") {
-      return { level: "healthy", label: account.transport === "browser" ? "Connected" : "Ready", note: "Available for routing" };
+      return {
+        level: "healthy",
+        label: effectiveTransport === "direct-http"
+          ? "Ready"
+          : (account.transport === "browser" ? "Connected" : "Ready"),
+        note: "Available for routing",
+      };
     }
     if (status === "degraded") {
       if (reasons.has("quota_pressure")) return { level: "warning", label: "Quota pressure", note: "Still routable, but quota pressure is elevated" };
