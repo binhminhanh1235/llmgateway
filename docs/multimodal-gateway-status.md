@@ -30,7 +30,7 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 
 | Phase | Task | Status | Dependency | Exit gate |
 |---|---|---|---|---|
-| P0 | [#70 Multimodal Foundation](https://github.com/binhminhanh1235/llmgateway/issues/70) | **READY** | none | canonical contracts + structured capabilities + compatibility tests + exact-head CI |
+| P0 | [#70 Multimodal Foundation](https://github.com/binhminhanh1235/llmgateway/issues/70) | **IN PROGRESS** | none | canonical contracts + structured capabilities + compatibility tests + exact-head CI |
 | P1 | [#71 ArtifactStore and Files API](https://github.com/binhminhanh1235/llmgateway/issues/71) | **BLOCKED** | P0 DONE / VERIFIED | durable files API, dedup, persistence, MIME/size/security tests |
 | P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **BLOCKED** | P1 DONE / VERIFIED | API + UI image input + deterministic fixtures + verified live adapter |
 | P3 | [#73 General File Attachments](https://github.com/binhminhanh1235/llmgateway/issues/73) | **BLOCKED** | P2 DONE / VERIFIED | native PDF path + extraction fallback + provider binding isolation |
@@ -45,8 +45,8 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 - Detailed implementation plan is committed.
 - Tracking issue #69 exists.
 - Phase issues #70-#77 exist.
-- No implementation phase has started.
-- Next executable task: **P0 #70**.
+- P0 #70 is **IN PROGRESS**.
+- Verified start checkpoint: `main` = `46e70faf3b4a8034ca278f049f0af4b3e256e477`; working branch before implementation = `77ccfea383cbebf619e05fc6993c3204bd6f17e5`; branch was ahead 3 / behind 0, so no reconcile was required.
 - `main` must remain untouched by this initiative until explicit user authorization after completion.
 
 ## Update protocol
