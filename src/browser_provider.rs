@@ -15,7 +15,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
     sync::{Arc, RwLock as StdRwLock},
@@ -199,12 +199,37 @@ pub enum BrowserProviderError {
     Toml(#[from] toml::de::Error),
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct BrowserDiscoveredModel {
+    pub external_id: String,
+    pub display_name: String,
+    pub owned_by: String,
+    pub context_window: Option<i64>,
+    pub capabilities: Vec<String>,
+}
+
 #[async_trait]
 pub trait BrowserProviderAdapter: Send + Sync {
     fn kind(&self) -> &'static str;
     fn adapter_id(&self) -> &'static str;
     fn is_cdp(&self) -> bool {
         false
+    }
+
+    fn supports_model_discovery(&self) -> bool {
+        false
+    }
+
+    async fn discover_models(
+        &self,
+        _account_id: &str,
+        _binding: &BrowserAccountBinding,
+        _force: bool,
+    ) -> Result<Vec<BrowserDiscoveredModel>, BrowserProviderError> {
+        Err(BrowserProviderError::UnsupportedAdapter(format!(
+            "{} model discovery",
+            self.adapter_id()
+        )))
     }
 
     async fn diagnose(
@@ -226,6 +251,7 @@ pub struct BrowserProviderRegistry {
     direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>>,
     adapter_health: Arc<RwLock<BTreeMap<String, CachedAdapterDiagnostics>>>,
     last_transport: Arc<RwLock<BTreeMap<String, BrowserTransportExecution>>>,
+    discovered_models: Arc<StdRwLock<BTreeMap<String, BTreeSet<String>>>>,
 }
 
 impl BrowserProviderConfig {
@@ -355,6 +381,7 @@ impl BrowserProviderRegistry {
             direct_adapters,
             adapter_health: Arc::new(RwLock::new(BTreeMap::new())),
             last_transport: Arc::new(RwLock::new(BTreeMap::new())),
+            discovered_models: Arc::new(StdRwLock::new(BTreeMap::new())),
         })
     }
 
@@ -424,6 +451,61 @@ impl BrowserProviderRegistry {
         self.adapters.contains_key(kind)
     }
 
+    pub fn supports_model_discovery(&self, provider_kind: &str) -> bool {
+        self.direct_adapters
+            .get(provider_kind)
+            .is_some_and(|adapter| adapter.supports_model_discovery())
+    }
+
+    pub async fn discover_models(
+        &self,
+        provider_kind: &str,
+        account_id: &str,
+        force: bool,
+    ) -> Result<Vec<BrowserDiscoveredModel>, BrowserProviderError> {
+        let config = self.config_snapshot();
+        let binding = config
+            .bindings
+            .get(account_id)
+            .cloned()
+            .ok_or_else(|| BrowserProviderError::MissingBinding(account_id.to_string()))?;
+        let adapter = self
+            .direct_adapter(provider_kind, &binding)
+            .cloned()
+            .ok_or_else(|| {
+                BrowserProviderError::UnsupportedAdapter(format!(
+                    "{provider_kind} direct model discovery"
+                ))
+            })?;
+        if !adapter.supports_model_discovery() {
+            return Err(BrowserProviderError::UnsupportedAdapter(format!(
+                "{} model discovery",
+                adapter.adapter_id()
+            )));
+        }
+        let models = adapter.discover_models(account_id, &binding, force).await?;
+        self.remember_discovered_models(account_id, &models);
+        Ok(models)
+    }
+
+    fn remember_discovered_models(
+        &self,
+        account_id: &str,
+        models: &[BrowserDiscoveredModel],
+    ) {
+        let mut guard = self
+            .discovered_models
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.insert(
+            account_id.to_string(),
+            models
+                .iter()
+                .map(|model| model.external_id.clone())
+                .collect(),
+        );
+    }
+
     pub fn session_id_for_account(&self, account_id: &str) -> Option<String> {
         self.config_snapshot()
             .bindings
@@ -432,12 +514,21 @@ impl BrowserProviderRegistry {
     }
 
     pub fn model_allowed(&self, account_id: &str, model: &str) -> bool {
-        self.config_snapshot()
+        let configured = self
+            .config_snapshot()
             .bindings
             .get(account_id)
             .is_none_or(|binding| {
                 binding.models.is_empty() || binding.models.iter().any(|allowed| allowed == model)
-            })
+            });
+        if configured {
+            return true;
+        }
+        self.discovered_models
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(account_id)
+            .is_some_and(|models| models.contains(model))
     }
 
     fn auth_material_available(&self, session_id: &str) -> bool {
@@ -582,6 +673,17 @@ impl BrowserProviderRegistry {
             let direct_diagnostics = direct
                 .diagnose(account_id, &session.profile_dir, &binding)
                 .await;
+            if direct_diagnostics.status == "ready" && direct.supports_model_discovery() {
+                match direct.discover_models(account_id, &binding, false).await {
+                    Ok(models) => self.remember_discovered_models(account_id, &models),
+                    Err(error) => warn!(
+                        %error,
+                        account = %account_id,
+                        adapter = %direct.adapter_id(),
+                        "browser direct model discovery warmup failed"
+                    ),
+                }
+            }
             if direct_diagnostics.status == "ready" || !can_reprobe {
                 direct_diagnostics
             } else {
