@@ -5,6 +5,7 @@ param(
     [string]$ApiKey = $env:LLMGATEWAY_API_KEY,
     [string]$ModelA = "",
     [string]$ModelB = "",
+    [switch]$SkipRefresh,
     [switch]$KeepThreads
 )
 
@@ -157,9 +158,13 @@ try {
     Assert-True ([bool]$preflight.direct_ready) "Gemini account is not direct-ready before model refresh"
     Assert-True ([string]$preflight.effective_transport -eq "direct-http") "effective transport is not direct-http before model refresh"
 
-    Write-Host "[gemini-model-live] Refreshing Gemini model catalog for '$AccountId' with Chromium stopped"
-    $refresh = Invoke-GatewayJson -Method POST -Path "/_llmgateway/accounts/$AccountId/models/refresh"
-    Assert-True ([int]$refresh.discovered_models -gt 0) "model discovery returned zero models"
+    if ($SkipRefresh) {
+        Write-Host "[gemini-model-live] Using persisted Gemini model catalog after restart; explicit refresh is disabled"
+    } else {
+        Write-Host "[gemini-model-live] Refreshing Gemini model catalog for '$AccountId' with Chromium stopped"
+        $refresh = Invoke-GatewayJson -Method POST -Path "/_llmgateway/accounts/$AccountId/models/refresh"
+        Assert-True ([int]$refresh.discovered_models -gt 0) "model discovery returned zero models"
+    }
 
     $payload = Invoke-GatewayJson -Method GET -Path "/_llmgateway/accounts/$AccountId/models"
     $models = @($payload.data | Where-Object {
@@ -233,6 +238,7 @@ try {
     Write-Host "Account: $AccountId"
     Write-Host "Model A: $($selectedA.id) -> discovered:${AccountId}:$($selectedA.external_id)"
     Write-Host "Model B: $($selectedB.id) -> discovered:${AccountId}:$($selectedB.external_id)"
+    Write-Host "Catalog mode: $($(if ($SkipRefresh) { 'persisted-after-restart' } else { 'live-refresh' }))"
     Write-Host "Chromium running: false"
 } finally {
     Cleanup
