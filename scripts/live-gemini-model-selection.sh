@@ -110,6 +110,17 @@ MODEL_B_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["b
 MODEL_B_EXTERNAL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["b"]["external_id"])' "$TMP_DIR/selected.json")"
 
 api GET "/_llmgateway/browser-accounts/$ACCOUNT_ID/runtime" "$TMP_DIR/runtime.json"
+python3 - "$TMP_DIR/runtime.json" <<'PY'
+import json,sys
+runtime=json.load(open(sys.argv[1],encoding="utf-8"))
+catalog=runtime.get("model_catalog") or {}
+if int(catalog.get("count") or 0) < 2:
+    raise SystemExit(f"MODEL ACCEPTANCE FAILED: runtime model catalog is incomplete: {catalog}")
+if catalog.get("refresh_required"):
+    raise SystemExit(f"MODEL ACCEPTANCE FAILED: runtime model catalog still requires refresh: {catalog}")
+if not catalog.get("discovered_at"):
+    raise SystemExit(f"MODEL ACCEPTANCE FAILED: runtime model catalog has no discovery timestamp: {catalog}")
+PY
 SESSION_ID="$(python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); print(x.get("session_id",""))' "$TMP_DIR/runtime.json")"
 BROWSER_RUNNING="$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("browser_running") else "0")' "$TMP_DIR/runtime.json")"
 if [[ "$BROWSER_RUNNING" == "1" ]]; then
@@ -146,11 +157,12 @@ PY
   expected="discovered:$ACCOUNT_ID:$external"
   [[ "$actual" == "$expected" ]] || { echo "MODEL ACCEPTANCE FAILED: route $actual != $expected" >&2; exit 1; }
   api GET "/_llmgateway/browser-accounts/$ACCOUNT_ID/runtime" "$TMP_DIR/$prefix.runtime.json"
-  python3 - "$TMP_DIR/$prefix.json" "$TMP_DIR/$prefix.runtime.json" "$model" <<'PY'
+  python3 - "$TMP_DIR/$prefix.json" "$TMP_DIR/$prefix.runtime.json" "$model" "$external" <<'PY'
 import json,sys
 body=json.load(open(sys.argv[1],encoding="utf-8"))
 runtime=json.load(open(sys.argv[2],encoding="utf-8"))
 model=sys.argv[3]
+external=sys.argv[4]
 text=((body.get("choices") or [{}])[0].get("message") or {}).get("content")
 if not str(text or "").strip():
     raise SystemExit(f"MODEL ACCEPTANCE FAILED: {model} returned empty text")
@@ -159,6 +171,8 @@ if runtime.get("browser_running"):
     raise SystemExit(f"MODEL ACCEPTANCE FAILED: Chromium running after {model}")
 if last.get("transport") != "direct-http" or last.get("browser_fallback") or last.get("adapter_id") != "gemini-web-http":
     raise SystemExit(f"MODEL ACCEPTANCE FAILED: unexpected execution telemetry {last}")
+if last.get("model") != external:
+    raise SystemExit(f"MODEL ACCEPTANCE FAILED: selected {model} executed as {last.get('model')!r}, expected {external!r}")
 PY
 }
 
