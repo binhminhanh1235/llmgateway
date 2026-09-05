@@ -1182,7 +1182,7 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
     }
 
     fn browserless_capabilities(&self) -> BrowserlessCapabilities {
-        BrowserlessCapabilities::preferred(BrowserTransportMode::Auto, true, true, true)
+        BrowserlessCapabilities::preferred(BrowserTransportMode::HttpPreferred, true, true, true)
     }
 
     fn supports_model_discovery(&self) -> bool {
