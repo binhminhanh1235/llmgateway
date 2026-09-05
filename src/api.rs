@@ -462,7 +462,7 @@ pub async fn anthropic_messages(
     }
 }
 
-fn vision_error(error: VisionError) -> Response<Body> {
+pub(crate) fn vision_error(error: VisionError) -> Response<Body> {
     match error {
         VisionError::Artifact(crate::artifact_store::ArtifactError::NotFound(_)) => json_error(
             StatusCode::NOT_FOUND,
