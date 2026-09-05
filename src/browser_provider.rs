@@ -701,6 +701,32 @@ impl BrowserProviderRegistry {
         false
     }
 
+    async fn mark_direct_state_unsynced(
+        &self,
+        request: &BrowserAdapterRequest,
+    ) -> Result<(), BrowserProviderError> {
+        let Some(thread_id) = request.thread_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(store) = conversation_runtime::get() else {
+            return Ok(());
+        };
+        store
+            .upsert_provider_conversation_state(
+                thread_id,
+                &request.provider.id,
+                &request.account.id,
+                &json!({
+                    "transport": "browser-cdp",
+                    "needs_resync": true
+                }),
+            )
+            .await
+            .map_err(|error| BrowserProviderError::Transport(format!(
+                "failed to mark provider state unsynced before browser fallback: {error}"
+            )))
+    }
+
     pub async fn mark_degraded(
         &self,
         account_id: &str,
@@ -870,18 +896,25 @@ impl BrowserProviderRegistry {
 
             if safe_browser_fallback {
                 used_adapter = browser_adapter.clone();
-                let fallback_result = browser_adapter.execute_chat(adapter_request).await;
-                if browser_was_live {
-                    fallback_result
+                if let Err(error) = self.mark_direct_state_unsynced(&adapter_request).await {
+                    if !browser_was_live {
+                        stop_browser_runtime_soon(binding.session.clone());
+                    }
+                    Err(error)
                 } else {
-                    match fallback_result {
-                        Ok(response) => wrap_response_with_browser_stop(
-                            response,
-                            binding.session.clone(),
-                        ),
-                        Err(error) => {
-                            stop_browser_runtime_soon(binding.session.clone());
-                            Err(error)
+                    let fallback_result = browser_adapter.execute_chat(adapter_request).await;
+                    if browser_was_live {
+                        fallback_result
+                    } else {
+                        match fallback_result {
+                            Ok(response) => wrap_response_with_browser_stop(
+                                response,
+                                binding.session.clone(),
+                            ),
+                            Err(error) => {
+                                stop_browser_runtime_soon(binding.session.clone());
+                                Err(error)
+                            }
                         }
                     }
                 }
