@@ -438,7 +438,7 @@ pub fn apply_browser_account_setup(
         let account = append_new_by_id(accounts, &account_id)?;
         account["provider"] = value(preset.provider_id);
         account["enabled"] = value(true);
-        account["discover_models"] = value(false);
+        account["discover_models"] = value(preset.id == "gemini");
 
         let routes = ensure_aot(doc.as_table_mut(), "routes")?;
         let route = append_new_by_id(routes, &route_id)?;
@@ -784,6 +784,7 @@ routes = ["api"]
         assert_eq!(provider.kind, "browser-chatgpt");
         let account = parsed.account("chatgpt-a").unwrap();
         assert_eq!(account.provider, "chatgpt-web");
+        assert!(!account.discover_models);
         let route = parsed.route("chatgpt-a-route").unwrap();
         assert_eq!(route.model, "chatgpt-web-default");
         assert_eq!(route.priority, 4);
@@ -832,6 +833,7 @@ routes = ["api"]
         assert_eq!(provider.kind, "browser-gemini");
         let account = parsed.account("gemini-a").unwrap();
         assert_eq!(account.provider, "gemini-web");
+        assert!(account.discover_models);
         let route = parsed.route("gemini-a-route").unwrap();
         assert_eq!(route.model, "gemini-web-pro");
         assert_eq!(route.priority, 5);
