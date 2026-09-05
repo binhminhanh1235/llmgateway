@@ -4,7 +4,7 @@ use crate::{
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
         BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
-        BROWSER_ADAPTER_CONTRACT_VERSION,
+        BrowserlessCapabilities, BrowserTransportMode, BROWSER_ADAPTER_CONTRACT_VERSION,
     },
     browser_provider_runtime, conversation_runtime,
 };
@@ -833,6 +833,15 @@ impl BrowserProviderAdapter for QwenWebHttpAdapter {
 
     fn adapter_id(&self) -> &'static str {
         "qwen-web-http"
+    }
+
+    fn browserless_capabilities(&self) -> BrowserlessCapabilities {
+        BrowserlessCapabilities::preferred(
+            BrowserTransportMode::HttpPreferred,
+            false,
+            true,
+            true,
+        )
     }
 
     fn supports_model_discovery(&self) -> bool {
