@@ -116,10 +116,10 @@ pub async fn browser_account_runtime_diagnostics(
     };
     let browser_running = browser.as_ref().is_some_and(|status| status.running);
     let direct_ready = adapter.status == "ready"
-        && matches!(
-            adapter.adapter_id.as_deref(),
-            Some("gemini-web-http" | "chatgpt-web-http")
-        );
+        && adapter
+            .adapter_id
+            .as_deref()
+            .is_some_and(|adapter_id| registry.is_direct_http_adapter_id(adapter_id));
     let effective_transport = if direct_ready {
         "direct-http"
     } else if browser_running {
@@ -241,7 +241,9 @@ pub async fn browser_thread_affinity_diagnostics(
             "parent_message_id_present": false,
             "metadata_present": false,
             "response_id_present": false,
-            "candidate_id_present": false
+            "candidate_id_present": false,
+            "model_external_id_present": false,
+            "native_chain": Value::Null
         }));
 
     json_response(
@@ -260,14 +262,32 @@ pub async fn browser_thread_affinity_diagnostics(
 
 fn summarize_provider_state(state: &Value) -> Value {
     let transport = state.get("transport").and_then(Value::as_str);
-    let qwen_native = (transport == Some("qwen-http")).then(|| {
-        json!({
-            "chat_id": state.get("chat_id").and_then(Value::as_str),
-            "parent_id": state.get("parent_id").and_then(Value::as_str),
-            "request_parent_id": state.get("request_parent_id").and_then(Value::as_str),
-            "response_id": state.get("response_id").and_then(Value::as_str)
-        })
-    });
+    let conversation_id =
+        first_non_empty_string(state, &["conversation_id", "chat_id", "chat_session_id"]);
+    let parent_id = first_non_empty_string(
+        state,
+        &[
+            "parent_message_id",
+            "parent_id",
+            "next_parent_id",
+            "response_message_id",
+        ],
+    );
+    let request_parent_id = first_non_empty_string(state, &["request_parent_id"]);
+    let response_id = first_non_empty_string(state, &["response_id", "response_message_id"]);
+    let candidate_id = first_non_empty_string(state, &["candidate_id"]);
+    let model_external_id = first_non_empty_string(state, &["model_external_id"]);
+    let native_chain_present = [
+        conversation_id,
+        parent_id,
+        request_parent_id,
+        response_id,
+        candidate_id,
+        model_external_id,
+    ]
+    .iter()
+    .any(Option::is_some);
+
     json!({
         "present": true,
         "transport": transport,
@@ -275,19 +295,30 @@ fn summarize_provider_state(state: &Value) -> Value {
             .get("needs_resync")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        "conversation_id_present": non_empty_string(state.get("conversation_id")),
-        "parent_message_id_present": non_empty_string(state.get("parent_message_id")),
+        "conversation_id_present": conversation_id.is_some(),
+        "parent_message_id_present": parent_id.is_some(),
         "metadata_present": state.get("metadata").is_some_and(|value| !value.is_null()),
-        "response_id_present": non_empty_string(state.get("response_id")),
-        "candidate_id_present": non_empty_string(state.get("candidate_id")),
-        "qwen_native": qwen_native
+        "response_id_present": response_id.is_some(),
+        "candidate_id_present": candidate_id.is_some(),
+        "model_external_id_present": model_external_id.is_some(),
+        "native_chain": native_chain_present.then(|| json!({
+            "conversation_id": conversation_id,
+            "parent_id": parent_id,
+            "request_parent_id": request_parent_id,
+            "response_id": response_id,
+            "candidate_id": candidate_id,
+            "model_external_id": model_external_id
+        }))
     })
 }
 
-fn non_empty_string(value: Option<&Value>) -> bool {
-    value
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+fn first_non_empty_string<'a>(state: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        state
+            .get(*key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    })
 }
 
 fn unavailable(message: &str) -> Response<Body> {
@@ -303,7 +334,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn qwen_state_summary_exposes_only_native_chain_ids() {
+    fn qwen_state_summary_uses_generic_native_chain() {
         let state = json!({
             "transport": "qwen-http",
             "chat_id": "chat-1",
@@ -314,13 +345,39 @@ mod tests {
             "metadata": {"secret": "private"}
         });
         let summary = summarize_provider_state(&state);
-        assert_eq!(summary["qwen_native"]["chat_id"], "chat-1");
-        assert_eq!(summary["qwen_native"]["parent_id"], "parent-1");
-        assert_eq!(summary["qwen_native"]["request_parent_id"], "response-0");
-        assert_eq!(summary["qwen_native"]["response_id"], "response-1");
+        assert_eq!(summary["native_chain"]["conversation_id"], "chat-1");
+        assert_eq!(summary["native_chain"]["parent_id"], "parent-1");
+        assert_eq!(summary["native_chain"]["request_parent_id"], "response-0");
+        assert_eq!(summary["native_chain"]["response_id"], "response-1");
+        assert!(summary.get("qwen_native").is_none());
         let rendered = summary.to_string();
         assert!(!rendered.contains("secret-token"));
         assert!(!rendered.contains("private"));
+    }
+
+    #[test]
+    fn deepseek_state_summary_uses_same_generic_native_chain() {
+        let state = json!({
+            "transport": "deepseek-http",
+            "chat_session_id": "session-1",
+            "conversation_id": "session-1",
+            "request_parent_id": "message-0",
+            "response_message_id": "message-1",
+            "response_id": "message-1",
+            "next_parent_id": "message-1",
+            "model_external_id": "deepseek-web-reasoning",
+            "access_token": "secret-token"
+        });
+        let summary = summarize_provider_state(&state);
+        assert_eq!(summary["native_chain"]["conversation_id"], "session-1");
+        assert_eq!(summary["native_chain"]["parent_id"], "message-1");
+        assert_eq!(summary["native_chain"]["request_parent_id"], "message-0");
+        assert_eq!(summary["native_chain"]["response_id"], "message-1");
+        assert_eq!(
+            summary["native_chain"]["model_external_id"],
+            "deepseek-web-reasoning"
+        );
+        assert!(!summary.to_string().contains("secret-token"));
     }
 
     #[test]
