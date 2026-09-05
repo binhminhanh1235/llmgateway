@@ -161,6 +161,25 @@ done
 
 AUTH=(-H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 
+ERROR_BODY=/tmp/llmgateway-chromium-missing.json
+for spec in \
+  "GET /_llmgateway/browser-sessions/nonexistent-session/driver/status" \
+  "POST /_llmgateway/browser-sessions/nonexistent-session/driver/launch" \
+  "POST /_llmgateway/browser-sessions/nonexistent-session/driver/verify" \
+  "POST /_llmgateway/browser-sessions/nonexistent-session/driver/stop"; do
+  method="${spec%% *}"
+  path="${spec#* }"
+  status=$(curl -sS -o "$ERROR_BODY" -w '%{http_code}' -X "$method" \
+    "http://127.0.0.1:7331${path}" "${AUTH[@]}")
+  test "$status" = "404"
+  python3 - "$ERROR_BODY" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    payload=json.load(f)
+assert payload["error"]["type"] == "not_found_error", payload
+PY
+done
+
 # Browser Accounts UI must be bundled into the Rust binary and wired to the real driver endpoints.
 UI_HTML=$(curl -fsS http://127.0.0.1:7331/)
 BROWSER_JS=$(curl -fsS http://127.0.0.1:7331/ui/browser-control.js)
