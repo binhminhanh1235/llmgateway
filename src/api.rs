@@ -513,6 +513,11 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
 
 fn catalog_error(error: CatalogError) -> Response<Body> {
     match error {
+        CatalogError::AccountNotFound(account_id) => json_error(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            &format!("unknown account '{account_id}'"),
+        ),
         CatalogError::InvalidConfig(message) => {
             json_error(StatusCode::BAD_REQUEST, "catalog_error", &message)
         }
