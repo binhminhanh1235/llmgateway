@@ -345,22 +345,9 @@ impl AppConfig {
     }
 
     fn normalize(&mut self) {
-        let browser_provider_kinds = self
-            .providers
-            .iter()
-            .filter(|provider| provider.is_browser())
-            .map(|provider| (provider.id.clone(), provider.kind.clone()))
-            .collect::<HashMap<_, _>>();
-        for account in &mut self.accounts {
-            if let Some(kind) = browser_provider_kinds.get(&account.provider) {
-                // Gemini and Qwen HTTP-preferred accounts can discover their web model
-                // catalogs directly from the authenticated session. Registry transport-mode
-                // gating still keeps Qwen discovery disabled while its binding remains Auto.
-                if !matches!(kind.as_str(), "browser-gemini" | "browser-qwen") {
-                    account.discover_models = false;
-                }
-            }
-        }
+        // Browser model discovery is capability-gated by BrowserProviderRegistry.
+        // Preserve the account preference here so new browser adapters do not need
+        // provider-name allowlists in shared config normalization.
     }
 
     pub fn gateway_api_key(&self) -> Result<String, ConfigError> {
@@ -606,12 +593,8 @@ impl AppConfig {
                         provider.id, provider.kind
                     )));
                 }
-                "openai-compatible"
-                | "browser-http"
-                | "browser-cdp"
-                | "browser-gemini"
-                | "browser-chatgpt"
-                | "browser-qwen" => {}
+                "openai-compatible" => {}
+                kind if kind.starts_with("browser-") => {}
                 other => {
                     return Err(ConfigError::Invalid(format!(
                         "provider '{}' uses unsupported kind '{}'",
@@ -818,7 +801,12 @@ enabled = true"#,
 
     #[test]
     fn built_in_browser_provider_kinds_are_valid_without_base_url_or_credentials() {
-        for kind in ["browser-gemini", "browser-chatgpt", "browser-qwen"] {
+        for kind in [
+            "browser-gemini",
+            "browser-chatgpt",
+            "browser-qwen",
+            "browser-deepseek",
+        ] {
             let providers = format!(
                 "[[providers]]\nid = \"browser\"\nkind = \"{kind}\""
             );
@@ -837,16 +825,14 @@ enabled = true"#,
             assert!(provider.is_browser());
             assert_eq!(provider.transport(), "browser");
             assert!(!account.credential_required(provider));
-            if matches!(kind, "browser-gemini" | "browser-qwen") {
-                assert!(account.discover_models);
-            } else {
-                assert!(!account.discover_models);
-            }
+            // The raw account flag is a user preference. Effective browser discovery
+            // is resolved by BrowserProviderRegistry adapter capabilities at runtime.
+            assert!(account.discover_models);
         }
     }
 
     #[test]
-    fn browser_account_does_not_require_dummy_credentials_or_discovery_flag() {
+    fn generic_browser_account_does_not_require_dummy_credentials() {
         let raw = minimal_config(
             r#"[[providers]]
 id = "browser"
@@ -862,8 +848,8 @@ enabled = true"#,
         let account = config.account("account").unwrap();
         let provider = config.provider("browser").unwrap();
         assert!(account.api_key_env.is_empty());
-        assert!(!account.discover_models);
-        assert!(!(account.discover_models && !provider.is_browser()));
+        assert!(account.discover_models);
+        assert!(provider.is_browser());
         assert!(!account.credential_required(provider));
         assert_eq!(provider.transport(), "browser");
     }
@@ -893,7 +879,7 @@ enabled = true"#,
     }
 
     #[test]
-    fn browser_account_discovery_normalization_is_provider_aware() {
+    fn browser_account_discovery_preference_is_preserved_for_runtime_capability_gate() {
         let raw = minimal_config(
             r#"[[providers]]
 id = "browser"
@@ -907,7 +893,7 @@ discover_models = true"#,
         let mut config: AppConfig = toml::from_str(&raw).unwrap();
         config.normalize();
         config.validate().unwrap();
-        assert!(!config.account("account").unwrap().discover_models);
+        assert!(config.account("account").unwrap().discover_models);
 
         let raw = minimal_config(
             r#"[[providers]]
