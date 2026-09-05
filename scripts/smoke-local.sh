@@ -145,6 +145,13 @@ assert payload["error"]["message"].startswith("Failed to parse request JSON:"), 
 PY
 
 STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
+  http://127.0.0.1:7331/v1/chat/completions \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llmgateway-auto","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}' )
+assert_json_error 400 unsupported_input_modality "$STATUS"
+
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/nonexistent-session/attention \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -153,8 +160,33 @@ assert_json_error 422 invalid_request_error "$STATUS"
 
 curl -fsS http://127.0.0.1:7331/ | grep -q "llmgateway"
 curl -fsS http://127.0.0.1:7331/ui/app.js | grep -q "llmgateway.threads.v1"
-curl -fsS http://127.0.0.1:7331/v1/models \
-  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" | grep -q "llmgateway-auto"
+MODELS_JSON=$(curl -fsS http://127.0.0.1:7331/v1/models \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$MODELS_JSON" | grep -q "llmgateway-auto"
+printf '%s' "$MODELS_JSON" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+physical=next(item for item in x["data"] if item["id"]=="fake/fake-model")
+legacy=physical["llmgateway"]["capabilities"]
+structured=physical["llmgateway"]["multimodal_capabilities"]
+assert "chat" in legacy, physical
+assert structured["input_modalities"] == ["text"], structured
+assert structured["output_modalities"] == ["text"], structured
+'
+
+CAPABILITIES_JSON=$(curl -fsS http://127.0.0.1:7331/v1/capabilities \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$CAPABILITIES_JSON" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["object"] == "llmgateway.capabilities", x
+assert x["schema_version"] == 1, x
+assert x["canonical_modalities"]["input"] == ["text","image","file","audio"], x
+assert x["canonical_modalities"]["output"] == ["text","image","audio","file"], x
+assert x["gateway_execution"]["input_modalities"] == ["text"], x
+assert x["live_attachments"] is False, x
+assert any(a["id"]=="fake" and a["transport"]=="api" for a in x["adapters"]), x
+'
 
 curl -fsS -X POST http://127.0.0.1:7331/v1/chat/completions \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \

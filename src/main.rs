@@ -39,6 +39,8 @@ mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
 mod memory_provenance_runtime;
+mod multimodal;
+mod multimodal_compat;
 mod quota_usage;
 mod quota_usage_runtime;
 mod response_state;
@@ -54,7 +56,7 @@ use account_intelligence_api::account_intelligence;
 use admin_api::set_account_model;
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
-    anthropic_messages, health, models, openai_chat, openai_responses, AppState,
+    anthropic_messages, capabilities, health, models, openai_chat, openai_responses, AppState,
 };
 use axum::{
     routing::{get, post},
@@ -290,6 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/responses", post(openai_responses))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/models", get(models))
+        .route("/v1/capabilities", get(capabilities))
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/{thread_id}", get(get_thread).delete(delete_thread))
         .route("/v1/threads/{thread_id}/messages", post(send_thread_message))

@@ -1,9 +1,14 @@
 use crate::{
-    catalog::{CatalogError, ModelCatalog},
+    catalog::{canonical_model_id, CatalogError, ModelCatalog},
     compat::{anthropic, responses},
     client_policy::{ClientAccess, ClientPolicyError, ClientPolicyStore},
     conversation::{ConversationError, ConversationStore},
     gateway::{Gateway, GatewayError},
+    multimodal::{
+        canonical_input_modalities, canonical_output_modalities, AdapterCapabilities,
+        ModelCapabilities, MultimodalError, MULTIMODAL_SCHEMA_VERSION,
+    },
+    multimodal_compat,
     quota_usage_runtime,
     response_state::{response_to_openai_assistant, responses_stream_with_capture},
 };
@@ -20,7 +25,10 @@ use axum::{
 };
 use futures_util::TryStreamExt;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use tokio::sync::oneshot;
 
 #[derive(Clone)]
@@ -63,6 +71,11 @@ pub async fn openai_chat(
             .unwrap_or(&config.api.default_model)
             .to_string()
     };
+    let normalized = match multimodal_compat::normalize_chat_request(&body, &requested_model) {
+        Ok(normalized) => normalized,
+        Err(error) => return multimodal_error(error),
+    };
+    body = normalized.into_current_execution();
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
         return client_policy_error(error);
@@ -149,12 +162,12 @@ pub async fn openai_responses(
         object.remove("previous_response_id");
     }
 
-    let (requested_model, mut openai_body) = match responses::to_openai_request(&normalized_body) {
-        Ok(value) => value,
-        Err(message) => {
-            return json_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message)
-        }
+    let normalized = match multimodal_compat::normalize_responses_request(&normalized_body) {
+        Ok(normalized) => normalized,
+        Err(error) => return multimodal_error(error),
     };
+    let requested_model = normalized.canonical.model.clone();
+    let mut openai_body = normalized.into_current_execution();
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
         return client_policy_error(error);
@@ -329,12 +342,12 @@ pub async fn anthropic_messages(
         Ok(access) => access,
         Err(response) => return response,
     };
-    let (requested_model, mut openai_body) = match anthropic::to_openai_request(&body) {
-        Ok(value) => value,
-        Err(message) => {
-            return json_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message)
-        }
+    let normalized = match multimodal_compat::normalize_anthropic_request(&body) {
+        Ok(normalized) => normalized,
+        Err(error) => return multimodal_error(error),
     };
+    let requested_model = normalized.canonical.model.clone();
+    let mut openai_body = normalized.into_current_execution();
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
         return client_policy_error(error);
@@ -426,7 +439,10 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 "id":id,
                 "object":"model",
                 "owned_by":"llmgateway",
-                "llmgateway":{"kind":"virtual"}
+                "llmgateway":{
+                    "kind":"virtual",
+                    "multimodal_capabilities":ModelCapabilities::foundation_text_execution()
+                }
             }),
         );
     }
@@ -445,6 +461,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 account.enabled && matches!(account.availability.as_str(), "available" | "unknown")
             })
             .count();
+        let multimodal_capabilities = ModelCapabilities::from_legacy_tags(&model.capabilities);
         data.insert(
             model.id.clone(),
             json!({
@@ -457,6 +474,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                     "display_name":model.display_name,
                     "context_window":model.context_window,
                     "capabilities":model.capabilities,
+                    "multimodal_capabilities":multimodal_capabilities,
                     "available_accounts":available_accounts
                 }
             }),
@@ -476,7 +494,13 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 "id":route.id,
                 "object":"model",
                 "owned_by":"llmgateway-route",
-                "llmgateway":{"kind":"route","upstream_model":route.model,"account":route.account}
+                "llmgateway":{
+                    "kind":"route",
+                    "upstream_model":route.model,
+                    "account":route.account,
+                    "capabilities":route.capabilities,
+                    "multimodal_capabilities":ModelCapabilities::from_legacy_tags(&route.capabilities)
+                }
             })
         });
     }
@@ -484,6 +508,97 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     json_response(
         StatusCode::OK,
         json!({"object":"list","data":data.into_values().collect::<Vec<_>>() }),
+        None,
+    )
+}
+
+
+pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> Response<Body> {
+    let access = match authorize_client(&headers, &state) {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
+
+    let config = state.gateway.config_snapshot();
+    let physical = match state.catalog.selectable_models().await {
+        Ok(models) => models,
+        Err(error) => return catalog_error(error),
+    };
+    let models = physical
+        .into_iter()
+        .filter(|model| {
+            !access
+                .policy()
+                .is_some_and(|policy| !policy.model_allowed(&model.id, &model.id))
+        })
+        .map(|model| {
+            let structured = ModelCapabilities::from_legacy_tags(&model.capabilities);
+            json!({
+                "id":model.id,
+                "legacy_capabilities":model.capabilities,
+                "capabilities":structured
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut tags_by_adapter: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut models_by_adapter: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for route in config.routes.iter().filter(|route| route.enabled) {
+        if access.policy().is_some_and(|policy| {
+            !policy.route_allowed(&route.id)
+                || !policy.model_allowed(&route.id, &route.model)
+        }) {
+            continue;
+        }
+        let Some(account) = config.account(&route.account).filter(|account| account.enabled) else {
+            continue;
+        };
+        let Some(provider) = config.provider(&account.provider) else {
+            continue;
+        };
+        tags_by_adapter
+            .entry(provider.id.clone())
+            .or_default()
+            .extend(route.capabilities.iter().cloned());
+        models_by_adapter
+            .entry(provider.id.clone())
+            .or_default()
+            .insert(canonical_model_id(&provider.id, &route.model));
+    }
+
+    let adapters = config
+        .providers
+        .iter()
+        .filter_map(|provider| {
+            let models = models_by_adapter.remove(&provider.id)?;
+            let tags = tags_by_adapter
+                .remove(&provider.id)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>();
+            Some(AdapterCapabilities {
+                id: provider.id.clone(),
+                transport: provider.transport().to_string(),
+                models: models.into_iter().collect(),
+                capabilities: ModelCapabilities::from_legacy_tags(&tags),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json_response(
+        StatusCode::OK,
+        json!({
+            "object":"llmgateway.capabilities",
+            "schema_version":MULTIMODAL_SCHEMA_VERSION,
+            "canonical_modalities":{
+                "input":canonical_input_modalities(),
+                "output":canonical_output_modalities()
+            },
+            "gateway_execution":ModelCapabilities::foundation_text_execution(),
+            "live_attachments":false,
+            "models":models,
+            "adapters":adapters
+        }),
         None,
     )
 }
@@ -663,7 +778,12 @@ fn presented_api_key(headers: &HeaderMap) -> Option<&str> {
         .or_else(|| headers.get("x-api-key").and_then(|value| value.to_str().ok()))
 }
 
-pub(crate) fn client_policy_error(error: ClientPolicyError) -> Response<Body> {
+pub(crate) 
+fn multimodal_error(error: MultimodalError) -> Response<Body> {
+    json_error(StatusCode::BAD_REQUEST, error.code(), &error.to_string())
+}
+
+fn client_policy_error(error: ClientPolicyError) -> Response<Body> {
     match error {
         ClientPolicyError::Unauthorized => json_error(
             StatusCode::UNAUTHORIZED,
