@@ -1,7 +1,7 @@
 use crate::{
     browser_auth_runtime, browser_session_runtime, chromium_driver_runtime, conversation_runtime,
     chatgpt_web_transport::ChatGptWebHttpAdapter,
-    config::{AccountConfig, ProviderConfig, RouteConfig},
+    config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
     deepseek_web_transport::DeepSeekWebHttpAdapter,
     gemini_web_transport::GeminiWebHttpAdapter,
     qwen_web_transport::QwenWebHttpAdapter,
@@ -691,6 +691,51 @@ impl BrowserProviderRegistry {
 
     pub async fn clear_last_transport_execution(&self, account_id: &str) {
         self.last_transport.write().await.remove(account_id);
+    }
+
+    pub async fn browserless_idle_session_ids(
+        &self,
+        app_config: &AppConfig,
+    ) -> BTreeSet<String> {
+        let provider_config = self.config_snapshot();
+        let mut session_readiness = BTreeMap::<String, bool>::new();
+
+        for account in app_config.accounts.iter().filter(|account| account.enabled) {
+            let Some(binding) = provider_config.bindings.get(&account.id) else {
+                continue;
+            };
+            let session_id = binding.session.clone();
+            let direct_candidate = app_config
+                .provider(&account.provider)
+                .filter(|provider| provider.is_browser())
+                .and_then(|provider| {
+                    self.direct_adapter(&provider.kind, binding)
+                        .map(|adapter| (provider, adapter))
+                });
+
+            let direct_ready = if let Some((provider, adapter)) = direct_candidate {
+                if !self.auth_material_available(&session_id) {
+                    false
+                } else {
+                    let diagnostics = self.adapter_diagnostics(&provider.kind, &account.id).await;
+                    diagnostics.status == "ready"
+                        && diagnostics.adapter_id.as_deref() == Some(adapter.adapter_id())
+                        && adapter.browserless_capabilities().supported
+                }
+            } else {
+                false
+            };
+
+            session_readiness
+                .entry(session_id)
+                .and_modify(|ready| *ready &= direct_ready)
+                .or_insert(direct_ready);
+        }
+
+        session_readiness
+            .into_iter()
+            .filter_map(|(session_id, ready)| ready.then_some(session_id))
+            .collect()
     }
 
     pub fn supports(&self, kind: &str) -> bool {
