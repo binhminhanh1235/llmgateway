@@ -164,7 +164,7 @@ qwen_state() {
   python3 - "$1" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1],encoding="utf-8"))
-print(json.dumps(((x.get("state") or {}).get("qwen_native") or {}),sort_keys=True,separators=(",",":")))
+print(json.dumps(((x.get("state") or {}).get("native_chain") or {}),sort_keys=True,separators=(",",":")))
 PY
 }
 
@@ -269,17 +269,17 @@ affinity "$THREAD_A" "$TMP_DIR/affinity-a1.json"
 python3 - "$TMP_DIR/affinity-a1.json" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1],encoding="utf-8"))
-q=((x.get("state") or {}).get("qwen_native") or {})
+q=((x.get("state") or {}).get("native_chain") or {})
 if (x.get("state") or {}).get("transport") != "qwen-http":
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: native state transport mismatch: {x.get('state')}")
-if not q.get("chat_id") or not q.get("response_id"):
+if not q.get("conversation_id") or not q.get("response_id"):
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: A1 missing chat/response ids: {q}")
 if q.get("request_parent_id") not in (None,""):
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: first turn unexpectedly had request parent: {q}")
 PY
-CHAT_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"]["qwen_native"]["chat_id"])' "$TMP_DIR/affinity-a1.json")"
-PARENT_A1="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"]["qwen_native"].get("parent_id") or "")' "$TMP_DIR/affinity-a1.json")"
-RESPONSE_A1="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"]["qwen_native"]["response_id"])' "$TMP_DIR/affinity-a1.json")"
+CHAT_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"]["native_chain"]["conversation_id"])' "$TMP_DIR/affinity-a1.json")"
+PARENT_A1="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"]["native_chain"].get("parent_id") or "")' "$TMP_DIR/affinity-a1.json")"
+RESPONSE_A1="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"]["native_chain"]["response_id"])' "$TMP_DIR/affinity-a1.json")"
 
 step "Thread A turn 2 reuses chat_id and chains response_id"
 send_turn "$THREAD_A" "$MODEL_A_ID" "$MODEL_A_EXTERNAL" "Reply briefly with: qwen-a2" "a2"
@@ -287,9 +287,9 @@ affinity "$THREAD_A" "$TMP_DIR/affinity-a2.json"
 python3 - "$TMP_DIR/affinity-a2.json" "$CHAT_A" "$RESPONSE_A1" "$PARENT_A1" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1],encoding="utf-8"))
-q=((x.get("state") or {}).get("qwen_native") or {})
+q=((x.get("state") or {}).get("native_chain") or {})
 chat,response1,parent1=sys.argv[2:5]
-if q.get("chat_id") != chat:
+if q.get("conversation_id") != chat:
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: same thread changed chat_id: {q}")
 if q.get("request_parent_id") != response1:
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: A2 did not chain previous response_id: {q}")
@@ -298,7 +298,7 @@ if not q.get("response_id") or q.get("response_id") == response1:
 if parent1 and q.get("parent_id") == parent1:
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: upstream parent_id did not advance: {q}")
 PY
-RESPONSE_A2="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"]["qwen_native"]["response_id"])' "$TMP_DIR/affinity-a2.json")"
+RESPONSE_A2="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"]["native_chain"]["response_id"])' "$TMP_DIR/affinity-a2.json")"
 
 step "Thread B on model B is independent"
 create_thread "Qwen browserless B" "$MODEL_B_ID" "$TMP_DIR/thread-b.json"
@@ -307,8 +307,8 @@ send_turn "$THREAD_B" "$MODEL_B_ID" "$MODEL_B_EXTERNAL" "Reply briefly with: qwe
 affinity "$THREAD_B" "$TMP_DIR/affinity-b1.json"
 python3 - "$TMP_DIR/affinity-b1.json" "$CHAT_A" <<'PY'
 import json,sys
-q=((json.load(open(sys.argv[1],encoding="utf-8")).get("state") or {}).get("qwen_native") or {})
-if not q.get("chat_id") or q.get("chat_id") == sys.argv[2]:
+q=((json.load(open(sys.argv[1],encoding="utf-8")).get("state") or {}).get("native_chain") or {})
+if not q.get("conversation_id") or q.get("conversation_id") == sys.argv[2]:
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: Thread B is not independent: {q}")
 if not q.get("response_id"):
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: Thread B missing response_id: {q}")
@@ -355,8 +355,8 @@ sleep 0.3
 affinity "$THREAD_A" "$TMP_DIR/affinity-a3.json"
 python3 - "$TMP_DIR/affinity-a3.json" "$CHAT_A" "$RESPONSE_A2" <<'PY'
 import json,sys
-q=((json.load(open(sys.argv[1],encoding="utf-8")).get("state") or {}).get("qwen_native") or {})
-if q.get("chat_id") != sys.argv[2]:
+q=((json.load(open(sys.argv[1],encoding="utf-8")).get("state") or {}).get("native_chain") or {})
+if q.get("conversation_id") != sys.argv[2]:
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: streaming changed chat_id: {q}")
 if q.get("request_parent_id") != sys.argv[3]:
     raise SystemExit(f"QWEN ACCEPTANCE FAILED: streaming did not chain prior response_id: {q}")

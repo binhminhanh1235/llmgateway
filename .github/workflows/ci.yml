@@ -27,6 +27,7 @@ jobs:
       - run: node --check adapters/gemini-web.js
       - run: node --check adapters/chatgpt-web.js
       - run: node --check adapters/qwen-web.js
+      - run: node --check adapters/deepseek-web.js
       - run: node scripts/test-browser-adapter-fixtures.mjs
       - run: bash -n scripts/live-browserless-acceptance.sh
       - run: bash -n scripts/live-gemini-model-selection.sh

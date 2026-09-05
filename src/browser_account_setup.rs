@@ -7,6 +7,7 @@ use crate::{
     browser_session::BrowserConfig,
     browser_session_runtime,
     chromium_driver::ChromiumConfig,
+    chromium_driver_api,
     chromium_driver_runtime,
     config::AppConfig,
 };
@@ -39,6 +40,9 @@ pub struct BrowserAccountProviderPreset {
     pub ready_url_prefix: &'static str,
     pub default_model_id: &'static str,
     pub default_capabilities: &'static [&'static str],
+    pub discover_models: bool,
+    pub initial_transport_mode: Option<BrowserTransportMode>,
+    pub extra_virtual_models: &'static [&'static str],
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,6 +321,13 @@ pub async fn set_account_transport_policy(
         );
     }
     registry.clear_last_transport_execution(&account_id).await;
+    if policy == BrowserTransportPolicy::BrowserlessPreferred {
+        if let Some(session_id) = registry.session_id_for_account(&account_id) {
+            let _ =
+                chromium_driver_api::release_session_browser_if_direct_ready(&state, &session_id)
+                    .await;
+        }
+    }
     match registry
         .account_transport_state(&provider_kind, &account_id)
         .await
@@ -526,7 +537,7 @@ pub fn apply_browser_account_setup(
     let current = AppConfig::parse(&raw)?;
     let preset = provider_preset(request.provider.trim()).ok_or_else(|| {
         BrowserAccountSetupError::Invalid(format!(
-            "unsupported browser provider '{}'; choose chatgpt, gemini, or qwen",
+            "unsupported browser provider '{}'",
             request.provider
         ))
     })?;
@@ -605,8 +616,8 @@ pub fn apply_browser_account_setup(
         let bindings = ensure_table(browser, "bindings")?;
         let binding = ensure_table(bindings, &account_id)?;
         binding["session"] = value(&session_id);
-        if matches!(preset.id, "gemini" | "chatgpt") {
-            binding["transport_mode"] = value("http-preferred");
+        if let Some(mode) = preset.initial_transport_mode {
+            binding["transport_mode"] = value(mode.as_str());
         }
         binding["adapter_contract_version"] = value(1);
         binding["models"] = Item::Value(Value::Array(string_array([model_id.as_str()])));
@@ -665,7 +676,7 @@ pub fn apply_browser_account_setup(
         let account = append_new_by_id(accounts, &account_id)?;
         account["provider"] = value(preset.provider_id);
         account["enabled"] = value(true);
-        account["discover_models"] = value(matches!(preset.id, "gemini" | "chatgpt"));
+        account["discover_models"] = value(preset.discover_models);
 
         let routes = ensure_aot(doc.as_table_mut(), "routes")?;
         let route = append_new_by_id(routes, &route_id)?;
@@ -683,15 +694,11 @@ pub fn apply_browser_account_setup(
         let default_model = ensure_table(virtual_models, &current.api.default_model)?;
         append_unique_string(default_model, "routes", &route_id)?;
 
-        if preset.id == "qwen" && virtual_models.contains_key("llmgateway-coding") {
-            let coding = ensure_table(virtual_models, "llmgateway-coding")?;
-            append_unique_string(coding, "routes", &route_id)?;
-        }
-        if matches!(preset.id, "gemini" | "chatgpt")
-            && virtual_models.contains_key("llmgateway-best")
-        {
-            let best = ensure_table(virtual_models, "llmgateway-best")?;
-            append_unique_string(best, "routes", &route_id)?;
+        for virtual_model_id in preset.extra_virtual_models {
+            if virtual_models.contains_key(*virtual_model_id) {
+                let virtual_model = ensure_table(virtual_models, virtual_model_id)?;
+                append_unique_string(virtual_model, "routes", &route_id)?;
+            }
         }
     }
 
@@ -722,6 +729,7 @@ pub fn provider_presets() -> Vec<BrowserAccountProviderPreset> {
     vec![
         provider_preset("chatgpt").expect("chatgpt preset"),
         provider_preset("gemini").expect("gemini preset"),
+        provider_preset("deepseek").expect("deepseek preset"),
         provider_preset("qwen").expect("qwen preset"),
     ]
 }
@@ -737,6 +745,9 @@ fn provider_preset(id: &str) -> Option<BrowserAccountProviderPreset> {
             ready_url_prefix: "https://chatgpt.com/",
             default_model_id: "chatgpt-web-default",
             default_capabilities: &["chat", "coding", "reasoning"],
+            discover_models: true,
+            initial_transport_mode: Some(BrowserTransportMode::HttpPreferred),
+            extra_virtual_models: &["llmgateway-best"],
         }),
         "gemini" | "browser-gemini" => Some(BrowserAccountProviderPreset {
             id: "gemini",
@@ -747,6 +758,22 @@ fn provider_preset(id: &str) -> Option<BrowserAccountProviderPreset> {
             ready_url_prefix: "https://gemini.google.com/app",
             default_model_id: "gemini-web-default",
             default_capabilities: &["chat", "reasoning", "long-context"],
+            discover_models: true,
+            initial_transport_mode: Some(BrowserTransportMode::HttpPreferred),
+            extra_virtual_models: &["llmgateway-best"],
+        }),
+        "deepseek" | "browser-deepseek" => Some(BrowserAccountProviderPreset {
+            id: "deepseek",
+            label: "DeepSeek Web",
+            provider_id: "deepseek-web",
+            provider_kind: "browser-deepseek",
+            login_url: "https://chat.deepseek.com/",
+            ready_url_prefix: "https://chat.deepseek.com/",
+            default_model_id: "deepseek-web-default",
+            default_capabilities: &["chat", "coding", "reasoning"],
+            discover_models: true,
+            initial_transport_mode: Some(BrowserTransportMode::HttpPreferred),
+            extra_virtual_models: &["llmgateway-coding", "llmgateway-best"],
         }),
         "qwen" | "browser-qwen" => Some(BrowserAccountProviderPreset {
             id: "qwen",
@@ -757,6 +784,9 @@ fn provider_preset(id: &str) -> Option<BrowserAccountProviderPreset> {
             ready_url_prefix: "https://chat.qwen.ai/",
             default_model_id: "qwen-web-default",
             default_capabilities: &["chat", "coding", "reasoning"],
+            discover_models: false,
+            initial_transport_mode: None,
+            extra_virtual_models: &["llmgateway-coding"],
         }),
         _ => None,
     }
@@ -1075,6 +1105,42 @@ routes = ["api"]
         assert!(raw.contains("[chromium.sessions.gemini-a]"));
         assert!(raw.contains("model_labels"));
 
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn creates_deepseek_browser_account_with_browserless_policy_capabilities() {
+        let path = temp_config();
+        apply_browser_account_setup(
+            &path,
+            CreateBrowserAccountRequest {
+                provider: "deepseek".into(),
+                account_id: Some("deepseek-a".into()),
+                label: None,
+                model_id: None,
+                model_label: None,
+                priority: None,
+            },
+        )
+        .unwrap();
+
+        let raw = fs::read_to_string(&path).unwrap();
+        let parsed = AppConfig::parse(&raw).unwrap();
+        assert_eq!(parsed.provider("deepseek-web").unwrap().kind, "browser-deepseek");
+        assert!(parsed.account("deepseek-a").unwrap().discover_models);
+        assert_eq!(parsed.route("deepseek-a-route").unwrap().model, "deepseek-web-default");
+        assert!(parsed.virtual_models["llmgateway-coding"]
+            .routes
+            .contains(&"deepseek-a-route".to_string()));
+        assert!(parsed.virtual_models["llmgateway-best"]
+            .routes
+            .contains(&"deepseek-a-route".to_string()));
+
+        let browser: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(
+            browser["browser"]["bindings"]["deepseek-a"]["transport_mode"].as_str(),
+            Some("http-preferred")
+        );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 

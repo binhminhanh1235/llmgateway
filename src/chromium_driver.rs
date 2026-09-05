@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env, fs,
     net::TcpListener,
     path::{Path, PathBuf},
@@ -737,7 +737,10 @@ impl ChromiumDriver {
         self.status(session_id).await
     }
 
-    pub async fn reconcile_all(&self) -> ChromiumReconcileSummary {
+    pub async fn reconcile_all_excluding(
+        &self,
+        browserless_idle_sessions: &BTreeSet<String>,
+    ) -> ChromiumReconcileSummary {
         if !self.enabled() {
             return ChromiumReconcileSummary {
                 checked: 0,
@@ -751,7 +754,11 @@ impl ChromiumDriver {
         let session_ids = self.config_snapshot().sessions.keys().cloned().collect::<Vec<_>>();
         let mut results = Vec::with_capacity(session_ids.len());
         for session_id in session_ids {
-            results.push(self.reconcile_session(&session_id).await);
+            if browserless_idle_sessions.contains(&session_id) {
+                results.push(self.reconcile_browserless_idle_session(&session_id).await);
+            } else {
+                results.push(self.reconcile_session(&session_id).await);
+            }
         }
 
         ChromiumReconcileSummary {
@@ -768,6 +775,65 @@ impl ChromiumDriver {
                 })
                 .count(),
             sessions: results,
+        }
+    }
+
+    async fn reconcile_browserless_idle_session(&self, session_id: &str) -> ChromiumReconcileView {
+        let session = match self.sessions.session(session_id).await {
+            Ok(session) => session,
+            Err(error) => {
+                return ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: "error".into(),
+                    session_status: STATUS_FAILED.into(),
+                    running: false,
+                    ready: false,
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+        let status = match self.status(session_id).await {
+            Ok(status) => status,
+            Err(error) => {
+                return ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: "browserless_idle_status_error".into(),
+                    session_status: session.status,
+                    running: false,
+                    ready: false,
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+
+        if status.running {
+            match self.stop(session_id).await {
+                Ok(_) => ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: "browserless_stopped".into(),
+                    session_status: STATUS_STOPPED.into(),
+                    running: false,
+                    ready: true,
+                    error: None,
+                },
+                Err(error) => ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: "browserless_stop_failed".into(),
+                    session_status: session.status,
+                    running: true,
+                    ready: true,
+                    error: Some(error.to_string()),
+                },
+            }
+        } else {
+            ChromiumReconcileView {
+                session_id: session_id.to_string(),
+                action: "browserless_idle".into(),
+                session_status: session.status,
+                running: false,
+                ready: true,
+                error: None,
+            }
         }
     }
 

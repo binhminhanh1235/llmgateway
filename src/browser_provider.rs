@@ -1,7 +1,8 @@
 use crate::{
     browser_auth_runtime, browser_session_runtime, chromium_driver_runtime, conversation_runtime,
     chatgpt_web_transport::ChatGptWebHttpAdapter,
-    config::{AccountConfig, ProviderConfig, RouteConfig},
+    config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
+    deepseek_web_transport::DeepSeekWebHttpAdapter,
     gemini_web_transport::GeminiWebHttpAdapter,
     qwen_web_transport::QwenWebHttpAdapter,
 };
@@ -37,6 +38,7 @@ const ADAPTER_HEALTH_TTL_SECONDS: u64 = 30;
 const GEMINI_WEB_ADAPTER: &str = include_str!("../adapters/gemini-web.js");
 const CHATGPT_WEB_ADAPTER: &str = include_str!("../adapters/chatgpt-web.js");
 const QWEN_WEB_ADAPTER: &str = include_str!("../adapters/qwen-web.js");
+const DEEPSEEK_WEB_ADAPTER: &str = include_str!("../adapters/deepseek-web.js");
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct BrowserProviderConfig {
@@ -323,6 +325,10 @@ pub trait BrowserProviderAdapter: Send + Sync {
         BrowserlessCapabilities::unsupported()
     }
 
+    fn supports_native_conversation_affinity(&self) -> bool {
+        self.browserless_capabilities().supports_native_conversation
+    }
+
     async fn discover_models(
         &self,
         _account_id: &str,
@@ -466,21 +472,25 @@ impl BrowserProviderRegistry {
         let gemini = Arc::new(CdpBrowserAdapter::gemini()?);
         let chatgpt = Arc::new(CdpBrowserAdapter::chatgpt()?);
         let qwen = Arc::new(CdpBrowserAdapter::qwen()?);
+        let deepseek = Arc::new(CdpBrowserAdapter::deepseek()?);
         let gemini_http = Arc::new(GeminiWebHttpAdapter::new()?);
         let chatgpt_http = Arc::new(ChatGptWebHttpAdapter::new()?);
         let qwen_http = Arc::new(QwenWebHttpAdapter::new()?);
+        let deepseek_http = Arc::new(DeepSeekWebHttpAdapter::new()?);
         let mut adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> = BTreeMap::new();
         adapters.insert(http.kind().to_string(), http);
         adapters.insert(cdp.kind().to_string(), cdp);
         adapters.insert(gemini.kind().to_string(), gemini);
         adapters.insert(chatgpt.kind().to_string(), chatgpt);
         adapters.insert(qwen.kind().to_string(), qwen);
+        adapters.insert(deepseek.kind().to_string(), deepseek);
 
         let mut direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> =
             BTreeMap::new();
         direct_adapters.insert("browser-gemini".into(), gemini_http);
         direct_adapters.insert("browser-chatgpt".into(), chatgpt_http);
         direct_adapters.insert("browser-qwen".into(), qwen_http);
+        direct_adapters.insert("browser-deepseek".into(), deepseek_http);
         Ok(Self {
             config: Arc::new(StdRwLock::new(config)),
             adapters,
@@ -525,10 +535,7 @@ impl BrowserProviderRegistry {
     ) {
         let transport = if adapter.is_cdp() {
             "browser-cdp"
-        } else if matches!(
-            adapter.adapter_id(),
-            "gemini-web-http" | "chatgpt-web-http" | "qwen-web-http"
-        ) {
+        } else if adapter.browserless_capabilities().supported {
             "direct-http"
         } else {
             "browser-http"
@@ -605,6 +612,21 @@ impl BrowserProviderRegistry {
             "unavailable"
         }
         .to_string();
+        let direct_diagnostics = if desired_policy == BrowserTransportPolicy::BrowserlessPreferred
+            && auth_state == "captured"
+            && self.direct_adapter(provider_kind, &binding).is_some()
+        {
+            Some(self.adapter_diagnostics(provider_kind, account_id).await)
+        } else {
+            None
+        };
+        let direct_ready_adapter_id = direct_diagnostics.as_ref().and_then(|diagnostics| {
+            (diagnostics.status == "ready")
+                .then(|| diagnostics.adapter_id.as_deref())
+                .flatten()
+                .filter(|adapter_id| self.is_direct_http_adapter_id(adapter_id))
+                .map(str::to_string)
+        });
         let last = self.last_transport_execution(account_id).await;
         let (effective_transport, effective_adapter_id, browser_fallback, effective_recorded_at, effective_reason) =
             match last {
@@ -636,6 +658,14 @@ impl BrowserProviderRegistry {
                     Some(execution.recorded_at),
                     "last request transport was recorded by the adapter".to_string(),
                 ),
+                None if direct_ready_adapter_id.is_some() => (
+                    "direct-http".to_string(),
+                    direct_ready_adapter_id,
+                    false,
+                    None,
+                    "direct adapter is ready; no request has executed since startup or policy change"
+                        .to_string(),
+                ),
                 None => (
                     "unavailable".to_string(),
                     None,
@@ -663,8 +693,55 @@ impl BrowserProviderRegistry {
         self.last_transport.write().await.remove(account_id);
     }
 
+    pub fn browserless_idle_session_ids(
+        &self,
+        app_config: &AppConfig,
+    ) -> BTreeSet<String> {
+        let provider_config = self.config_snapshot();
+        let mut session_readiness = BTreeMap::<String, bool>::new();
+
+        for account in app_config.accounts.iter().filter(|account| account.enabled) {
+            let Some(binding) = provider_config.bindings.get(&account.id) else {
+                continue;
+            };
+            let session_id = binding.session.clone();
+            let browserless_ready = app_config
+                .provider(&account.provider)
+                .filter(|provider| provider.is_browser())
+                .and_then(|provider| self.direct_adapter(&provider.kind, binding))
+                .is_some_and(|adapter| adapter.browserless_capabilities().supported)
+                && self.auth_material_available(&session_id);
+
+            session_readiness
+                .entry(session_id)
+                .and_modify(|ready| *ready &= browserless_ready)
+                .or_insert(browserless_ready);
+        }
+
+        session_readiness
+            .into_iter()
+            .filter_map(|(session_id, ready)| ready.then_some(session_id))
+            .collect()
+    }
+
     pub fn supports(&self, kind: &str) -> bool {
         self.adapters.contains_key(kind)
+    }
+
+    pub fn supports_native_conversation_affinity(&self, provider_kind: &str) -> bool {
+        self.adapters
+            .get(provider_kind)
+            .is_some_and(|adapter| adapter.supports_native_conversation_affinity())
+            || self
+                .direct_adapters
+                .get(provider_kind)
+                .is_some_and(|adapter| adapter.supports_native_conversation_affinity())
+    }
+
+    pub fn is_direct_http_adapter_id(&self, adapter_id: &str) -> bool {
+        self.direct_adapters.values().any(|adapter| {
+            adapter.adapter_id() == adapter_id && adapter.browserless_capabilities().supported
+        })
     }
 
      pub fn account_supports_model_discovery(
@@ -1565,6 +1642,7 @@ struct CdpAdapterSpec {
     default_target_url_prefix: Option<&'static str>,
     new_chat_url: Option<&'static str>,
     ephemeral_default: bool,
+    native_conversation_affinity: bool,
 }
 
 #[derive(Clone)]
@@ -1690,6 +1768,7 @@ impl CdpBrowserAdapter {
             default_target_url_prefix: None,
             new_chat_url: None,
             ephemeral_default: false,
+            native_conversation_affinity: false,
         })
     }
 
@@ -1702,6 +1781,7 @@ impl CdpBrowserAdapter {
             default_target_url_prefix: Some("https://gemini.google.com/app"),
             new_chat_url: Some("https://gemini.google.com/app"),
             ephemeral_default: true,
+            native_conversation_affinity: true,
         })
     }
 
@@ -1714,6 +1794,7 @@ impl CdpBrowserAdapter {
             default_target_url_prefix: Some("https://chatgpt.com/"),
             new_chat_url: Some("https://chatgpt.com/"),
             ephemeral_default: true,
+            native_conversation_affinity: true,
         })
     }
 
@@ -1726,6 +1807,20 @@ impl CdpBrowserAdapter {
             default_target_url_prefix: Some("https://chat.qwen.ai/"),
             new_chat_url: Some("https://chat.qwen.ai/c/new-chat"),
             ephemeral_default: true,
+            native_conversation_affinity: false,
+        })
+    }
+
+    fn deepseek() -> Result<Self, BrowserProviderError> {
+        Self::new(CdpAdapterSpec {
+            kind: "browser-deepseek",
+            adapter_id: "deepseek-web",
+            provider: "deepseek",
+            builtin_script: Some(DEEPSEEK_WEB_ADAPTER),
+            default_target_url_prefix: Some("https://chat.deepseek.com/"),
+            new_chat_url: Some("https://chat.deepseek.com/"),
+            ephemeral_default: true,
+            native_conversation_affinity: true,
         })
     }
 
@@ -1857,7 +1952,7 @@ impl CdpBrowserAdapter {
     }
 
     fn supports_native_conversation_affinity(&self) -> bool {
-        matches!(self.spec.kind, "browser-gemini" | "browser-chatgpt")
+        self.spec.native_conversation_affinity
     }
 
     async fn discover_native_conversation_url(
@@ -2588,6 +2683,10 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         true
     }
 
+    fn supports_native_conversation_affinity(&self) -> bool {
+        self.spec.native_conversation_affinity
+    }
+
     async fn diagnose(
         &self,
         account_id: &str,
@@ -2952,6 +3051,13 @@ fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
             .and_then(|index| segments.get(index + 1))
             .is_some_and(|value| !value.is_empty());
     }
+    if base.host_str() == Some("chat.deepseek.com") {
+        return segments.len() >= 4
+            && segments[0] == "a"
+            && segments[1] == "chat"
+            && segments[2] == "s"
+            && !segments[3].is_empty();
+    }
 
     let app_index = segments.iter().position(|segment| *segment == "app");
     if let Some(index) = app_index {
@@ -2978,6 +3084,14 @@ fn native_conversation_id(raw: &str) -> Option<String> {
             .position(|segment| *segment == "c")
             .and_then(|index| segments.get(index + 1))
             .map(|value| (*value).to_string());
+    }
+    if host.as_deref() == Some("chat.deepseek.com")
+        && segments.len() >= 4
+        && segments[0] == "a"
+        && segments[1] == "chat"
+        && segments[2] == "s"
+    {
+        return Some(segments[3].to_string());
     }
     if let Some(index) = segments.iter().position(|segment| *segment == "app") {
         return segments.get(index + 1).map(|value| (*value).to_string());
@@ -3028,6 +3142,7 @@ fn effective_target_url_prefix(
             "browser-gemini" => Some("https://gemini.google.com/app".into()),
             "browser-chatgpt" => Some("https://chatgpt.com/".into()),
             "browser-qwen" => Some("https://chat.qwen.ai/".into()),
+            "browser-deepseek" => Some("https://chat.deepseek.com/".into()),
             _ => None,
         })
 }
@@ -3384,13 +3499,26 @@ fn direct_error_allows_browser_fallback(
     dynamic_model: bool,
     browser_adapter_is_cdp: bool,
 ) -> bool {
-    !dynamic_model
-        && browser_adapter_is_cdp
-        && matches!(
-            error,
-            BrowserProviderError::AdapterIncompatible { .. }
-                | BrowserProviderError::ModelUnavailable { .. }
-        )
+    if dynamic_model || !browser_adapter_is_cdp {
+        return false;
+    }
+    let BrowserProviderError::AdapterIncompatible { code, .. } = error else {
+        return false;
+    };
+    matches!(
+        code.as_str(),
+        "login_required"
+            | "browser_challenge_required"
+            | "adapter_incompatible"
+            | "upstream_waf_rejected"
+            | "upstream_rejected"
+            | "sentinel_prepare_invalid"
+            | "sentinel_pow_invalid"
+            | "sentinel_pow_failed"
+            | "sentinel_finalize_invalid"
+            | "conversation_prepare_failed"
+            | "conversation_prepare_invalid"
+    )
 }
 
 fn cdp_session_status_probeable(status: &str) -> bool {
@@ -3557,11 +3685,21 @@ mod tests {
     }
 
     #[test]
-    fn only_pre_submit_compatible_errors_allow_browser_fallback() {
-        let incompatible = BrowserProviderError::AdapterIncompatible {
+    fn only_explicit_browser_recovery_errors_allow_browser_fallback() {
+        let challenge = BrowserProviderError::AdapterIncompatible {
             account_id: "account-a".into(),
-            code: "challenge".into(),
+            code: "browser_challenge_required".into(),
             message: "browser challenge".into(),
+        };
+        let login = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "login_required".into(),
+            message: "login expired".into(),
+        };
+        let unsynced = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "direct_state_unsynced".into(),
+            message: "thread is bound to browser state".into(),
         };
         let unavailable = BrowserProviderError::ModelUnavailable {
             account_id: "account-a".into(),
@@ -3569,11 +3707,13 @@ mod tests {
         };
         let transport = BrowserProviderError::Transport("post-submit stream failed".into());
 
-        assert!(direct_error_allows_browser_fallback(&incompatible, false, true));
-        assert!(direct_error_allows_browser_fallback(&unavailable, false, true));
+        assert!(direct_error_allows_browser_fallback(&challenge, false, true));
+        assert!(direct_error_allows_browser_fallback(&login, false, true));
+        assert!(!direct_error_allows_browser_fallback(&unsynced, false, true));
+        assert!(!direct_error_allows_browser_fallback(&unavailable, false, true));
         assert!(!direct_error_allows_browser_fallback(&transport, false, true));
-        assert!(!direct_error_allows_browser_fallback(&incompatible, true, true));
-        assert!(!direct_error_allows_browser_fallback(&incompatible, false, false));
+        assert!(!direct_error_allows_browser_fallback(&challenge, true, true));
+        assert!(!direct_error_allows_browser_fallback(&challenge, false, false));
     }
 
     #[test]
@@ -3593,6 +3733,7 @@ mod tests {
         assert!(BrowserProviderRegistry::is_browser_kind("browser-gemini"));
         assert!(BrowserProviderRegistry::is_browser_kind("browser-chatgpt"));
         assert!(BrowserProviderRegistry::is_browser_kind("browser-qwen"));
+        assert!(BrowserProviderRegistry::is_browser_kind("browser-deepseek"));
         assert!(!BrowserProviderRegistry::is_browser_kind("openai-compatible"));
     }
 
@@ -3630,6 +3771,29 @@ mod tests {
         assert!(registry.model_allowed("account", "model-b"));
         assert!(!registry.model_allowed("account", "model-c"));
         assert!(registry.model_allowed("unbound-account", "model-c"));
+    }
+
+    #[test]
+    fn deepseek_browserless_capability_uses_auto_and_is_provider_neutral() {
+        let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
+        let capabilities = registry.transport_capabilities("browser-deepseek");
+        assert!(capabilities.supported);
+        assert_eq!(capabilities.recommended_mode, Some(BrowserTransportMode::Auto));
+        assert!(capabilities.modes.contains(&BrowserTransportMode::Auto));
+        assert!(capabilities.supports_direct_model_discovery);
+        assert!(capabilities.supports_native_conversation);
+
+        let mut binding = test_binding();
+        binding.transport_mode = BrowserTransportMode::Auto;
+        assert_eq!(
+            registry
+                .direct_adapter("browser-deepseek", &binding)
+                .expect("DeepSeek direct adapter")
+                .adapter_id(),
+            "deepseek-web-http"
+        );
+        binding.transport_mode = BrowserTransportMode::BrowserOnly;
+        assert!(registry.direct_adapter("browser-deepseek", &binding).is_none());
     }
 
     #[test]
@@ -3677,6 +3841,7 @@ mod tests {
         let gemini = CdpBrowserAdapter::gemini().unwrap();
         let chatgpt = CdpBrowserAdapter::chatgpt().unwrap();
         let qwen = CdpBrowserAdapter::qwen().unwrap();
+        let deepseek = CdpBrowserAdapter::deepseek().unwrap();
         assert_eq!(gemini.kind(), "browser-gemini");
         assert_eq!(gemini.adapter_id(), "gemini-web");
         assert!(gemini.spec.ephemeral_default);
@@ -3696,6 +3861,15 @@ mod tests {
         assert_eq!(qwen.adapter_id(), "qwen-web");
         assert!(qwen.spec.ephemeral_default);
         assert_eq!(qwen.spec.new_chat_url, Some("https://chat.qwen.ai/c/new-chat"));
+        assert_eq!(deepseek.kind(), "browser-deepseek");
+        assert_eq!(deepseek.adapter_id(), "deepseek-web");
+        assert!(deepseek.spec.ephemeral_default);
+        assert!(deepseek.spec.native_conversation_affinity);
+        assert_eq!(
+            deepseek.spec.default_target_url_prefix,
+            Some("https://chat.deepseek.com/")
+        );
+        assert_eq!(deepseek.spec.new_chat_url, Some("https://chat.deepseek.com/"));
     }
 
     #[test]
@@ -3759,6 +3933,26 @@ mod tests {
         assert!(!is_native_conversation_url(
             "https://gemini.google.com/app",
             "https://example.test/app/abc123"
+        ));
+    }
+
+    #[test]
+    fn deepseek_native_conversation_url_uses_session_identity() {
+        assert!(!is_native_conversation_url(
+            "https://chat.deepseek.com/",
+            "https://chat.deepseek.com/"
+        ));
+        assert!(is_native_conversation_url(
+            "https://chat.deepseek.com/",
+            "https://chat.deepseek.com/a/chat/s/session-1"
+        ));
+        assert!(same_conversation_url(
+            "https://chat.deepseek.com/a/chat/s/session-1?foo=bar",
+            "https://chat.deepseek.com/a/chat/s/session-1#answer"
+        ));
+        assert!(!same_conversation_url(
+            "https://chat.deepseek.com/a/chat/s/session-1",
+            "https://chat.deepseek.com/a/chat/s/session-2"
         ));
     }
 
@@ -4315,6 +4509,15 @@ mod browser_transport_policy_tests {
                 )
                 .unwrap(),
             BrowserTransportMode::Auto
+        );
+        assert_eq!(
+            registry
+                .resolve_transport_policy(
+                    "browser-chatgpt",
+                    BrowserTransportPolicy::BrowserlessPreferred,
+                )
+                .unwrap(),
+            BrowserTransportMode::HttpPreferred
         );
         assert_eq!(
             registry
