@@ -471,6 +471,74 @@ async function testChatGPTStreamRecoversAfterDocumentReplacement() {
   assert.equal(polled.events.at(-1).choices[0].finish_reason, "stop");
 }
 
+async function testChatGPTRecoverySurvivesVirtualizedHistoryAndSelectorOverrides() {
+  const input = new FakeElement();
+  const oldOne = new FakeElement("old response one");
+  const oldTwo = new FakeElement("old response two");
+  const oldThree = new FakeElement("old response three");
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  const responseSelector = ".custom-chatgpt-assistant";
+  const finalText = Array(12).fill("Recovered from virtualized ChatGPT history.").join(" ");
+  const nodes = {
+    "#prompt-textarea": input,
+    "#composer-submit-button": send,
+    [responseSelector]: [oldOne, oldTwo, oldThree]
+  };
+
+  send.onClick = () => {
+    globalThis.location.pathname = "/c/virtualized-recovery";
+    response.innerText = finalText;
+    response.textContent = finalText;
+
+    // Real ChatGPT can replace the document and hydrate only a small window
+    // of prior turns. The new answer can therefore be the sole assistant node,
+    // even though the pre-submit baseline contained several responses.
+    nodes[responseSelector] = [response];
+  };
+
+  installPage({ host: "chatgpt.com", path: "/c/existing-thread", nodes });
+  let adapter = loadAdapter("adapters/chatgpt-web.js");
+  const context = {
+    reuse_native_conversation: true,
+    history_hydration_timeout_ms: 500,
+    history_stable_ms: 40,
+    response_timeout_ms: 900,
+    response_stable_ms: 60,
+    selectors: {
+      response: [responseSelector]
+    }
+  };
+  const started = await adapter.streamStart({
+    model: "chatgpt-web-test",
+    stream: true,
+    messages: [{ role: "user", content: "continue after virtualized navigation" }]
+  }, context);
+
+  assert.ok(started.stream_id);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  delete globalThis.__LLMGATEWAY_STREAM_JOBS__;
+  installPage({ host: "chatgpt.com", path: "/c/virtualized-recovery", nodes });
+  adapter = loadAdapter("adapters/chatgpt-web.js");
+
+  const emitted = [];
+  let polled = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(polled.error, null, JSON.stringify(polled));
+  emitted.push(...polled.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
+
+  if (!polled.done) {
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    polled = await adapter.streamPoll({ stream_id: started.stream_id });
+    assert.equal(polled.error, null, JSON.stringify(polled));
+    emitted.push(...polled.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
+  }
+
+  assert.equal(polled.done, true, JSON.stringify(polled));
+  assert.equal(emitted.join(""), finalText);
+  assert.equal(polled.events.at(-1).choices[0].finish_reason, "stop");
+}
+
 async function testChatGPTReopenWaitsForStableHistory() {
   const input = new FakeElement();
   const oldOne = new FakeElement("old one");
@@ -963,6 +1031,7 @@ await testChatGPTModelPickerFlow();
 await testChatGPTFreshThreadForcesNewChat();
 await testChatGPTFreshStreamSkipsRedundantNewChatAndSubmitsBeforeReturn();
 await testChatGPTStreamRecoversAfterDocumentReplacement();
+await testChatGPTRecoverySurvivesVirtualizedHistoryAndSelectorOverrides();
 await testChatGPTReopenWaitsForStableHistory();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
