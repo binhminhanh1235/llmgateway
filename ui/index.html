@@ -218,7 +218,7 @@
       <div class="modal-header">
         <div>
           <h2 id="modelGroupModalTitle">Create model group</h2>
-          <p>Lower tier priority wins. Routes inside one tier still use normal health, quota, adaptive and task-aware scoring.</p>
+          <p>Lower tier priority wins. Inside a tier, models are tried top to bottom in the order you choose; llmgateway still picks the best active account/route for that model.</p>
         </div>
         <button class="icon-button" data-close-modal="modelGroupModal" type="button">✕</button>
       </div>
@@ -230,7 +230,7 @@
       <div id="modelGroupTiers" class="group-editor-tiers"></div>
       <div class="group-editor-toolbar">
         <button id="addModelGroupTierButton" class="secondary-button" type="button">+ Add fallback tier</button>
-        <span class="page-subtitle">A route may belong to only one tier in the same group.</span>
+        <span class="page-subtitle">A model may belong to only one tier. Use ↑ / ↓ to set exact fallback order.</span>
       </div>
       <div id="modelGroupError" class="form-error hidden"></div>
       <div class="group-editor-actions">
