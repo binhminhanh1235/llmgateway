@@ -458,13 +458,7 @@ impl BrowserProviderRegistry {
         self.adapters.contains_key(kind)
     }
 
-    pub fn supports_model_discovery(&self, provider_kind: &str) -> bool {
-        self.direct_adapters
-            .get(provider_kind)
-            .is_some_and(|adapter| adapter.supports_model_discovery())
-    }
-
-    pub fn account_supports_model_discovery(
+     pub fn account_supports_model_discovery(
         &self,
         provider_kind: &str,
         account_id: &str,
@@ -1809,12 +1803,10 @@ impl CdpBrowserAdapter {
             .and_then(|url| url.host_str().map(str::to_string));
         let target_id = initial.id.clone();
         let mut current = initial;
-        let mut last_url = current.url.clone();
         let mut last_runtime_host = String::new();
         let deadline = Instant::now() + timeout_duration;
 
         loop {
-            last_url = current.url.clone();
             if current.kind == "page"
                 && !current.websocket_debugger_url.is_empty()
                 && target_url_matches_prefix(&current.url, prefix)
@@ -1847,7 +1839,7 @@ impl CdpBrowserAdapter {
                     code: "target_navigation_timeout".into(),
                     message: format!(
                         "new browser tab did not become runtime-ready for '{prefix}' before adapter injection (target page: {}; runtime host: {runtime})",
-                        diagnostic_target_location(&last_url)
+                        diagnostic_target_location(&current.url)
                     ),
                 });
             }
@@ -2328,7 +2320,17 @@ impl CdpBrowserAdapter {
         let message = error
             .as_ref()
             .map(|error| error.message.clone())
-            .or_else(|| probe.as_ref().map(|probe| probe.message.clone()))
+            .or_else(|| {
+                probe.as_ref().map(|probe| match (
+                    probe.code.trim().is_empty(),
+                    probe.message.trim().is_empty(),
+                ) {
+                    (false, false) => format!("{}: {}", probe.code, probe.message),
+                    (false, true) => probe.code.clone(),
+                    (true, false) => probe.message.clone(),
+                    (true, true) => String::new(),
+                })
+            })
             .filter(|message| !message.trim().is_empty())
             .unwrap_or_else(|| status.to_string());
 
