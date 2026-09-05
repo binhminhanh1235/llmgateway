@@ -914,7 +914,7 @@ fn cooldown_for(status: StatusCode) -> i64 {
 
 #[cfg(test)]
 mod stream_trace_tests {
-    use super::{observe_terminal_sse_done, stream_error_message, upstream_stream_error_sse};
+    use super::{observe_terminal_sse_completion, stream_error_message, upstream_stream_error_sse};
 
     #[test]
     fn terminal_detector_requires_a_complete_sse_data_frame() {
