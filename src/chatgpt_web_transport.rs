@@ -1493,6 +1493,7 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
     let items = payload
         .get("models")
         .and_then(Value::as_array)
+        .or_else(|| payload.get("data").and_then(Value::as_array))
         .or_else(|| payload.as_array());
     let Some(items) = items else {
         return Vec::new();
@@ -1501,8 +1502,20 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
     let mut seen = std::collections::BTreeSet::new();
     let mut models = Vec::new();
     for item in items {
+        let hidden_tag = item
+            .get("tags")
+            .and_then(Value::as_array)
+            .is_some_and(|tags| {
+                tags.iter().filter_map(Value::as_str).any(|tag| {
+                    matches!(tag.to_ascii_lowercase().as_str(), "hidden" | "confidential")
+                })
+            });
         if item.get("enabled").and_then(Value::as_bool) == Some(false)
             || item.get("hidden").and_then(Value::as_bool) == Some(true)
+            || item.get("is_visible").and_then(Value::as_bool) == Some(false)
+            || item.get("show_in_picker").and_then(Value::as_bool) == Some(false)
+            || item.get("showInPicker").and_then(Value::as_bool) == Some(false)
+            || hidden_tag
         {
             continue;
         }
