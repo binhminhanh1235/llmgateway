@@ -1,6 +1,8 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
+    context_engine::ContextError,
     context_runtime,
+    conversation::ConversationError,
     semantic_retrieval::retrieve_relevant_history,
 };
 use axum::{
@@ -41,8 +43,24 @@ pub async fn inspect_thread_retrieval(
             )
         }
     };
+    let detail = match state.conversations.thread(&thread_id).await {
+        Ok(detail) => detail,
+        Err(ConversationError::ThreadNotFound(message)) => {
+            return json_error(StatusCode::NOT_FOUND, "not_found_error", &message)
+        }
+        Err(error) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "retrieval_context_error",
+                &error.to_string(),
+            )
+        }
+    };
     let status = match engine.status(&thread_id, None).await {
         Ok(status) => status,
+        Err(ContextError::Conversation(ConversationError::ThreadNotFound(message))) => {
+            return json_error(StatusCode::NOT_FOUND, "not_found_error", &message)
+        }
         Err(error) => {
             return json_error(
                 StatusCode::BAD_REQUEST,
@@ -65,13 +83,6 @@ pub async fn inspect_thread_retrieval(
             None,
         );
     };
-    let detail = match state.conversations.thread(&thread_id).await {
-        Ok(detail) => detail,
-        Err(error) => {
-            return json_error(StatusCode::NOT_FOUND, "retrieval_thread_error", &error.to_string())
-        }
-    };
-
     let config = &state.gateway.config.context;
     let max_chunks = body.max_chunks.unwrap_or(config.retrieval_max_chunks).max(1);
     let max_tokens = body.max_tokens.unwrap_or(config.retrieval_max_tokens).max(1);
