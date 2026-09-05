@@ -73,6 +73,23 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         messages = body.get("messages", [])
+
+        def contains_image(value):
+            if isinstance(value, list):
+                return any(contains_image(item) for item in value)
+            if isinstance(value, dict):
+                kind = str(value.get("type", ""))
+                if kind in {"image_url", "input_image", "image"}:
+                    image_url = value.get("image_url")
+                    if isinstance(image_url, str):
+                        return image_url.startswith("data:image/")
+                    if isinstance(image_url, dict):
+                        return str(image_url.get("url", "")).startswith("data:image/")
+                    return str(value.get("url", "")).startswith("data:image/")
+                return any(contains_image(child) for child in value.values())
+            return False
+
+        has_image = any(contains_image(message.get("content")) for message in messages)
         user_text = "\n".join(
             str(message.get("content", ""))
             for message in messages
@@ -95,6 +112,8 @@ class Handler(BaseHTTPRequestHandler):
                 "open_questions": ["What should v0.7 optimize next?"],
                 "rolling_summary": "The thread is validating structured memory compaction end to end."
             })
+        elif has_image:
+            text = f"fake vision reply messages={len(messages)} image=yes"
         else:
             text = f"fake reply messages={len(messages)}"
             if "retrieved earlier transcript excerpts" in system_text.lower():
