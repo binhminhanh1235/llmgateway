@@ -236,11 +236,16 @@ try {
         $threadC = New-TestThread "Browserless cancellation $(Get-Date -Format s)"
         $bodyPath = [System.IO.Path]::GetTempFileName()
         try {
-            @{
+            $cancelBody = @{
                 content = "Write a detailed response with at least 800 words. Begin with the word cancellation-test."
                 model = $script:ResolvedRouteId
                 stream = $true
-            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $bodyPath -Encoding UTF8
+            } | ConvertTo-Json -Compress
+            [System.IO.File]::WriteAllText(
+                $bodyPath,
+                $cancelBody,
+                (New-Object System.Text.UTF8Encoding($false))
+            )
 
             $curlArgs = @(
                 "--silent", "--show-error", "--no-buffer",
@@ -257,13 +262,10 @@ try {
                 Start-Sleep -Seconds 2
                 $null = Assert-BrowserClosed "cancelled stream"
                 $threadDetail = Invoke-GatewayJson -Method GET -Path "/v1/threads/$threadC"
-                $emptyAssistants = @($threadDetail.messages | Where-Object {
-                    $_.role -eq "assistant" -and (
-                        $null -eq $_.message.content -or
-                        [string]::IsNullOrWhiteSpace([string]$_.message.content)
-                    )
+                $persistedAssistants = @($threadDetail.messages | Where-Object {
+                    $_.role -eq "assistant"
                 })
-                Assert-True ($emptyAssistants.Count -eq 0) "cancelled stream persisted an empty assistant message"
+                Assert-True ($persistedAssistants.Count -eq 0) "cancelled stream persisted an assistant message"
             } else {
                 Write-Warning "Cancellation request finished before timeout (curl exit $curlExit); cancellation cleanup was not exercised."
             }
