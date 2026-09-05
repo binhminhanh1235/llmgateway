@@ -39,7 +39,7 @@ mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
 mod memory_provenance_runtime;
-mod multimodal;
+pub mod multimodal;
 mod multimodal_compat;
 mod quota_usage;
 mod quota_usage_runtime;
