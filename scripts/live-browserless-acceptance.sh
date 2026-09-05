@@ -277,11 +277,16 @@ if [[ "$SKIP_STREAM" -eq 0 ]]; then
   send_message "$THREAD_A" "Reply with exactly: browserless-stream" true "$TMP_DIR/stream.sse" "$TMP_DIR/stream.headers"
   grep -Fq 'data: [DONE]' "$TMP_DIR/stream.sse" || { echo "ACCEPTANCE FAILED: stream ended without [DONE]" >&2; exit 1; }
   grep -Fq '"content"' "$TMP_DIR/stream.sse" || { echo "ACCEPTANCE FAILED: stream returned no assistant delta" >&2; exit 1; }
+  grep -Eq '"finish_reason"[[:space:]]*:[[:space:]]*"[^"]+"' "$TMP_DIR/stream.sse" || { echo "ACCEPTANCE FAILED: stream returned no terminal finish_reason" >&2; exit 1; }
+  STREAM_FRAMES="$(grep -Ec '^data:[[:space:]]*\{' "$TMP_DIR/stream.sse" || true)"
+  [[ "$STREAM_FRAMES" -ge 2 ]] || { echo "ACCEPTANCE FAILED: stream did not expose incremental SSE frames" >&2; exit 1; }
   assert_direct_execution "streaming turn"
   sleep 0.3
   affinity_file "$THREAD_A" "$TMP_DIR/affinity-after-stream.json"
   assert_python "$TMP_DIR/affinity-after-stream.json" "x.get('mapping',{}).get('conversation_url') == '$URL_A'" "streaming turn changed native conversation"
   assert_python "$TMP_DIR/affinity-after-stream.json" "int(x.get('mapping',{}).get('last_synced_ordinal',0)) > $ORD_STREAM" "streaming sync ordinal did not advance"
+  api GET "/v1/threads/$THREAD_A" "$TMP_DIR/thread-after-stream.json"
+  assert_python "$TMP_DIR/thread-after-stream.json" "not any(m.get('role') == 'assistant' and not str(m.get('content') or '').strip() for m in x.get('messages',[]))" "streaming persisted an empty/stale assistant message"
 fi
 
 if [[ "$TEST_CANCELLATION" -eq 1 ]]; then
