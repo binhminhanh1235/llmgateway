@@ -499,6 +499,7 @@ impl GeminiWebHttpAdapter {
     async fn conversation_metadata(
         &self,
         request: &BrowserAdapterRequest,
+        requested_model: &str,
     ) -> Result<Value, BrowserProviderError> {
         let Some(thread_id) = request.thread_id.as_deref() else {
             return Ok(default_metadata());
@@ -531,6 +532,13 @@ impl GeminiWebHttpAdapter {
                 message: "Gemini native conversation state was advanced by the browser adapter; keep this thread on CDP to preserve exact conversation affinity".into(),
             });
         }
+        validate_thread_model_affinity(state.as_ref(), requested_model).map_err(|message| {
+            // This is intentionally a Transport error even though it is detected before submit:
+            // BrowserProviderRegistry only falls back to CDP for AdapterIncompatible /
+            // ModelUnavailable. A model switch on an existing native Gemini conversation must
+            // never be "recovered" by sending the turn through the browser.
+            BrowserProviderError::Transport(message)
+        })?;
         Ok(state
             .and_then(|value| value.get("metadata").cloned())
             .unwrap_or_else(default_metadata))
@@ -540,6 +548,7 @@ impl GeminiWebHttpAdapter {
         thread_id: Option<&str>,
         provider_id: &str,
         account_id: &str,
+        model_external_id: &str,
         update: &GeminiFrameUpdate,
     ) -> Result<(), BrowserProviderError> {
         let Some(thread_id) = thread_id else {
@@ -554,6 +563,7 @@ impl GeminiWebHttpAdapter {
 
         let state = json!({
             "transport": "gemini-http",
+            "model_external_id": model_external_id,
             "metadata": metadata,
             "conversation_id": update.conversation_id,
             "response_id": update.response_id,
@@ -620,6 +630,7 @@ impl GeminiWebHttpAdapter {
             request.thread_id.as_deref(),
             &request.provider.id,
             &request.account.id,
+            &request.route.model,
             &latest,
         )
         .await?;
@@ -803,6 +814,7 @@ impl GeminiWebHttpAdapter {
                 thread_id.as_deref(),
                 &provider_id,
                 &account_id,
+                &model,
                 &latest,
             ).await {
                 yield Err(std::io::Error::other(error.to_string()));
@@ -947,7 +959,9 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
             )
             .await?;
         let selection = self.resolve_model_selection(&request).await?;
-        let metadata = self.conversation_metadata(&request).await?;
+        let metadata = self
+            .conversation_metadata(&request, &request.route.model)
+            .await?;
         let has_native_state = metadata != default_metadata();
         let prompt = serialize_prompt(&request.body, has_native_state)?;
         let response = self
@@ -965,6 +979,27 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
             self.buffered_response(&request, response).await
         }
     }
+}
+
+fn validate_thread_model_affinity(
+    state: Option<&Value>,
+    requested_model: &str,
+) -> Result<(), String> {
+    let Some(existing_model) = state
+        .and_then(|value| value.get("model_external_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        // Legacy direct state predating model affinity is allowed to continue. Once the
+        // next successful turn is persisted, the thread becomes explicitly model-bound.
+        return Ok(());
+    };
+    if existing_model == requested_model {
+        return Ok(());
+    }
+    Err(format!(
+        "Gemini native conversation is already bound to model '{existing_model}'; start a new llmgateway thread to use model '{requested_model}'"
+    ))
 }
 
 fn request_id() -> u64 {
@@ -1727,6 +1762,31 @@ mod tests {
         let header = model_header_value(model, "SESSION").unwrap();
         assert!(header.contains("model-hex-pro"));
         assert!(header.contains("SESSION"));
+    }
+
+    #[test]
+    fn native_thread_model_affinity_rejects_model_switch_before_submit() {
+        let state = json!({
+            "transport": "gemini-http",
+            "model_external_id": "gemini-web-pro",
+            "metadata": default_metadata()
+        });
+        assert!(validate_thread_model_affinity(Some(&state), "gemini-web-pro").is_ok());
+        let error =
+            validate_thread_model_affinity(Some(&state), "gemini-web-flash").unwrap_err();
+        assert!(error.contains("start a new llmgateway thread"));
+        assert!(error.contains("gemini-web-pro"));
+        assert!(error.contains("gemini-web-flash"));
+    }
+
+    #[test]
+    fn legacy_native_thread_without_model_affinity_can_continue() {
+        let state = json!({
+            "transport": "gemini-http",
+            "metadata": default_metadata()
+        });
+        assert!(validate_thread_model_affinity(Some(&state), "gemini-web-pro").is_ok());
+        assert!(validate_thread_model_affinity(None, "gemini-web-pro").is_ok());
     }
 
     #[test]
