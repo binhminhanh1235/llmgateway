@@ -1,6 +1,6 @@
 use crate::{
     browser_auth::{BrowserAuthMaterial, BrowserAuthVault},
-    browser_auth_runtime, conversation_runtime,
+    browser_auth_runtime, browser_provider_runtime, conversation_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
         BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
@@ -237,7 +237,7 @@ impl GeminiWebHttpAdapter {
         force: bool,
     ) -> Result<GeminiModelCatalogSnapshot, BrowserProviderError> {
         if !force {
-            if let Some(cached) = self.model_catalogs.read().await.get(&binding.session).cloned() {
+            if let Some(cached) = self.model_catalogs.read().await.get(account_id).cloned() {
                 if cached.discovered_at.elapsed() <= MODEL_CATALOG_TTL {
                     return Ok(cached);
                 }
@@ -256,7 +256,10 @@ impl GeminiWebHttpAdapter {
         self.model_catalogs
             .write()
             .await
-            .insert(binding.session.clone(), snapshot.clone());
+            .insert(account_id.to_string(), snapshot.clone());
+        if let Some(registry) = browser_provider_runtime::get() {
+            registry.clear_model_catalog_refresh_required(account_id);
+        }
         Ok(snapshot)
     }
 
@@ -376,16 +379,7 @@ impl GeminiWebHttpAdapter {
         let snapshot = self
             .model_catalog(&request.binding, &request.account.id, false)
             .await?;
-        let requested = normalize_model_lookup(&request.route.model);
-        let recipe = snapshot
-            .models
-            .iter()
-            .find(|model| {
-                model.external_id == request.route.model
-                    || model.aliases.contains(&requested)
-                    || model.model_id.eq_ignore_ascii_case(&request.route.model)
-            })
-            .cloned()
+        let recipe = find_model_recipe(&snapshot, &request.route.model)
             .ok_or_else(|| BrowserProviderError::ModelUnavailable {
                 account_id: request.account.id.clone(),
                 model: request.route.model.clone(),
@@ -396,8 +390,11 @@ impl GeminiWebHttpAdapter {
         }))
     }
 
-    async fn invalidate_model_catalog(&self, session_id: &str) {
-        self.model_catalogs.write().await.remove(session_id);
+    async fn invalidate_model_catalog(&self, account_id: &str) {
+        self.model_catalogs.write().await.remove(account_id);
+        if let Some(registry) = browser_provider_runtime::get() {
+            registry.mark_model_catalog_refresh_required(account_id);
+        }
     }
 
     async fn submit_generation(
@@ -597,18 +594,15 @@ impl GeminiWebHttpAdapter {
         let mut latest = GeminiFrameUpdate::default();
         for update in updates {
             if let Some(error_code) = update.error_code {
-                if error_code == USAGE_LIMIT_EXCEEDED {
-                    return Err(BrowserProviderError::Transport(
-                        "Gemini web usage limit exceeded".into(),
-                    ));
-                }
-                if error_code == MODEL_HEADER_INVALID {
-                    self.invalidate_model_catalog(&request.session_id).await;
-                }
                 if error_code != 0 {
-                    return Err(BrowserProviderError::Transport(format!(
-                        "Gemini StreamGenerate returned error code {error_code}"
-                    )));
+                    if error_code == MODEL_HEADER_INVALID {
+                        self.invalidate_model_catalog(&request.account.id).await;
+                    }
+                    return Err(generation_error(
+                        error_code,
+                        &request.account.id,
+                        &request.route.model,
+                    ));
                 }
             }
             merge_update(&mut latest, update);
@@ -658,7 +652,6 @@ impl GeminiWebHttpAdapter {
         let adapter = self.clone();
         let provider_id = request.provider.id.clone();
         let account_id = request.account.id.clone();
-        let session_id = request.session_id.clone();
         let thread_id = request.thread_id.clone();
         let model = request.route.model.clone();
         let completion_id = format!("chatcmpl_gemini_{}", Uuid::new_v4().simple());
@@ -710,14 +703,11 @@ impl GeminiWebHttpAdapter {
                     let update = parse_frame_update(&part);
                     if let Some(error_code) = update.error_code {
                         if error_code == MODEL_HEADER_INVALID {
-                            adapter.invalidate_model_catalog(&session_id).await;
+                            adapter.invalidate_model_catalog(&account_id).await;
                         }
-                        let message = if error_code == USAGE_LIMIT_EXCEEDED {
-                            "Gemini web usage limit exceeded".to_string()
-                        } else {
-                            format!("Gemini StreamGenerate returned error code {error_code}")
-                        };
-                        yield Err(std::io::Error::other(message));
+                        yield Err(std::io::Error::other(
+                            generation_error(error_code, &account_id, &model).to_string(),
+                        ));
                         break 'outer;
                     }
 
@@ -758,9 +748,12 @@ impl GeminiWebHttpAdapter {
                         for part in frames {
                             let update = parse_frame_update(&part);
                             if let Some(error_code) = update.error_code {
-                                yield Err(std::io::Error::other(format!(
-                                    "Gemini StreamGenerate returned error code {error_code}"
-                                )));
+                                if error_code == MODEL_HEADER_INVALID {
+                                    adapter.invalidate_model_catalog(&account_id).await;
+                                }
+                                yield Err(std::io::Error::other(
+                                    generation_error(error_code, &account_id, &model).to_string(),
+                                ));
                                 return;
                             }
                             merge_update(&mut latest, update);
@@ -1042,6 +1035,41 @@ fn build_inner_request(
     inner[79] = json!(model_number);
     inner[80] = json!(1);
     inner
+}
+
+fn find_model_recipe(
+    snapshot: &GeminiModelCatalogSnapshot,
+    requested_model: &str,
+) -> Option<GeminiModelRecipe> {
+    let requested = normalize_model_lookup(requested_model);
+    snapshot
+        .models
+        .iter()
+        .find(|model| {
+            model.external_id == requested_model
+                || model.aliases.contains(&requested)
+                || model.model_id.eq_ignore_ascii_case(requested_model)
+        })
+        .cloned()
+}
+
+fn generation_error(
+    error_code: i64,
+    account_id: &str,
+    model: &str,
+) -> BrowserProviderError {
+    match error_code {
+        USAGE_LIMIT_EXCEEDED => {
+            BrowserProviderError::Transport("Gemini web usage limit exceeded".into())
+        }
+        MODEL_HEADER_INVALID => BrowserProviderError::ModelRecipeStale {
+            account_id: account_id.to_string(),
+            model: model.to_string(),
+        },
+        _ => BrowserProviderError::Transport(format!(
+            "Gemini StreamGenerate returned error code {error_code}"
+        )),
+    }
 }
 
 fn model_header_value(
@@ -1762,6 +1790,87 @@ mod tests {
         let header = model_header_value(model, "SESSION").unwrap();
         assert!(header.contains("model-hex-pro"));
         assert!(header.contains("SESSION"));
+    }
+
+    #[test]
+    fn selected_models_build_distinct_private_headers() {
+        let pro = GeminiModelRecipe {
+            external_id: "gemini-web-pro".into(),
+            display_name: "Pro".into(),
+            description: String::new(),
+            model_id: "opaque-pro".into(),
+            capacity: 2,
+            capacity_field: 12,
+            model_number: 3,
+            aliases: BTreeSet::new(),
+            capabilities: vec!["reasoning".into()],
+        };
+        let flash = GeminiModelRecipe {
+            external_id: "gemini-web-flash".into(),
+            display_name: "Flash".into(),
+            description: String::new(),
+            model_id: "opaque-flash".into(),
+            capacity: 1,
+            capacity_field: 12,
+            model_number: 1,
+            aliases: BTreeSet::new(),
+            capabilities: vec!["fast".into()],
+        };
+        assert_ne!(
+            model_header_value(&pro, "SESSION").unwrap(),
+            model_header_value(&flash, "SESSION").unwrap()
+        );
+    }
+
+    #[test]
+    fn unknown_model_is_rejected_by_recipe_resolver() {
+        let snapshot = GeminiModelCatalogSnapshot {
+            discovered_at: Instant::now(),
+            wire_session_id: "SESSION".into(),
+            models: vec![GeminiModelRecipe {
+                external_id: "gemini-web-pro".into(),
+                display_name: "Pro".into(),
+                description: String::new(),
+                model_id: "opaque-pro".into(),
+                capacity: 2,
+                capacity_field: 12,
+                model_number: 3,
+                aliases: BTreeSet::new(),
+                capabilities: vec![],
+            }],
+        };
+        assert!(find_model_recipe(&snapshot, "gemini-web-does-not-exist").is_none());
+    }
+
+    #[test]
+    fn invalid_model_header_is_classified_as_stale_recipe() {
+        let error = generation_error(MODEL_HEADER_INVALID, "account-a", "gemini-web-pro");
+        assert!(matches!(
+            error,
+            BrowserProviderError::ModelRecipeStale {
+                account_id,
+                model
+            } if account_id == "account-a" && model == "gemini-web-pro"
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalidating_recipe_cache_is_account_scoped() {
+        let adapter = GeminiWebHttpAdapter::new().unwrap();
+        let snapshot = GeminiModelCatalogSnapshot {
+            discovered_at: Instant::now(),
+            wire_session_id: "SESSION".into(),
+            models: vec![],
+        };
+        {
+            let mut catalogs = adapter.model_catalogs.write().await;
+            catalogs.insert("account-a".into(), snapshot.clone());
+            catalogs.insert("account-b".into(), snapshot);
+        }
+        adapter.invalidate_model_catalog("account-a").await;
+        let catalogs = adapter.model_catalogs.read().await;
+        assert!(!catalogs.contains_key("account-a"));
+        assert!(catalogs.contains_key("account-b"));
     }
 
     #[test]
