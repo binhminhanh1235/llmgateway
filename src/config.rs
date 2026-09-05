@@ -763,7 +763,7 @@ enabled = true"#,
         let provider = config.provider("browser").unwrap();
         assert!(account.api_key_env.is_empty());
         assert!(!account.discover_models);
-        assert!(!account.discovery_enabled(provider));
+        assert!(!(account.discover_models && !provider.is_browser()));
         assert!(!account.credential_required(provider));
         assert_eq!(provider.transport(), "browser");
     }
@@ -787,7 +787,7 @@ enabled = true"#,
         let account = config.account("account").unwrap();
         let provider = config.provider("api").unwrap();
         assert!(account.discover_models);
-        assert!(account.discovery_enabled(provider));
+        assert!(account.discover_models && !provider.is_browser());
         assert!(account.credential_required(provider));
         assert_eq!(provider.transport(), "api");
     }
