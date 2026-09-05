@@ -263,8 +263,8 @@ pub async fn browser_thread_affinity_diagnostics(
 fn summarize_provider_state(state: &Value) -> Value {
     let transport = state.get("transport").and_then(Value::as_str);
     let conversation_id =
-        first_non_empty_string(state, &["conversation_id", "chat_id", "chat_session_id"]);
-    let parent_id = first_non_empty_string(
+        first_native_value(state, &["conversation_id", "chat_id", "chat_session_id"]);
+    let parent_id = first_native_value(
         state,
         &[
             "parent_message_id",
@@ -273,20 +273,20 @@ fn summarize_provider_state(state: &Value) -> Value {
             "response_message_id",
         ],
     );
-    let request_parent_id = first_non_empty_string(state, &["request_parent_id"]);
-    let response_id = first_non_empty_string(state, &["response_id", "response_message_id"]);
-    let candidate_id = first_non_empty_string(state, &["candidate_id"]);
-    let model_external_id = first_non_empty_string(state, &["model_external_id"]);
+    let request_parent_id = first_native_value(state, &["request_parent_id"]);
+    let response_id = first_native_value(state, &["response_id", "response_message_id"]);
+    let candidate_id = first_native_value(state, &["candidate_id"]);
+    let model_external_id = first_native_value(state, &["model_external_id"]);
     let native_chain_present = [
-        conversation_id,
-        parent_id,
-        request_parent_id,
-        response_id,
-        candidate_id,
-        model_external_id,
+        conversation_id.is_some(),
+        parent_id.is_some(),
+        request_parent_id.is_some(),
+        response_id.is_some(),
+        candidate_id.is_some(),
+        model_external_id.is_some(),
     ]
-    .iter()
-    .any(Option::is_some);
+    .into_iter()
+    .any(|present| present);
 
     json!({
         "present": true,
@@ -312,12 +312,13 @@ fn summarize_provider_state(state: &Value) -> Value {
     })
 }
 
-fn first_non_empty_string<'a>(state: &'a Value, keys: &[&str]) -> Option<&'a str> {
+fn first_native_value(state: &Value, keys: &[&str]) -> Option<Value> {
     keys.iter().find_map(|key| {
-        state
-            .get(*key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
+        state.get(*key).and_then(|value| match value {
+            Value::String(text) if !text.trim().is_empty() => Some(value.clone()),
+            Value::Number(_) => Some(value.clone()),
+            _ => None,
+        })
     })
 }
 
@@ -361,18 +362,18 @@ mod tests {
             "transport": "deepseek-http",
             "chat_session_id": "session-1",
             "conversation_id": "session-1",
-            "request_parent_id": "message-0",
-            "response_message_id": "message-1",
-            "response_id": "message-1",
-            "next_parent_id": "message-1",
+            "request_parent_id": 1,
+            "response_message_id": 2,
+            "response_id": 2,
+            "next_parent_id": 2,
             "model_external_id": "deepseek-web-reasoning",
             "access_token": "secret-token"
         });
         let summary = summarize_provider_state(&state);
         assert_eq!(summary["native_chain"]["conversation_id"], "session-1");
-        assert_eq!(summary["native_chain"]["parent_id"], "message-1");
-        assert_eq!(summary["native_chain"]["request_parent_id"], "message-0");
-        assert_eq!(summary["native_chain"]["response_id"], "message-1");
+        assert_eq!(summary["native_chain"]["parent_id"], 2);
+        assert_eq!(summary["native_chain"]["request_parent_id"], 1);
+        assert_eq!(summary["native_chain"]["response_id"], 2);
         assert_eq!(
             summary["native_chain"]["model_external_id"],
             "deepseek-web-reasoning"
