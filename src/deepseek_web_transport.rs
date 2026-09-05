@@ -239,6 +239,11 @@ impl DeepSeekSseDecoder {
                     self.append_by_channel(text, &mut update);
                 }
             }
+            None if operation.is_empty() => {
+                if let Some(text) = patch_value.and_then(Value::as_str) {
+                    self.append_by_channel(text, &mut update);
+                }
+            }
             _ => {}
         }
 
@@ -1486,6 +1491,48 @@ mod tests {
         assert_eq!(state.response_message_id, Some(2));
         assert_eq!(state.reasoning, "why because");
         assert_eq!(state.output, "hello");
+        assert!(state.completed);
+        state.validate_completion().unwrap();
+    }
+
+    #[test]
+    fn sse_decoder_preserves_bare_v_text_chunks_used_by_live_deepseek() {
+        let mut decoder = DeepSeekSseDecoder::default();
+        let stream = concat!(
+            "event: ready\ndata: {\"response_message_id\":7}\n\n",
+            "data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"RESPONSE\",\"content\":\"\"}]}\n\n",
+            "data: {\"v\":\"Hello\"}\n\n",
+            "data: {\"v\":\"!\",\"o\":\"APPEND\"}\n\n",
+            "event: close\ndata: {}\n\n"
+        );
+        let mut state = DeepSeekStreamState::default();
+        for update in decoder.push(stream.as_bytes()).unwrap() {
+            state.apply(update).unwrap();
+        }
+        assert_eq!(state.response_message_id, Some(7));
+        assert_eq!(state.output, "Hello!");
+        assert!(state.completed);
+        state.validate_completion().unwrap();
+    }
+
+    #[test]
+    fn sse_decoder_keeps_bare_v_chunks_on_the_active_reasoning_channel() {
+        let mut decoder = DeepSeekSseDecoder::default();
+        let stream = concat!(
+            "data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"THINK\",\"content\":\"\"}]}\n\n",
+            "data: {\"v\":\"reasoning\"}\n\n",
+            "data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"RESPONSE\",\"content\":\"\"}]}\n\n",
+            "data: {\"v\":\"answer\"}\n\n",
+            "event: ready\ndata: {\"response_message_id\":8}\n\n",
+            "event: close\ndata: {}\n\n"
+        );
+        let mut state = DeepSeekStreamState::default();
+        for update in decoder.push(stream.as_bytes()).unwrap() {
+            state.apply(update).unwrap();
+        }
+        assert_eq!(state.reasoning, "reasoning");
+        assert_eq!(state.output, "answer");
+        assert_eq!(state.response_message_id, Some(8));
         assert!(state.completed);
         state.validate_completion().unwrap();
     }
