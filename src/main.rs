@@ -62,6 +62,7 @@ use api::{
     anthropic_messages, capabilities, health, models, openai_chat, openai_responses, AppState,
 };
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{get, post},
     Router,
 };
@@ -273,6 +274,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("hybrid embedding retrieval enabled");
     }
 
+    let artifact_request_hard_limit = config
+        .artifacts
+        .max_request_size_bytes
+        .saturating_add(1024 * 1024);
     let state = AppState {
         gateway,
         catalog,
@@ -299,7 +304,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/models", get(models))
         .route("/v1/capabilities", get(capabilities))
-        .route("/v1/files", post(upload_file))
+        .route(
+            "/v1/files",
+            post(upload_file).layer(DefaultBodyLimit::max(artifact_request_hard_limit)),
+        )
         .route("/v1/files/{file_id}", get(get_file).delete(delete_file))
         .route("/v1/files/{file_id}/content", get(get_file_content))
         .route("/v1/threads", get(list_threads).post(create_thread))
