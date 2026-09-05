@@ -665,7 +665,7 @@ pub fn apply_browser_account_setup(
         let account = append_new_by_id(accounts, &account_id)?;
         account["provider"] = value(preset.provider_id);
         account["enabled"] = value(true);
-        account["discover_models"] = value(preset.id == "gemini");
+        account["discover_models"] = value(matches!(preset.id, "gemini" | "chatgpt"));
 
         let routes = ensure_aot(doc.as_table_mut(), "routes")?;
         let route = append_new_by_id(routes, &route_id)?;
