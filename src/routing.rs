@@ -48,6 +48,7 @@ pub struct RouteCandidateDecision {
     pub browser_recovery_penalty: i32,
     pub base_priority: i32,
     pub group_tier_priority: Option<i32>,
+    pub group_model_order: Option<usize>,
     pub eligible: bool,
     pub exclusion_reasons: Vec<String>,
     pub warnings: Vec<String>,
@@ -142,6 +143,12 @@ impl Router {
             if group.is_tiered()
                 && group.tier_priority_for_route(config, preferred)
                     != group.tier_priority_for_route(config, best)
+            {
+                return false;
+            }
+            if group.is_model_tiered()
+                && group.model_order_for_route(config, preferred)
+                    != group.model_order_for_route(config, best)
             {
                 return false;
             }
@@ -268,6 +275,10 @@ impl Router {
                 .virtual_models
                 .get(&resolved_model)
                 .and_then(|group| group.tier_priority_for_route(config.as_ref(), &route));
+            let group_model_order = config
+                .virtual_models
+                .get(&resolved_model)
+                .and_then(|group| group.model_order_for_route(config.as_ref(), &route));
             let task_fit = evaluate_task_fit(&task, &route, &config.routing);
             let task_adjustment = task_fit.snapshot.adjustment;
             let mut exclusion_reasons = Vec::new();
@@ -413,6 +424,7 @@ impl Router {
                     browser_recovery_penalty,
                     base_priority: route.priority,
                     group_tier_priority,
+                    group_model_order,
                     eligible,
                     exclusion_reasons,
                     warnings,
@@ -440,6 +452,7 @@ impl Router {
                 (
                     index,
                     candidate.decision.group_tier_priority.unwrap_or(0),
+                    candidate.decision.group_model_order.unwrap_or(0),
                     candidate.decision.transport_preference,
                     candidate.decision.final_score.unwrap_or(i32::MAX),
                     candidate.original_index,
@@ -447,7 +460,8 @@ impl Router {
             })
             .collect::<Vec<_>>();
         ranked_indices.sort_by(|left, right| {
-            let base = (left.1, left.2, left.3).cmp(&(right.1, right.2, right.3));
+            let base = (left.1, left.2, left.3, left.4)
+                .cmp(&(right.1, right.2, right.3, right.4));
             if base != std::cmp::Ordering::Equal {
                 return base;
             }
@@ -472,9 +486,11 @@ impl Router {
                 }
             }
 
-            left.4.cmp(&right.4)
+            left.5.cmp(&right.5)
         });
-        for (rank_index, (candidate_index, _, _, _, _)) in ranked_indices.into_iter().enumerate() {
+        for (rank_index, (candidate_index, _, _, _, _, _)) in
+            ranked_indices.into_iter().enumerate()
+        {
             let candidate = &mut evaluated[candidate_index];
             candidate.decision.rank = Some(rank_index + 1);
             candidate.decision.selected = rank_index == 0;
