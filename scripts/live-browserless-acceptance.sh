@@ -56,6 +56,7 @@ THREADS=()
 cleanup() {
   if [[ "$KEEP_THREADS" -eq 0 ]]; then
     for thread in "${THREADS[@]:-}"; do
+      [[ -n "$thread" ]] || continue
       curl -fsS -X DELETE \
         -H "Authorization: Bearer $API_KEY" \
         "$BASE_URL/v1/threads/$thread" >/dev/null 2>&1 || true
@@ -91,7 +92,8 @@ import json, sys
 path, expr = sys.argv[1], sys.argv[2]
 with open(path, encoding="utf-8") as f:
     value = json.load(f)
-result = eval(expr, {"__builtins__": {}}, {"x": value})
+safe = {"bool": bool, "int": int, "str": str, "any": any, "len": len}
+result = eval(expr, {"__builtins__": {}}, {"x": value, **safe})
 if isinstance(result, bool):
     print("true" if result else "false")
 elif result is None:
@@ -110,7 +112,8 @@ import json, sys
 path, expr, message = sys.argv[1:4]
 with open(path, encoding="utf-8") as f:
     x = json.load(f)
-if not eval(expr, {"__builtins__": {}}, {"x": x}):
+safe = {"bool": bool, "int": int, "str": str, "any": any, "len": len}
+if not eval(expr, {"__builtins__": {}}, {"x": x, **safe}):
     raise SystemExit("ACCEPTANCE FAILED: " + message + "\n" + json.dumps(x, indent=2))
 PY
 }
@@ -144,11 +147,9 @@ print(json.dumps({"title": sys.argv[1], "model": sys.argv[2]}))
 PY
 )"
   api POST "/v1/threads" "$output" "$body"
-  local thread
-  thread="$(json_eval "$output" "x.get('id','')")"
-  [[ -n "$thread" ]] || { echo "ACCEPTANCE FAILED: thread creation returned no id" >&2; exit 1; }
-  THREADS+=("$thread")
-  printf '%s' "$thread"
+  LAST_THREAD_ID="$(json_eval "$output" "x.get('id','')")"
+  [[ -n "$LAST_THREAD_ID" ]] || { echo "ACCEPTANCE FAILED: thread creation returned no id" >&2; exit 1; }
+  THREADS+=("$LAST_THREAD_ID")
 }
 
 send_message() {
@@ -226,7 +227,8 @@ assert_python "$TMP_DIR/runtime.json" "bool(x.get('direct_ready'))" "account is 
 assert_python "$TMP_DIR/runtime.json" "x.get('effective_transport') == 'direct-http'" "effective transport is not direct-http"
 
 step "Scenario 1/4: fresh native conversation"
-THREAD_A="$(create_thread "Browserless acceptance A")"
+create_thread "Browserless acceptance A"
+THREAD_A="$LAST_THREAD_ID"
 send_message "$THREAD_A" "Reply with exactly: browserless-a1" false "$TMP_DIR/a1.json" "$TMP_DIR/a1.headers"
 assert_python "$TMP_DIR/a1.json" "bool((x.get('choices') or [{}])[0].get('message',{}).get('content'))" "fresh thread returned empty assistant content"
 assert_browser_closed "fresh thread"
@@ -245,7 +247,8 @@ assert_python "$TMP_DIR/affinity-a2.json" "x.get('mapping',{}).get('conversation
 assert_python "$TMP_DIR/affinity-a2.json" "int(x.get('mapping',{}).get('last_synced_ordinal',0)) > $ORD_A1" "same-thread sync ordinal did not advance"
 
 step "Scenario 3/4: a new local thread gets a different native conversation"
-THREAD_B="$(create_thread "Browserless acceptance B")"
+create_thread "Browserless acceptance B"
+THREAD_B="$LAST_THREAD_ID"
 send_message "$THREAD_B" "Reply with exactly: browserless-b1" false "$TMP_DIR/b1.json" "$TMP_DIR/b1.headers"
 assert_python "$TMP_DIR/b1.json" "bool((x.get('choices') or [{}])[0].get('message',{}).get('content'))" "second local thread returned empty assistant content"
 assert_browser_closed "second local thread"
@@ -272,7 +275,8 @@ fi
 
 if [[ "$TEST_CANCELLATION" -eq 1 ]]; then
   step "Optional cancellation scenario: aborting a streaming request"
-  THREAD_C="$(create_thread "Browserless cancellation")"
+  create_thread "Browserless cancellation"
+THREAD_C="$LAST_THREAD_ID"
   CANCEL_BODY="$(python3 - "$ROUTE_ID" <<'PY'
 import json, sys
 print(json.dumps({
