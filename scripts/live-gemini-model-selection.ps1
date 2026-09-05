@@ -107,7 +107,26 @@ function Send-StreamingMessage([string]$ThreadId, [object]$Model, [string]$Promp
     Assert-True ($actualRoute -eq $expectedRoute) "stream model '$($Model.id)' routed via '$actualRoute', expected '$expectedRoute'"
 
     $sse = [string]$response.Content
-    Assert-True ($sse -match '(?m)^data:\s*\[DONE\]\s*
+    Assert-True ($sse.Contains("data: [DONE]")) "stream model '$($Model.id)' ended without [DONE]"
+    Assert-True ($sse.Contains('"content"')) "stream model '$($Model.id)' returned no assistant delta"
+    Assert-True ($sse -match '"finish_reason"\s*:\s*"[^"]+"') "stream model '$($Model.id)' returned no terminal finish_reason"
+    $frames = [regex]::Matches($sse, '(?m)^data:\s*\{')
+    Assert-True ($frames.Count -ge 2) "stream model '$($Model.id)' did not expose incremental SSE frames"
+
+    Start-Sleep -Milliseconds 250
+    $runtime = Invoke-GatewayJson -Method GET -Path "/_llmgateway/browser-accounts/$AccountId/runtime"
+    Assert-True (-not [bool]$runtime.browser_running) "Chromium is running after streaming model '$($Model.id)'"
+    Assert-True ([string]$runtime.last_execution.transport -eq "direct-http") "stream model '$($Model.id)' did not use direct-http"
+    Assert-True (-not [bool]$runtime.last_execution.browser_fallback) "stream model '$($Model.id)' used browser fallback"
+    Assert-True ([string]$runtime.last_execution.adapter_id -eq "gemini-web-http") "stream model '$($Model.id)' used adapter '$($runtime.last_execution.adapter_id)'"
+    Assert-True ([string]$runtime.last_execution.model -eq [string]$Model.external_id) "stream model '$($Model.id)' executed as '$($runtime.last_execution.model)', expected '$($Model.external_id)'"
+
+    $thread = Invoke-GatewayJson -Method GET -Path "/v1/threads/$ThreadId"
+    $emptyAssistants = @($thread.messages | Where-Object {
+        $_.role -eq "assistant" -and [string]::IsNullOrWhiteSpace([string]$_.content)
+    })
+    Assert-True ($emptyAssistants.Count -eq 0) "stream model '$($Model.id)' persisted an empty assistant message"
+}
 
 function Get-Affinity([string]$ThreadId) {
     return Invoke-GatewayJson -Method GET -Path "/_llmgateway/threads/$ThreadId/browser-affinity/$AccountId"
@@ -157,8 +176,8 @@ try {
 
     $publicModels = Invoke-GatewayJson -Method GET -Path "/v1/models"
     $publicIds = @($publicModels.data | ForEach-Object { [string]$_.id })
-    Assert-True ($publicIds -contains [string]$selectedA.id) "/v1/models does not expose Model A '$($selectedA.id)'"
-    Assert-True ($publicIds -contains [string]$selectedB.id) "/v1/models does not expose Model B '$($selectedB.id)'"
+    Assert-True ($publicIds -contains ([string]$selectedA.id)) "/v1/models does not expose Model A '$($selectedA.id)'"
+    Assert-True ($publicIds -contains ([string]$selectedB.id)) "/v1/models does not expose Model B '$($selectedB.id)'"
 
     Write-Host "[gemini-model-live] Model A: $($selectedA.display_name) [$($selectedA.id)]"
     Write-Host "[gemini-model-live] Model B: $($selectedB.display_name) [$($selectedB.id)]"
