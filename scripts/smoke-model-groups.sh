@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 
 export LLMGATEWAY_API_KEY="ci-local-key"
 export GROUP_ROUTE_KEY="healthy"
