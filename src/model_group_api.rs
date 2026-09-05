@@ -23,7 +23,10 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelGroupTierInput {
     pub priority: i32,
+    #[serde(default)]
     pub routes: Vec<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +43,7 @@ pub struct UpdateModelGroupRequest {
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelGroupTierView {
     pub priority: i32,
+    pub models: Vec<String>,
     pub routes: Vec<String>,
 }
 
@@ -48,8 +52,20 @@ pub struct ModelGroupView {
     pub id: String,
     pub mode: &'static str,
     pub is_default: bool,
+    pub models: Vec<String>,
     pub routes: Vec<String>,
     pub tiers: Vec<ModelGroupTierView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelGroupModelView {
+    pub id: String,
+    pub provider: String,
+    pub external_id: String,
+    pub display_name: String,
+    pub context_window: Option<i64>,
+    pub capabilities: Vec<String>,
+    pub active_accounts: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -94,10 +110,21 @@ pub async fn list_model_groups(
         return response;
     }
     let config = state.gateway.config_snapshot();
+    let models = match active_model_views(&state, config.as_ref()).await {
+        Ok(models) => models,
+        Err(error) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "model_group_catalog_error",
+                &error.to_string(),
+            )
+        }
+    };
     json_response(
         StatusCode::OK,
         json!({
             "data": group_views(config.as_ref()),
+            "models": models,
             "routes": route_views(config.as_ref()),
             "default_model": config.api.default_model
         }),
@@ -113,6 +140,21 @@ pub async fn create_model_group(
     if let Err(response) = authorize(&headers, &state.gateway_api_key) {
         return response;
     }
+    let config = state.gateway.config_snapshot();
+    let active_models = match active_model_ids(&state, config.as_ref()).await {
+        Ok(models) => models,
+        Err(error) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "model_group_catalog_error",
+                &error.to_string(),
+            )
+        }
+    };
+    if let Err(error) = validate_active_models(&body.tiers, &active_models) {
+        return model_group_error_response(error);
+    }
+
     let config_path = gateway_config_path();
     match apply_model_group(&config_path, &body.id, body.tiers, false) {
         Ok(backup_path) => mutation_response(
@@ -135,6 +177,21 @@ pub async fn update_model_group(
     if let Err(response) = authorize(&headers, &state.gateway_api_key) {
         return response;
     }
+    let config = state.gateway.config_snapshot();
+    let active_models = match active_model_ids(&state, config.as_ref()).await {
+        Ok(models) => models,
+        Err(error) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "model_group_catalog_error",
+                &error.to_string(),
+            )
+        }
+    };
+    if let Err(error) = validate_active_models(&body.tiers, &active_models) {
+        return model_group_error_response(error);
+    }
+
     let config_path = gateway_config_path();
     match apply_model_group(&config_path, &group_id, body.tiers, true) {
         Ok(backup_path) => mutation_response(
@@ -195,7 +252,12 @@ fn mutation_response(
             json_response(
                 status,
                 json!(ModelGroupMutationResult {
-                    group: group_view(group_id, group, config.api.default_model == group_id),
+                    group: group_view(
+                        config.as_ref(),
+                        group_id,
+                        group,
+                        config.api.default_model == group_id,
+                    ),
                     config_path: config_path.to_string(),
                     backup_path: backup_path.map(|path| path.display().to_string()),
                     restart_required: false,
@@ -224,7 +286,9 @@ fn group_views(config: &AppConfig) -> Vec<ModelGroupView> {
     let mut groups = config
         .virtual_models
         .iter()
-        .map(|(id, group)| group_view(id, group, config.api.default_model == *id))
+        .map(|(id, group)| {
+            group_view(config, id, group, config.api.default_model == *id)
+        })
         .collect::<Vec<_>>();
     groups.sort_by(|left, right| {
         right
@@ -235,23 +299,141 @@ fn group_views(config: &AppConfig) -> Vec<ModelGroupView> {
     groups
 }
 
-fn group_view(id: &str, group: &VirtualModelConfig, is_default: bool) -> ModelGroupView {
+fn group_view(
+    config: &AppConfig,
+    id: &str,
+    group: &VirtualModelConfig,
+    is_default: bool,
+) -> ModelGroupView {
     let mut tiers = group
         .tiers
         .iter()
         .map(|tier| ModelGroupTierView {
             priority: tier.priority,
+            models: if tier.models.is_empty() {
+                models_for_routes(config, &tier.routes)
+            } else {
+                tier.models.clone()
+            },
             routes: tier.routes.clone(),
         })
         .collect::<Vec<_>>();
     tiers.sort_by_key(|tier| tier.priority);
+
+    let models = if group.is_tiered() {
+        Vec::new()
+    } else {
+        models_for_routes(config, &group.routes)
+    };
+    let mode = if group.is_model_tiered() {
+        "model-tiered"
+    } else if group.is_tiered() {
+        "route-tiered"
+    } else {
+        "flat"
+    };
+
     ModelGroupView {
         id: id.to_string(),
-        mode: if group.is_tiered() { "tiered" } else { "flat" },
+        mode,
         is_default,
+        models,
         routes: group.routes.clone(),
         tiers,
     }
+}
+
+fn models_for_routes(config: &AppConfig, route_ids: &[String]) -> Vec<String> {
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for route_id in route_ids {
+        let Some(route) = config.route(route_id) else {
+            continue;
+        };
+        let Some(account) = config.account(&route.account) else {
+            continue;
+        };
+        let model = format!(
+            "{}/{}",
+            account.provider.trim_matches('/'),
+            route.model.trim_start_matches('/')
+        );
+        if seen.insert(model.clone()) {
+            models.push(model);
+        }
+    }
+    models
+}
+
+async fn active_model_views(
+    state: &AppState,
+    config: &AppConfig,
+) -> Result<Vec<ModelGroupModelView>, crate::catalog::CatalogError> {
+    let mut result = Vec::new();
+    for model in state.catalog.selectable_models().await? {
+        let active_accounts = model
+            .accounts
+            .iter()
+            .filter(|binding| {
+                binding.enabled
+                    && matches!(binding.availability.as_str(), "available" | "unknown")
+                    && config
+                        .account(&binding.account_id)
+                        .is_some_and(|account| {
+                            account.enabled && account.provider == model.provider
+                        })
+            })
+            .map(|binding| binding.account_id.clone())
+            .collect::<Vec<_>>();
+        if active_accounts.is_empty() {
+            continue;
+        }
+
+        result.push(ModelGroupModelView {
+            id: model.id,
+            provider: model.provider,
+            external_id: model.external_id,
+            display_name: model.display_name,
+            context_window: model.context_window,
+            capabilities: model.capabilities,
+            active_accounts,
+        });
+    }
+    result.sort_by(|left, right| {
+        left.provider
+            .cmp(&right.provider)
+            .then_with(|| left.display_name.cmp(&right.display_name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(result)
+}
+
+async fn active_model_ids(
+    state: &AppState,
+    config: &AppConfig,
+) -> Result<HashSet<String>, crate::catalog::CatalogError> {
+    Ok(active_model_views(state, config)
+        .await?
+        .into_iter()
+        .map(|model| model.id)
+        .collect())
+}
+
+fn validate_active_models(
+    tiers: &[ModelGroupTierInput],
+    active_models: &HashSet<String>,
+) -> Result<(), ModelGroupError> {
+    for tier in tiers {
+        for model_id in &tier.models {
+            if !active_models.contains(model_id) {
+                return Err(ModelGroupError::Invalid(format!(
+                    "model '{}' is not currently enabled and active",
+                    model_id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn route_views(config: &AppConfig) -> Vec<ModelGroupRouteView> {
@@ -306,9 +488,15 @@ pub fn apply_model_group(
     for tier in tiers {
         let mut table = Table::new();
         table["priority"] = value(i64::from(tier.priority));
-        table["routes"] = Item::Value(Value::Array(string_array(
-            tier.routes.iter().map(String::as_str),
-        )));
+        if !tier.models.is_empty() {
+            table["models"] = Item::Value(Value::Array(string_array(
+                tier.models.iter().map(String::as_str),
+            )));
+        } else {
+            table["routes"] = Item::Value(Value::Array(string_array(
+                tier.routes.iter().map(String::as_str),
+            )));
+        }
         tier_tables.push(table);
     }
     group["tiers"] = Item::ArrayOfTables(tier_tables);
@@ -381,8 +569,11 @@ fn validate_tiers(
             "a model group must contain at least one tier".into(),
         ));
     }
+
     let mut priorities = HashSet::new();
     let mut routes = HashSet::new();
+    let mut models = HashSet::new();
+    let mut membership_kind: Option<&str> = None;
     for tier in &tiers {
         if tier.priority < 0 {
             return Err(ModelGroupError::Invalid(
@@ -395,12 +586,27 @@ fn validate_tiers(
                 tier.priority
             )));
         }
-        if tier.routes.is_empty() {
+        if tier.routes.is_empty() && tier.models.is_empty() {
             return Err(ModelGroupError::Invalid(format!(
-                "tier {} must contain at least one route",
+                "tier {} must contain at least one model",
                 tier.priority
             )));
         }
+        if !tier.routes.is_empty() && !tier.models.is_empty() {
+            return Err(ModelGroupError::Invalid(format!(
+                "tier {} cannot mix routes and models",
+                tier.priority
+            )));
+        }
+
+        let tier_kind = if tier.models.is_empty() { "routes" } else { "models" };
+        if membership_kind.is_some_and(|kind| kind != tier_kind) {
+            return Err(ModelGroupError::Invalid(
+                "a model group cannot mix route-backed and model-backed tiers".into(),
+            ));
+        }
+        membership_kind = Some(tier_kind);
+
         for route_id in &tier.routes {
             if config.route(route_id).is_none() {
                 return Err(ModelGroupError::Invalid(format!(
@@ -412,6 +618,29 @@ fn validate_tiers(
                 return Err(ModelGroupError::Invalid(format!(
                     "route '{}' is assigned to more than one tier",
                     route_id
+                )));
+            }
+        }
+        for model_id in &tier.models {
+            let Some((provider_id, external_id)) = model_id.split_once('/') else {
+                return Err(ModelGroupError::Invalid(format!(
+                    "model '{}' must use canonical provider/model form",
+                    model_id
+                )));
+            };
+            if provider_id.is_empty()
+                || external_id.is_empty()
+                || config.provider(provider_id).is_none()
+            {
+                return Err(ModelGroupError::Invalid(format!(
+                    "model '{}' is not valid for this gateway",
+                    model_id
+                )));
+            }
+            if !models.insert(model_id.as_str()) {
+                return Err(ModelGroupError::Invalid(format!(
+                    "model '{}' is assigned to more than one tier",
+                    model_id
                 )));
             }
         }
@@ -576,10 +805,12 @@ routes = ["route-a", "route-b"]
                 ModelGroupTierInput {
                     priority: 20,
                     routes: vec!["route-b".into()],
+                    models: Vec::new(),
                 },
                 ModelGroupTierInput {
                     priority: 10,
                     routes: vec!["route-a".into()],
+                    models: Vec::new(),
                 },
             ],
             false,
@@ -601,6 +832,7 @@ routes = ["route-a", "route-b"]
             vec![ModelGroupTierInput {
                 priority: 5,
                 routes: vec!["route-b".into()],
+                models: Vec::new(),
             }],
             true,
         )
@@ -621,6 +853,39 @@ routes = ["route-a", "route-b"]
     }
 
     #[test]
+    fn creates_model_backed_group() {
+        let path = temp_config();
+        apply_model_group(
+            &path,
+            "model-group",
+            vec![
+                ModelGroupTierInput {
+                    priority: 10,
+                    routes: Vec::new(),
+                    models: vec!["fake/model-a".into()],
+                },
+                ModelGroupTierInput {
+                    priority: 20,
+                    routes: Vec::new(),
+                    models: vec!["fake/model-b".into()],
+                },
+            ],
+            false,
+        )
+        .unwrap();
+
+        let parsed = AppConfig::load(&path).unwrap();
+        let group = &parsed.virtual_models["model-group"];
+        assert!(group.is_model_tiered());
+        assert_eq!(group.model_ids(), vec!["fake/model-a", "fake/model-b"]);
+        assert_eq!(
+            group.tier_priority_for_route(&parsed, parsed.route("route-a").unwrap()),
+            Some(10)
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn rejects_duplicate_route_across_tiers() {
         let path = temp_config();
         let error = apply_model_group(
@@ -630,10 +895,12 @@ routes = ["route-a", "route-b"]
                 ModelGroupTierInput {
                     priority: 10,
                     routes: vec!["route-a".into()],
+                    models: Vec::new(),
                 },
                 ModelGroupTierInput {
                     priority: 20,
                     routes: vec!["route-a".into()],
+                    models: Vec::new(),
                 },
             ],
             false,
