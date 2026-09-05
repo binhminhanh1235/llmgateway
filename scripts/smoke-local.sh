@@ -167,7 +167,7 @@ STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"model":"llmgateway-auto","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}' )
-assert_json_error 400 unsupported_input_modality "$STATUS"
+assert_json_error 400 unsupported_capability "$STATUS"
 
 STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/nonexistent-session/attention \
