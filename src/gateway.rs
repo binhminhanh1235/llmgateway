@@ -988,6 +988,8 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
     match error {
         BrowserProviderError::InvalidConfig(_)
         | BrowserProviderError::UnsupportedAdapter(_)
+        | BrowserProviderError::UnsupportedBrowserless(_)
+        | BrowserProviderError::InvalidTransportPolicy(_)
         | BrowserProviderError::MissingBinding(_)
         | BrowserProviderError::Io(_)
         | BrowserProviderError::Toml(_) => GatewayError::InvalidConfig(error.to_string()),
