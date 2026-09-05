@@ -212,114 +212,33 @@ PY
 }
 
 stream_model() {
-  local thread="$1" model="$2" external="$3" prompt="$4" prefix="$5"
+  local thread="$1" model="$2" external="$3" prompt="$4" prefix_name="$5"
   local body
   body="$(python3 - "$prompt" "$model" <<'PY'
 import json,sys
 print(json.dumps({"content":sys.argv[1],"model":sys.argv[2],"stream":True}))
 PY
 )"
-  curl -fsS --no-buffer -D "$TMP_DIR/$prefix.headers" -o "$TMP_DIR/$prefix.sse" \
+  curl -fsS --no-buffer -D "$TMP_DIR/$prefix_name.headers" -o "$TMP_DIR/$prefix_name.sse" \
     -X POST -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
     --data-binary "$body" "$BASE_URL/v1/threads/$thread/messages"
-  local actual expected
-  actual="$(awk 'BEGIN{IGNORECASE=1} /^x-llmgateway-route:/{gsub("\r",""); sub(/^[^:]+:[[:space:]]*/,""); print; exit}' "$TMP_DIR/$prefix.headers")"
+
+  local actual expected frames
+  actual="$(awk 'BEGIN{IGNORECASE=1} /^x-llmgateway-route:/{gsub("\r",""); sub(/^[^:]+:[[:space:]]*/,""); print; exit}' "$TMP_DIR/$prefix_name.headers")"
   expected="discovered:$ACCOUNT_ID:$external"
   [[ "$actual" == "$expected" ]] || { echo "MODEL ACCEPTANCE FAILED: stream route $actual != $expected" >&2; exit 1; }
-  grep -Eq '^data:[[:space:]]*\[DONE\][[:space:]]*
-THREAD_A="$LAST_THREAD"
-send_model "$THREAD_A" "$MODEL_A_ID" "$MODEL_A_EXTERNAL" "Reply with exactly: model-a" "a"
-api GET "/_llmgateway/threads/$THREAD_A/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-a.json"
 
-create_thread "Gemini model B acceptance" "$MODEL_B_ID" "$TMP_DIR/thread-b.json"
-THREAD_B="$LAST_THREAD"
-send_model "$THREAD_B" "$MODEL_B_ID" "$MODEL_B_EXTERNAL" "Reply with exactly: model-b" "b"
-api GET "/_llmgateway/threads/$THREAD_B/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-b.json"
-
-python3 - "$TMP_DIR/affinity-a.json" "$TMP_DIR/affinity-b.json" <<'PY'
-import json,sys
-a=json.load(open(sys.argv[1],encoding="utf-8"))
-b=json.load(open(sys.argv[2],encoding="utf-8"))
-ua=((a.get("mapping") or {}).get("conversation_url") or "")
-ub=((b.get("mapping") or {}).get("conversation_url") or "")
-if not ua or not ub:
-    raise SystemExit("MODEL ACCEPTANCE FAILED: native Gemini affinity missing")
-if ua == ub:
-    raise SystemExit("MODEL ACCEPTANCE FAILED: two local threads share one native conversation")
-PY
-
-URL_A="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("mapping") or {}).get("conversation_url",""))' "$TMP_DIR/affinity-a.json")"
-URL_B="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("mapping") or {}).get("conversation_url",""))' "$TMP_DIR/affinity-b.json")"
-ORD_A="$(python3 -c 'import json,sys; print(int((json.load(open(sys.argv[1])).get("mapping") or {}).get("last_synced_ordinal",0)))' "$TMP_DIR/affinity-a.json")"
-ORD_B="$(python3 -c 'import json,sys; print(int((json.load(open(sys.argv[1])).get("mapping") or {}).get("last_synced_ordinal",0)))' "$TMP_DIR/affinity-b.json")"
-
-send_model "$THREAD_A" "$MODEL_A_ID" "$MODEL_A_EXTERNAL" "Reply with exactly: model-a-continued" "a2"
-api GET "/_llmgateway/threads/$THREAD_A/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-a2.json"
-python3 - "$TMP_DIR/affinity-a2.json" "$URL_A" "$ORD_A" <<'PY'
-import json,sys
-x=json.load(open(sys.argv[1],encoding="utf-8")); mapping=x.get("mapping") or {}
-if mapping.get("conversation_url") != sys.argv[2]:
-    raise SystemExit("MODEL ACCEPTANCE FAILED: Model A continuation changed native Gemini conversation")
-if int(mapping.get("last_synced_ordinal") or 0) <= int(sys.argv[3]):
-    raise SystemExit("MODEL ACCEPTANCE FAILED: Model A continuation did not advance native affinity")
-PY
-
-send_model "$THREAD_B" "$MODEL_B_ID" "$MODEL_B_EXTERNAL" "Reply with exactly: model-b-continued" "b2"
-api GET "/_llmgateway/threads/$THREAD_B/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-b2.json"
-python3 - "$TMP_DIR/affinity-b2.json" "$URL_B" "$ORD_B" <<'PY'
-import json,sys
-x=json.load(open(sys.argv[1],encoding="utf-8")); mapping=x.get("mapping") or {}
-if mapping.get("conversation_url") != sys.argv[2]:
-    raise SystemExit("MODEL ACCEPTANCE FAILED: Model B continuation changed native Gemini conversation")
-if int(mapping.get("last_synced_ordinal") or 0) <= int(sys.argv[3]):
-    raise SystemExit("MODEL ACCEPTANCE FAILED: Model B continuation did not advance native affinity")
-PY
-
-ORD_A2="$(python3 -c 'import json,sys; print(int((json.load(open(sys.argv[1])).get("mapping") or {}).get("last_synced_ordinal",0)))' "$TMP_DIR/affinity-a2.json")"
-ORD_B2="$(python3 -c 'import json,sys; print(int((json.load(open(sys.argv[1])).get("mapping") or {}).get("last_synced_ordinal",0)))' "$TMP_DIR/affinity-b2.json")"
-
-stream_model "$THREAD_A" "$MODEL_A_ID" "$MODEL_A_EXTERNAL" "Reply with exactly: model-a-stream" "a-stream"
-api GET "/_llmgateway/threads/$THREAD_A/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-a3.json"
-python3 - "$TMP_DIR/affinity-a3.json" "$URL_A" "$ORD_A2" <<'PY'
-import json,sys
-x=json.load(open(sys.argv[1],encoding="utf-8")); mapping=x.get("mapping") or {}
-if mapping.get("conversation_url") != sys.argv[2]:
-    raise SystemExit("MODEL ACCEPTANCE FAILED: Model A streaming changed native Gemini conversation")
-if int(mapping.get("last_synced_ordinal") or 0) <= int(sys.argv[3]):
-    raise SystemExit("MODEL ACCEPTANCE FAILED: Model A streaming did not advance native affinity")
-PY
-
-stream_model "$THREAD_B" "$MODEL_B_ID" "$MODEL_B_EXTERNAL" "Reply with exactly: model-b-stream" "b-stream"
-api GET "/_llmgateway/threads/$THREAD_B/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-b3.json"
-python3 - "$TMP_DIR/affinity-b3.json" "$URL_B" "$ORD_B2" <<'PY'
-import json,sys
-x=json.load(open(sys.argv[1],encoding="utf-8")); mapping=x.get("mapping") or {}
-if mapping.get("conversation_url") != sys.argv[2]:
-    raise SystemExit("MODEL ACCEPTANCE FAILED: Model B streaming changed native Gemini conversation")
-if int(mapping.get("last_synced_ordinal") or 0) <= int(sys.argv[3]):
-    raise SystemExit("MODEL ACCEPTANCE FAILED: Model B streaming did not advance native affinity")
-PY
-
-echo
-echo "GEMINI BROWSERLESS MODEL SELECTION: PASS"
-echo "Account: $ACCOUNT_ID"
-echo "Model A: $MODEL_A_ID -> discovered:$ACCOUNT_ID:$MODEL_A_EXTERNAL"
-echo "Model B: $MODEL_B_ID -> discovered:$ACCOUNT_ID:$MODEL_B_EXTERNAL"
-if [[ "$SKIP_REFRESH" -eq 1 ]]; then
-  echo "Catalog mode: persisted-after-restart"
-else
-  echo "Catalog mode: live-refresh"
-fi
-echo "Chromium running: false"
- "$TMP_DIR/$prefix.sse" || { echo "MODEL ACCEPTANCE FAILED: $model stream ended without [DONE]" >&2; exit 1; }
-  grep -Fq '"content"' "$TMP_DIR/$prefix.sse" || { echo "MODEL ACCEPTANCE FAILED: $model stream returned no assistant delta" >&2; exit 1; }
-  grep -Eq '"finish_reason"[[:space:]]*:[[:space:]]*"[^"]+"' "$TMP_DIR/$prefix.sse" || { echo "MODEL ACCEPTANCE FAILED: $model stream returned no terminal finish_reason" >&2; exit 1; }
-  local frames
-  frames="$(grep -Ec '^data:[[:space:]]*\{' "$TMP_DIR/$prefix.sse" || true)"
+  grep -Eq '^data:[[:space:]]*\[DONE\][[:space:]]*$' "$TMP_DIR/$prefix_name.sse" \
+    || { echo "MODEL ACCEPTANCE FAILED: $model stream ended without [DONE]" >&2; exit 1; }
+  grep -Fq '"content"' "$TMP_DIR/$prefix_name.sse" \
+    || { echo "MODEL ACCEPTANCE FAILED: $model stream returned no assistant delta" >&2; exit 1; }
+  grep -Eq '"finish_reason"[[:space:]]*:[[:space:]]*"[^"]+"' "$TMP_DIR/$prefix_name.sse" \
+    || { echo "MODEL ACCEPTANCE FAILED: $model stream returned no terminal finish_reason" >&2; exit 1; }
+  frames="$(grep -Ec '^data:[[:space:]]*\{' "$TMP_DIR/$prefix_name.sse" || true)"
   [[ "$frames" -ge 2 ]] || { echo "MODEL ACCEPTANCE FAILED: $model stream did not expose incremental SSE frames" >&2; exit 1; }
 
-  api GET "/_llmgateway/browser-accounts/$ACCOUNT_ID/runtime" "$TMP_DIR/$prefix.runtime.json"
-  python3 - "$TMP_DIR/$prefix.runtime.json" "$model" "$external" <<'PY'
+  api GET "/_llmgateway/browser-accounts/$ACCOUNT_ID/runtime" "$TMP_DIR/$prefix_name.runtime.json"
+  python3 - "$TMP_DIR/$prefix_name.runtime.json" "$model" "$external" <<'PY'
 import json,sys
 runtime=json.load(open(sys.argv[1],encoding="utf-8"))
 model,external=sys.argv[2:4]
@@ -332,13 +251,23 @@ if last.get("model") != external:
     raise SystemExit(f"MODEL ACCEPTANCE FAILED: streaming {model} executed as {last.get('model')!r}, expected {external!r}")
 PY
 
-  api GET "/v1/threads/$thread" "$TMP_DIR/$prefix.thread.json"
-  python3 - "$TMP_DIR/$prefix.thread.json" <<'PY'
+  api GET "/v1/threads/$thread" "$TMP_DIR/$prefix_name.thread.json"
+  python3 - "$TMP_DIR/$prefix_name.thread.json" <<'PY'
 import json,sys
 thread=json.load(open(sys.argv[1],encoding="utf-8"))
 for message in thread.get("messages",[]):
     if message.get("role") == "assistant" and not str(message.get("content") or "").strip():
         raise SystemExit("MODEL ACCEPTANCE FAILED: streaming persisted an empty assistant message")
+PY
+}
+
+affinity_values() {
+  local input="$1"
+  python3 - "$input" <<'PY'
+import json,sys
+mapping=(json.load(open(sys.argv[1],encoding="utf-8")).get("mapping") or {})
+print(mapping.get("conversation_url") or "")
+print(int(mapping.get("last_synced_ordinal") or 0))
 PY
 }
 
@@ -352,21 +281,47 @@ THREAD_B="$LAST_THREAD"
 send_model "$THREAD_B" "$MODEL_B_ID" "$MODEL_B_EXTERNAL" "Reply with exactly: model-b" "b"
 api GET "/_llmgateway/threads/$THREAD_B/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-b.json"
 
-python3 - "$TMP_DIR/affinity-a.json" "$TMP_DIR/affinity-b.json" <<'PY'
-import json,sys
-a=json.load(open(sys.argv[1],encoding="utf-8"))
-b=json.load(open(sys.argv[2],encoding="utf-8"))
-ua=((a.get("mapping") or {}).get("conversation_url") or "")
-ub=((b.get("mapping") or {}).get("conversation_url") or "")
-if not ua or not ub:
-    raise SystemExit("MODEL ACCEPTANCE FAILED: native Gemini affinity missing")
-if ua == ub:
-    raise SystemExit("MODEL ACCEPTANCE FAILED: two local threads share one native conversation")
-PY
+mapfile -t A1 < <(affinity_values "$TMP_DIR/affinity-a.json")
+mapfile -t B1 < <(affinity_values "$TMP_DIR/affinity-b.json")
+URL_A="${A1[0]:-}"
+ORD_A="${A1[1]:-0}"
+URL_B="${B1[0]:-}"
+ORD_B="${B1[1]:-0}"
+[[ -n "$URL_A" && -n "$URL_B" ]] || { echo "MODEL ACCEPTANCE FAILED: native Gemini affinity missing" >&2; exit 1; }
+[[ "$URL_A" != "$URL_B" ]] || { echo "MODEL ACCEPTANCE FAILED: two local threads share one native conversation" >&2; exit 1; }
+
+send_model "$THREAD_A" "$MODEL_A_ID" "$MODEL_A_EXTERNAL" "Reply with exactly: model-a-continued" "a2"
+api GET "/_llmgateway/threads/$THREAD_A/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-a2.json"
+mapfile -t A2 < <(affinity_values "$TMP_DIR/affinity-a2.json")
+[[ "${A2[0]:-}" == "$URL_A" ]] || { echo "MODEL ACCEPTANCE FAILED: Model A continuation changed native Gemini conversation" >&2; exit 1; }
+[[ "${A2[1]:-0}" -gt "$ORD_A" ]] || { echo "MODEL ACCEPTANCE FAILED: Model A continuation did not advance native affinity" >&2; exit 1; }
+
+send_model "$THREAD_B" "$MODEL_B_ID" "$MODEL_B_EXTERNAL" "Reply with exactly: model-b-continued" "b2"
+api GET "/_llmgateway/threads/$THREAD_B/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-b2.json"
+mapfile -t B2 < <(affinity_values "$TMP_DIR/affinity-b2.json")
+[[ "${B2[0]:-}" == "$URL_B" ]] || { echo "MODEL ACCEPTANCE FAILED: Model B continuation changed native Gemini conversation" >&2; exit 1; }
+[[ "${B2[1]:-0}" -gt "$ORD_B" ]] || { echo "MODEL ACCEPTANCE FAILED: Model B continuation did not advance native affinity" >&2; exit 1; }
+
+stream_model "$THREAD_A" "$MODEL_A_ID" "$MODEL_A_EXTERNAL" "Reply with exactly: model-a-stream" "a-stream"
+api GET "/_llmgateway/threads/$THREAD_A/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-a3.json"
+mapfile -t A3 < <(affinity_values "$TMP_DIR/affinity-a3.json")
+[[ "${A3[0]:-}" == "$URL_A" ]] || { echo "MODEL ACCEPTANCE FAILED: Model A streaming changed native Gemini conversation" >&2; exit 1; }
+[[ "${A3[1]:-0}" -gt "${A2[1]:-0}" ]] || { echo "MODEL ACCEPTANCE FAILED: Model A streaming did not advance native affinity" >&2; exit 1; }
+
+stream_model "$THREAD_B" "$MODEL_B_ID" "$MODEL_B_EXTERNAL" "Reply with exactly: model-b-stream" "b-stream"
+api GET "/_llmgateway/threads/$THREAD_B/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-b3.json"
+mapfile -t B3 < <(affinity_values "$TMP_DIR/affinity-b3.json")
+[[ "${B3[0]:-}" == "$URL_B" ]] || { echo "MODEL ACCEPTANCE FAILED: Model B streaming changed native Gemini conversation" >&2; exit 1; }
+[[ "${B3[1]:-0}" -gt "${B2[1]:-0}" ]] || { echo "MODEL ACCEPTANCE FAILED: Model B streaming did not advance native affinity" >&2; exit 1; }
 
 echo
 echo "GEMINI BROWSERLESS MODEL SELECTION: PASS"
 echo "Account: $ACCOUNT_ID"
 echo "Model A: $MODEL_A_ID -> discovered:$ACCOUNT_ID:$MODEL_A_EXTERNAL"
 echo "Model B: $MODEL_B_ID -> discovered:$ACCOUNT_ID:$MODEL_B_EXTERNAL"
+if [[ "$SKIP_REFRESH" -eq 1 ]]; then
+  echo "Catalog mode: persisted-after-restart"
+else
+  echo "Catalog mode: live-refresh"
+fi
 echo "Chromium running: false"
