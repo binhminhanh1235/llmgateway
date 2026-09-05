@@ -457,6 +457,19 @@ impl BrowserProviderRegistry {
             .is_some_and(|adapter| adapter.supports_model_discovery())
     }
 
+    pub fn account_supports_model_discovery(
+        &self,
+        provider_kind: &str,
+        account_id: &str,
+    ) -> bool {
+        let config = self.config_snapshot();
+        let Some(binding) = config.bindings.get(account_id) else {
+            return false;
+        };
+        self.direct_adapter(provider_kind, binding)
+            .is_some_and(|adapter| adapter.supports_model_discovery())
+    }
+
     pub async fn discover_models(
         &self,
         provider_kind: &str,
