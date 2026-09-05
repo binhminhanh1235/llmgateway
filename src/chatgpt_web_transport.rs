@@ -983,7 +983,7 @@ impl ChatGptWebHttpAdapter {
                     Ok(chunk) => chunk,
                     Err(error) => {
                         yield Err(std::io::Error::other(format!(
-                            "ChatGPT browserless stream body failed: {error}"
+                            "ChatGPT browserless stream body failed: {}", reqwest_error_detail(&error)
                         )));
                         return;
                     }
@@ -1073,7 +1073,7 @@ impl ChatGptWebHttpAdapter {
                         Ok(chunk) => chunk,
                         Err(error) => {
                             yield Err(std::io::Error::other(format!(
-                                "ChatGPT browserless resume body failed: {error}"
+                                "ChatGPT browserless resume body failed: {}", reqwest_error_detail(&error)
                             )));
                             return;
                         }
@@ -2281,7 +2281,12 @@ async fn consume_response_bytes(
     let mut decoder = SseDecoder::default();
     let mut bytes = response.bytes_stream();
     while let Some(chunk) = bytes.next().await {
-        let chunk = chunk.map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        let chunk = chunk.map_err(|error| {
+            BrowserProviderError::Transport(format!(
+                "ChatGPT browserless response body failed: {}",
+                reqwest_error_detail(&error)
+            ))
+        })?;
         for event in decoder
             .push(&chunk)
             .map_err(BrowserProviderError::Transport)?
