@@ -728,6 +728,8 @@ impl ChatGptWebHttpAdapter {
                     ),
                 )
                 .await?;
+            state.saw_done = false;
+            state.stream_complete = false;
             consume_response_bytes(resumed, &mut state).await?;
         }
         validate_stream_success(&state)?;
