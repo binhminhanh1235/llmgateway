@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::{collections::HashMap, env, fs, net::IpAddr, path::Path};
+use std::{collections::{HashMap, HashSet}, env, fs, net::IpAddr, path::Path};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -20,7 +20,7 @@ pub struct AppConfig {
     pub accounts: Vec<AccountConfig>,
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
-    #[serde(default)]
+    #[serde(default, alias = "model_groups")]
     pub virtual_models: HashMap<String, VirtualModelConfig>,
     #[serde(default)]
     pub aliases: Vec<ModelAlias>,
@@ -310,7 +310,42 @@ pub struct RouteConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct VirtualModelConfig {
+    #[serde(default)]
     pub routes: Vec<String>,
+    #[serde(default)]
+    pub tiers: Vec<VirtualModelTierConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct VirtualModelTierConfig {
+    pub priority: i32,
+    pub routes: Vec<String>,
+}
+
+impl VirtualModelConfig {
+    pub fn is_tiered(&self) -> bool {
+        !self.tiers.is_empty()
+    }
+
+    pub fn route_ids(&self) -> Vec<&str> {
+        if self.tiers.is_empty() {
+            return self.routes.iter().map(String::as_str).collect();
+        }
+
+        let mut tiers = self.tiers.iter().enumerate().collect::<Vec<_>>();
+        tiers.sort_by_key(|(index, tier)| (tier.priority, *index));
+        tiers
+            .into_iter()
+            .flat_map(|(_, tier)| tier.routes.iter().map(String::as_str))
+            .collect()
+    }
+
+    pub fn tier_priority(&self, route_id: &str) -> Option<i32> {
+        self.tiers
+            .iter()
+            .find(|tier| tier.routes.iter().any(|candidate| candidate == route_id))
+            .map(|tier| tier.priority)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -679,12 +714,70 @@ impl AppConfig {
         }
 
         for (name, virtual_model) in &self.virtual_models {
-            for route_id in &virtual_model.routes {
-                if self.route(route_id).is_none() {
-                    return Err(ConfigError::Invalid(format!(
-                        "virtual model '{}' references unknown route '{}'",
-                        name, route_id
-                    )));
+            if virtual_model.routes.is_empty() && virtual_model.tiers.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "virtual model '{}' must define routes or tiers",
+                    name
+                )));
+            }
+            if !virtual_model.routes.is_empty() && !virtual_model.tiers.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "virtual model '{}' cannot mix legacy routes with tiers",
+                    name
+                )));
+            }
+
+            let mut seen_routes = HashSet::new();
+            if virtual_model.tiers.is_empty() {
+                for route_id in &virtual_model.routes {
+                    if !seen_routes.insert(route_id.as_str()) {
+                        return Err(ConfigError::Invalid(format!(
+                            "virtual model '{}' references route '{}' more than once",
+                            name, route_id
+                        )));
+                    }
+                    if self.route(route_id).is_none() {
+                        return Err(ConfigError::Invalid(format!(
+                            "virtual model '{}' references unknown route '{}'",
+                            name, route_id
+                        )));
+                    }
+                }
+            } else {
+                let mut seen_priorities = HashSet::new();
+                for tier in &virtual_model.tiers {
+                    if tier.priority < 0 {
+                        return Err(ConfigError::Invalid(format!(
+                            "virtual model '{}' tier priority must be non-negative",
+                            name
+                        )));
+                    }
+                    if tier.routes.is_empty() {
+                        return Err(ConfigError::Invalid(format!(
+                            "virtual model '{}' tier {} must contain at least one route",
+                            name, tier.priority
+                        )));
+                    }
+                    if !seen_priorities.insert(tier.priority) {
+                        return Err(ConfigError::Invalid(format!(
+                            "virtual model '{}' defines tier priority {} more than once",
+                            name, tier.priority
+                        )));
+                    }
+                    for route_id in &tier.routes {
+                        if !seen_routes.insert(route_id.as_str()) {
+                            return Err(ConfigError::Invalid(format!(
+                                "virtual model '{}' references route '{}' in more than one tier",
+                                name, route_id
+                            )));
+                        }
+                        if self.route(route_id).is_none() {
+                            return Err(ConfigError::Invalid(format!(
+                                "virtual model '{}' references unknown route '{}'",
+                                name, route_id
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -963,4 +1056,75 @@ enabled = true"#,
         assert_eq!(config.routing.browser_recovery_max_penalty, 40);
         assert!(config.routing.browser_sticky_affinity);
     }
+
+    #[test]
+    fn model_groups_alias_supports_ordered_fallback_tiers() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "api"
+kind = "openai-compatible"
+base_url = "https://example.test/v1""#,
+            r#"[[accounts]]
+id = "account"
+provider = "api"
+api_key_env = "EXAMPLE_API_KEY"
+enabled = true"#,
+        );
+        let raw = raw.replace(
+            "[virtual_models.llmgateway-auto]\nroutes = [\"route\"]",
+            "[[model_groups.llmgateway-auto.tiers]]\npriority = 10\nroutes = [\"route\"]",
+        );
+        let config = AppConfig::parse(&raw).unwrap();
+        let group = config.virtual_models.get("llmgateway-auto").unwrap();
+        assert!(group.is_tiered());
+        assert_eq!(group.route_ids(), vec!["route"]);
+        assert_eq!(group.tier_priority("route"), Some(10));
+    }
+
+    #[test]
+    fn tiered_virtual_model_rejects_duplicate_route_membership() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "api"
+kind = "openai-compatible"
+base_url = "https://example.test/v1""#,
+            r#"[[accounts]]
+id = "account"
+provider = "api"
+api_key_env = "EXAMPLE_API_KEY"
+enabled = true"#,
+        );
+        let raw = raw.replace(
+            "[virtual_models.llmgateway-auto]\nroutes = [\"route\"]",
+            "[[virtual_models.llmgateway-auto.tiers]]\npriority = 10\nroutes = [\"route\"]\n\n[[virtual_models.llmgateway-auto.tiers]]\npriority = 20\nroutes = [\"route\"]",
+        );
+        let error = AppConfig::parse(&raw).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("references route 'route' in more than one tier"));
+    }
+
+    #[test]
+    fn virtual_model_rejects_mixing_legacy_routes_and_tiers() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "api"
+kind = "openai-compatible"
+base_url = "https://example.test/v1""#,
+            r#"[[accounts]]
+id = "account"
+provider = "api"
+api_key_env = "EXAMPLE_API_KEY"
+enabled = true"#,
+        );
+        let raw = raw.replace(
+            "[virtual_models.llmgateway-auto]\nroutes = [\"route\"]",
+            "[virtual_models.llmgateway-auto]\nroutes = [\"route\"]\n\n[[virtual_models.llmgateway-auto.tiers]]\npriority = 10\nroutes = [\"route\"]",
+        );
+        let error = AppConfig::parse(&raw).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot mix legacy routes with tiers"));
+    }
+
 }
