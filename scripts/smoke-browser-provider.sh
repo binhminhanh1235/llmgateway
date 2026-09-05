@@ -217,6 +217,80 @@ done
 AUTH=(-H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 JSON=(-H "Content-Type: application/json")
 
+TRANSPORT=$(curl -fsS http://127.0.0.1:7331/_llmgateway/accounts/browser-account/transport "${AUTH[@]}")
+printf '%s' "$TRANSPORT" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["desired_policy"] == "browser-only", x
+assert x["configured_mode"] == "auto", x
+assert x["browserless"]["supported"] is False, x
+assert x["browserless"]["recommended_mode"] is None, x
+assert x["effective_transport"] == "unavailable", x
+'
+
+ALIAS=$(curl -fsS http://127.0.0.1:7331/accounts/browser-account/transport "${AUTH[@]}")
+printf '%s' "$ALIAS" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["account_id"] == "browser-account", x'
+
+UNSUPPORTED_BODY=/tmp/llmgateway-browser-provider-transport-unsupported.json
+UNSUPPORTED_STATUS=$(curl -sS -o "$UNSUPPORTED_BODY" -w '%{http_code}' -X PATCH \
+  http://127.0.0.1:7331/_llmgateway/accounts/browser-account/transport \
+  "${AUTH[@]}" "${JSON[@]}" -d '{"transport_policy":"browserless-preferred"}')
+test "$UNSUPPORTED_STATUS" = "422"
+python3 - "$UNSUPPORTED_BODY" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f: x=json.load(f)
+assert x["error"]["type"] == "browserless_unsupported", x
+PY
+
+INVALID_BODY=/tmp/llmgateway-browser-provider-transport-invalid.json
+INVALID_STATUS=$(curl -sS -o "$INVALID_BODY" -w '%{http_code}' -X PATCH \
+  http://127.0.0.1:7331/_llmgateway/accounts/browser-account/transport \
+  "${AUTH[@]}" "${JSON[@]}" -d '{"transport_policy":"http-preferred"}')
+test "$INVALID_STATUS" = "422"
+python3 - "$INVALID_BODY" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f: x=json.load(f)
+assert x["error"]["type"] == "invalid_transport_policy", x
+PY
+
+NON_BROWSER_BODY=/tmp/llmgateway-browser-provider-transport-api.json
+NON_BROWSER_STATUS=$(curl -sS -o "$NON_BROWSER_BODY" -w '%{http_code}' \
+  http://127.0.0.1:7331/_llmgateway/accounts/api-account/transport "${AUTH[@]}")
+test "$NON_BROWSER_STATUS" = "409"
+python3 - "$NON_BROWSER_BODY" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f: x=json.load(f)
+assert x["error"]["type"] == "account_transport_not_browser_backed", x
+PY
+
+MISSING_TRANSPORT_BODY=/tmp/llmgateway-browser-provider-transport-missing.json
+MISSING_TRANSPORT_STATUS=$(curl -sS -o "$MISSING_TRANSPORT_BODY" -w '%{http_code}' \
+  http://127.0.0.1:7331/_llmgateway/accounts/missing-account/transport "${AUTH[@]}")
+test "$MISSING_TRANSPORT_STATUS" = "404"
+python3 - "$MISSING_TRANSPORT_BODY" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f: x=json.load(f)
+assert x["error"]["type"] == "account_transport_not_found", x
+PY
+
+BROWSER_ONLY=$(curl -fsS -X PATCH \
+  http://127.0.0.1:7331/_llmgateway/accounts/browser-account/transport \
+  "${AUTH[@]}" "${JSON[@]}" -d '{"transport_policy":"browser-only"}')
+printf '%s' "$BROWSER_ONLY" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["desired_policy"] == "browser-only", x
+assert x["configured_mode"] == "browser-only", x
+assert x["browserless"]["supported"] is False, x
+'
+
+python3 - "$LLMGATEWAY_CONFIG" <<'PY'
+import sys,tomllib
+with open(sys.argv[1], "rb") as f: x=tomllib.load(f)
+assert x["browser"]["bindings"]["browser-account"]["transport_mode"] == "browser-only", x["browser"]["bindings"]["browser-account"]
+PY
+JSON=(-H "Content-Type: application/json")
+
 # A browser route whose session is not ready must be invisible to routing.
 curl -fsS -D /tmp/browser-provider-before.headers -o /tmp/browser-provider-before.json \
   -X POST http://127.0.0.1:7331/v1/chat/completions \
