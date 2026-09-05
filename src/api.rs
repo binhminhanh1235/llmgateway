@@ -916,6 +916,11 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
         GatewayError::NoRoute(message) => {
             json_error(StatusCode::BAD_REQUEST, "model_error", &message)
         }
+        GatewayError::UnsupportedCapability(capability) => json_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_capability",
+            &format!("unsupported capability '{capability}'"),
+        ),
         GatewayError::MissingCredential(message) => json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "credential_error",
