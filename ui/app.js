@@ -12,6 +12,7 @@
     models: [],
     catalog: [],
     accounts: [],
+    pendingImages: [],
     sending: false,
     currentView: "chat",
   };
@@ -25,6 +26,8 @@
     authModal: el("authModal"), apiKeyInput: el("apiKeyInput"), rememberKeyInput: el("rememberKeyInput"),
     saveKeyButton: el("saveKeyButton"), authError: el("authError"), statusDot: el("statusDot"),
     statusText: el("statusText"), changeKeyButton: el("changeKeyButton"), routeNotice: el("routeNotice"),
+    imageFileInput: el("imageFileInput"), attachImageButton: el("attachImageButton"),
+    attachmentPreview: el("attachmentPreview"), composerDropZone: el("composerDropZone"), composerHelp: el("composerHelp"),
     accountsContent: el("accountsContent"), modelsContent: el("modelsContent"),
     refreshAccountsButton: el("refreshAccountsButton"), modelCatalogSearch: el("modelCatalogSearch"), toast: el("toast"),
   };
@@ -155,7 +158,12 @@
     const content = message?.content;
     if (typeof content === "string") return content;
     if (Array.isArray(content)) {
-      return content.map((part) => typeof part === "string" ? part : (part?.text || "")).filter(Boolean).join("\n");
+      return content.map((part) => {
+        if (typeof part === "string") return part;
+        if (typeof part?.text === "string" && part.text) return part.text;
+        if (["image_url", "input_image", "image"].includes(String(part?.type || ""))) return "📎 Image attachment";
+        return "";
+      }).filter(Boolean).join("\n");
     }
     if (content != null) return typeof content === "object" ? JSON.stringify(content, null, 2) : String(content);
     const calls = message?.tool_calls;
@@ -213,6 +221,7 @@
     const storage = thread.draft ? "draft" : "SQLite context";
     elements.threadMeta.textContent = `${thread.message_count ?? messages.length} message${(thread.message_count ?? messages.length) === 1 ? "" : "s"} · ${storage}`;
     elements.modelButtonText.textContent = displayModel(thread.model);
+    syncComposerCapabilities();
     elements.messages.innerHTML = "";
 
     if (!messages.length) {
@@ -275,6 +284,118 @@
   function scrollMessages() { requestAnimationFrame(() => { elements.messages.scrollTop = elements.messages.scrollHeight; }); }
   function autoGrowComposer() { const input = elements.composerInput; input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; }
 
+  function selectedModelSupportsImages() {
+    const modelId = activeThread()?.model || "llmgateway-auto";
+    const model = state.models.find((candidate) => candidate.id === modelId);
+    const inputs = model?.llmgateway?.multimodal_capabilities?.input_modalities;
+    return Array.isArray(inputs) && inputs.includes("image");
+  }
+
+  function syncComposerCapabilities() {
+    const supportsImages = selectedModelSupportsImages();
+    const busyImages = state.pendingImages.some((item) => item.uploading);
+    const failedImages = state.pendingImages.some((item) => item.error);
+    if (elements.attachImageButton) {
+      elements.attachImageButton.disabled = state.sending || !supportsImages;
+      elements.attachImageButton.title = supportsImages
+        ? "Attach image"
+        : "The selected model has no verified image-input route";
+    }
+    if (elements.composerHelp) {
+      elements.composerHelp.textContent = supportsImages
+        ? "Enter to send · Shift+Enter for a new line · Paste or drop images"
+        : "Enter to send · Shift+Enter for a new line · Image input unavailable for this model";
+    }
+    if (elements.sendButton && !state.sending) {
+      elements.sendButton.disabled = busyImages || failedImages || (state.pendingImages.length > 0 && !supportsImages);
+    }
+    renderAttachmentPreview();
+  }
+
+  function renderAttachmentPreview() {
+    if (!elements.attachmentPreview) return;
+    if (!state.pendingImages.length) {
+      elements.attachmentPreview.innerHTML = "";
+      elements.attachmentPreview.classList.add("hidden");
+      return;
+    }
+    elements.attachmentPreview.classList.remove("hidden");
+    elements.attachmentPreview.innerHTML = state.pendingImages.map((item) => {
+      const stateText = item.error ? item.error : (item.uploading ? "Uploading…" : "Ready");
+      const tone = item.error ? " error" : "";
+      return `<div class="attachment-chip" data-pending-image="${escapeAttr(item.localId)}">
+        <img src="${escapeAttr(item.previewUrl)}" alt="" />
+        <div class="attachment-copy">
+          <div class="attachment-name">${escapeHtml(item.file.name)}</div>
+          <div class="attachment-state${tone}">${escapeHtml(stateText)}</div>
+        </div>
+        <button type="button" class="attachment-remove" data-remove-image="${escapeAttr(item.localId)}" title="Remove image">×</button>
+      </div>`;
+    }).join("");
+    elements.attachmentPreview.querySelectorAll("[data-remove-image]").forEach((button) => {
+      button.addEventListener("click", () => removePendingImage(button.dataset.removeImage));
+    });
+  }
+
+  async function uploadPendingImage(item) {
+    const form = new FormData();
+    form.append("purpose", "vision");
+    form.append("file", item.file, item.file.name);
+    try {
+      const response = await apiFetch("/v1/files", { method: "POST", body: form });
+      if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      const uploaded = await response.json();
+      item.fileId = uploaded.id;
+      item.uploading = false;
+      item.error = "";
+    } catch (error) {
+      item.uploading = false;
+      item.error = error.message || String(error);
+    }
+    syncComposerCapabilities();
+  }
+
+  function addPendingImages(files) {
+    if (!selectedModelSupportsImages()) {
+      toast("Choose a model with image input before attaching an image.");
+      return;
+    }
+    const images = [...files].filter((file) => String(file.type || "").startsWith("image/"));
+    if (!images.length) return;
+    const available = Math.max(0, 8 - state.pendingImages.length);
+    for (const file of images.slice(0, available)) {
+      const item = {
+        localId: uid(),
+        file,
+        previewUrl: URL.createObjectURL(file),
+        fileId: null,
+        uploading: true,
+        error: "",
+      };
+      state.pendingImages.push(item);
+      void uploadPendingImage(item);
+    }
+    if (images.length > available) toast("Up to 8 images can be attached at once.");
+    syncComposerCapabilities();
+  }
+
+  async function removePendingImage(localId) {
+    const index = state.pendingImages.findIndex((item) => item.localId === localId);
+    if (index < 0) return;
+    const [item] = state.pendingImages.splice(index, 1);
+    URL.revokeObjectURL(item.previewUrl);
+    if (item.fileId) {
+      try { await apiFetch(`/v1/files/${encodeURIComponent(item.fileId)}`, { method: "DELETE" }); } catch (_) {}
+    }
+    syncComposerCapabilities();
+  }
+
+  function clearPendingImagesAfterSend() {
+    for (const item of state.pendingImages) URL.revokeObjectURL(item.previewUrl);
+    state.pendingImages = [];
+    syncComposerCapabilities();
+  }
+
   async function materializeDraft(thread, firstContent) {
     if (!thread.draft) return thread;
     const response = await apiFetch("/v1/threads", {
@@ -297,11 +418,16 @@
   async function sendMessage() {
     if (state.sending) return;
     const content = elements.composerInput.value.trim();
-    if (!content) return;
+    const attached = state.pendingImages.slice();
+    if (!content && !attached.length) return;
     if (!state.apiKey) return openAuthModal();
+    if (attached.some((item) => item.uploading)) return toast("Image upload is still in progress.");
+    if (attached.some((item) => item.error || !item.fileId)) return toast("Remove or retry failed image uploads before sending.");
+    if (attached.length && !selectedModelSupportsImages()) return toast("The selected model does not support image input.");
 
     let thread = ensureThread();
-    try { thread = await materializeDraft(thread, content); }
+    const titleSource = content || attached[0]?.file?.name || "Image";
+    try { thread = await materializeDraft(thread, titleSource); }
     catch (error) { return toast(error.message || String(error)); }
 
     if (!Array.isArray(thread.messages)) {
@@ -309,7 +435,11 @@
       catch (error) { return toast(error.message || String(error)); }
     }
 
-    const userMessage = { id: uid(), role: "user", content, createdAt: Date.now() };
+    const requestContent = [];
+    if (content) requestContent.push({ type: "input_text", text: content });
+    for (const item of attached) requestContent.push({ type: "input_image", file_id: item.fileId });
+    const userDisplay = [content, ...attached.map((item) => `📎 ${item.file.name}`)].filter(Boolean).join("\n\n");
+    const userMessage = { id: uid(), role: "user", content: userDisplay, createdAt: Date.now() };
     const assistantMessage = { id: uid(), role: "assistant", content: "", createdAt: Date.now(), pending: true, route: "" };
     thread.messages.push(userMessage, assistantMessage);
     thread.message_count = thread.messages.length;
@@ -325,10 +455,11 @@
       const response = await apiFetch(`/v1/threads/${encodeURIComponent(thread.id)}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, model: thread.model || "llmgateway-auto", stream: true }),
+        body: JSON.stringify({ content: requestContent, model: thread.model || "llmgateway-auto", stream: true }),
       });
       assistantMessage.route = response.headers.get("x-llmgateway-route") || "";
       if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      clearPendingImagesAfterSend();
       if (!response.body) throw new Error("Gateway returned an empty stream");
       await consumeOpenAiStream(response.body, (delta) => {
         assistantMessage.content += delta;
@@ -348,6 +479,7 @@
     } finally {
       state.sending = false;
       elements.sendButton.disabled = false;
+      syncComposerCapabilities();
       elements.composerInput.focus();
       if (succeeded) {
         setTimeout(async () => {
@@ -442,6 +574,7 @@
       thread.model = button.dataset.modelId;
       elements.modelModal.classList.add("hidden");
       renderChat();
+      syncComposerCapabilities();
     }));
   }
 
@@ -668,6 +801,25 @@
     elements.newChatButton.addEventListener("click", createThread);
     elements.modelButton.addEventListener("click", openModelModal);
     elements.sendButton.addEventListener("click", sendMessage);
+    elements.attachImageButton.addEventListener("click", () => elements.imageFileInput.click());
+    elements.imageFileInput.addEventListener("change", () => {
+      addPendingImages(elements.imageFileInput.files || []);
+      elements.imageFileInput.value = "";
+    });
+    elements.composerDropZone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      elements.composerDropZone.classList.add("drag-active");
+    });
+    elements.composerDropZone.addEventListener("dragleave", () => elements.composerDropZone.classList.remove("drag-active"));
+    elements.composerDropZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      elements.composerDropZone.classList.remove("drag-active");
+      addPendingImages(event.dataTransfer?.files || []);
+    });
+    elements.composerInput.addEventListener("paste", (event) => {
+      const images = [...(event.clipboardData?.files || [])].filter((file) => String(file.type || "").startsWith("image/"));
+      if (images.length) addPendingImages(images);
+    });
     elements.composerInput.addEventListener("input", autoGrowComposer);
     elements.composerInput.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } });
     elements.modelSearch.addEventListener("input", renderModelPicker);
