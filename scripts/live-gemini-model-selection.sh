@@ -63,7 +63,24 @@ api() {
   curl "${args[@]}" "$BASE_URL$path" -o "$output"
 }
 
-echo "[gemini-model-live] Refreshing model catalog for $ACCOUNT_ID"
+api GET "/_llmgateway/browser-accounts/$ACCOUNT_ID/runtime" "$TMP_DIR/preflight.json"
+SESSION_ID="$(python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); print(x.get("session_id",""))' "$TMP_DIR/preflight.json")"
+BROWSER_RUNNING="$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("browser_running") else "0")' "$TMP_DIR/preflight.json")"
+if [[ "$BROWSER_RUNNING" == "1" ]]; then
+  api POST "/_llmgateway/browser-sessions/$SESSION_ID/driver/stop" "$TMP_DIR/stop-before-refresh.json"
+  sleep 0.3
+fi
+api GET "/_llmgateway/browser-accounts/$ACCOUNT_ID/runtime" "$TMP_DIR/preflight.json"
+python3 - "$TMP_DIR/preflight.json" <<'PY'
+import json,sys
+runtime=json.load(open(sys.argv[1],encoding="utf-8"))
+if runtime.get("browser_running"):
+    raise SystemExit("MODEL ACCEPTANCE FAILED: Chromium could not be stopped before model refresh")
+if not runtime.get("direct_ready") or runtime.get("effective_transport") != "direct-http":
+    raise SystemExit(f"MODEL ACCEPTANCE FAILED: account is not direct-ready before model refresh: {runtime}")
+PY
+
+echo "[gemini-model-live] Refreshing model catalog for $ACCOUNT_ID with Chromium stopped"
 api POST "/_llmgateway/accounts/$ACCOUNT_ID/models/refresh" "$TMP_DIR/refresh.json"
 api GET "/_llmgateway/accounts/$ACCOUNT_ID/models" "$TMP_DIR/models.json"
 
@@ -131,12 +148,12 @@ if catalog.get("refresh_required"):
 if not catalog.get("discovered_at"):
     raise SystemExit(f"MODEL ACCEPTANCE FAILED: runtime model catalog has no discovery timestamp: {catalog}")
 PY
-SESSION_ID="$(python3 -c 'import json,sys; x=json.load(open(sys.argv[1])); print(x.get("session_id",""))' "$TMP_DIR/runtime.json")"
-BROWSER_RUNNING="$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("browser_running") else "0")' "$TMP_DIR/runtime.json")"
-if [[ "$BROWSER_RUNNING" == "1" ]]; then
-  api POST "/_llmgateway/browser-sessions/$SESSION_ID/driver/stop" "$TMP_DIR/stop.json"
-  sleep 0.3
-fi
+python3 - "$TMP_DIR/runtime.json" <<'PY'
+import json,sys
+runtime=json.load(open(sys.argv[1],encoding="utf-8"))
+if runtime.get("browser_running"):
+    raise SystemExit("MODEL ACCEPTANCE FAILED: Chromium started during browserless model refresh")
+PY
 
 create_thread() {
   local title="$1" model="$2" output="$3"
