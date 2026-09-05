@@ -114,8 +114,7 @@ impl ArtifactStore {
                 source TEXT NOT NULL,
                 lifecycle_state TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                deleted_at TEXT,
-                FOREIGN KEY(sha256) REFERENCES artifact_blobs(sha256)
+                deleted_at TEXT
             )",
         )
         .execute(&self.pool)
