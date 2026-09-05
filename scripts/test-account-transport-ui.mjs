@@ -16,6 +16,8 @@ requireText('class="account-transport-effective ${effectiveTone}"', "UI must ren
 requireText("Effective transport", "UI must label the effective transport explicitly");
 requireText("account-transport-status-icon", "UI must expose a compact effective transport status indicator");
 requireText("checkbox.checked = !desired", "UI must restore toggle state after update failure");
+requireText("state.accounts = [];", "Browserless hot toggle must invalidate stale account/session status");
+requireText("await loadAccounts(true);", "Browserless hot toggle must reload effective browser/session state");
 requireText("/_llmgateway/accounts/", "UI must use the provider-neutral account transport endpoint");
 
 const start = source.indexOf("function accountTransportHtml");
