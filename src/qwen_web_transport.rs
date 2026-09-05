@@ -1307,6 +1307,23 @@ mod tests {
     }
 
     #[test]
+    fn native_continuation_sends_only_the_latest_user_turn() {
+        let body = json!({
+            "messages": [
+                {"role": "system", "content": "system instructions"},
+                {"role": "user", "content": "old user turn"},
+                {"role": "assistant", "content": "old assistant turn"},
+                {"role": "user", "content": "latest user turn"}
+            ]
+        });
+        assert_eq!(serialize_prompt(&body, true).unwrap(), "latest user turn");
+        let initial = serialize_prompt(&body, false).unwrap();
+        assert!(initial.contains("system instructions"));
+        assert!(initial.contains("old user turn"));
+        assert!(initial.contains("latest user turn"));
+    }
+
+    #[test]
     fn continuation_payload_uses_previous_response_as_parent() {
         let payload = build_chat_payload("chat-a", "model-a", Some("response-a"), "next");
         assert_eq!(payload.get("parent_id").and_then(Value::as_str), Some("response-a"));
