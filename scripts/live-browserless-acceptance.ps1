@@ -235,6 +235,9 @@ try {
         $sse = [string]$streamResponse.Content
         Assert-True ($sse.Contains("data: [DONE]")) "stream ended without OpenAI [DONE]"
         Assert-True ($sse.Contains('"content"')) "stream returned no assistant content delta"
+        Assert-True ($sse -match '"finish_reason"\s*:\s*"[^"]+"') "stream returned no terminal finish_reason"
+        $streamFrames = [regex]::Matches($sse, '(?m)^data:\s*\{')
+        Assert-True ($streamFrames.Count -ge 2) "stream did not expose incremental SSE frames"
         $runtimeStream = Assert-BrowserClosed "streaming turn"
         Assert-DirectExecution $runtimeStream "streaming turn"
         Start-Sleep -Milliseconds 300
@@ -242,6 +245,11 @@ try {
         Assert-AffinityPresent $afterStream "streaming turn"
         Assert-True ((Mapping-Url $afterStream) -eq $urlA) "streaming turn changed native conversation"
         Assert-True ([int64]$afterStream.mapping.last_synced_ordinal -gt $beforeStreamOrdinal) "streaming native sync ordinal did not advance"
+        $threadAfterStream = Invoke-GatewayJson -Method GET -Path "/v1/threads/$threadA"
+        $emptyStreamAssistants = @($threadAfterStream.messages | Where-Object {
+            $_.role -eq "assistant" -and [string]::IsNullOrWhiteSpace([string]$_.content)
+        })
+        Assert-True ($emptyStreamAssistants.Count -eq 0) "streaming persisted an empty/stale assistant message"
     }
 
     if ($TestCancellation) {
