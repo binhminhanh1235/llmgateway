@@ -737,10 +737,6 @@ impl ChromiumDriver {
         self.status(session_id).await
     }
 
-    pub async fn reconcile_all(&self) -> ChromiumReconcileSummary {
-        self.reconcile_all_excluding(&BTreeSet::new()).await
-    }
-
     pub async fn reconcile_all_excluding(
         &self,
         browserless_idle_sessions: &BTreeSet<String>,
