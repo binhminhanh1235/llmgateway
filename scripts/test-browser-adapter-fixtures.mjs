@@ -197,6 +197,38 @@ async function testQwen() {
 }
 
 
+async function testDeepSeek() {
+  const input = new FakeTextAreaElement();
+  installPage({
+    host: "chat.deepseek.com",
+    path: "/",
+    nodes: { "#chat-input": input }
+  });
+  let adapter = loadAdapter("adapters/deepseek-web.js");
+  assert.equal(adapter.meta.contract_version, 1);
+  assert.equal(adapter.meta.id, "deepseek-web");
+  assert.equal(adapter.meta.provider, "deepseek");
+  let probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, true, probe.message);
+  assert.equal(probe.page_signature, "deepseek-composer-v1");
+
+  installPage({
+    host: "chat.deepseek.com",
+    path: "/",
+    nodes: { ".ds-sign-in-form__main": new FakeElement("Sign in") }
+  });
+  adapter = loadAdapter("adapters/deepseek-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "login_required");
+
+  installPage({ host: "example.test", path: "/", nodes: {} });
+  adapter = loadAdapter("adapters/deepseek-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "wrong_page");
+}
+
 async function testQwenReactComposerSubmit() {
   const input = new FakeTextAreaElement();
   const response = new FakeElement("");
@@ -1110,6 +1142,7 @@ async function testMidRequestLoginExpiry() {
 await testGemini();
 await testChatGPT();
 await testQwen();
+await testDeepSeek();
 await testQwenReactComposerSubmit();
 await testQwenEnterFallbackWithoutSendControl();
 await testGeminiToolBridge();
@@ -1129,4 +1162,4 @@ await testGeminiStreamCancellation();
 await testGeminiFreshThreadForcesNewChat();
 await testGeminiReopenWaitsForStableHistoryAndIgnoresRerenderedOldTurns();
 await testMidRequestLoginExpiry();
-console.log("built-in Gemini/ChatGPT/Qwen fake-page adapter fixtures passed");
+console.log("built-in Gemini/ChatGPT/Qwen/DeepSeek fake-page adapter fixtures passed");
