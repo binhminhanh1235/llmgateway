@@ -733,7 +733,7 @@ impl ChatGptWebHttpAdapter {
             consume_response_bytes(resumed, &mut state).await?;
         }
         validate_stream_success(&state)?;
-        self.persist_state(request, &state, conduit).await?;
+        Self::persist_state(request, &state, conduit).await?;
         Ok(state)
     }
 
@@ -927,9 +927,12 @@ impl ChatGptWebHttpAdapter {
                 yield Err(std::io::Error::other(error.to_string()));
                 return;
             }
-            if let Err(error) = adapter
-                .persist_state(&native_request, &state, &conduit)
-                .await
+            if let Err(error) = ChatGptWebHttpAdapter::persist_state(
+                &native_request,
+                &state,
+                &conduit,
+            )
+            .await
             {
                 yield Err(std::io::Error::other(error.to_string()));
                 return;
