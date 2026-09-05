@@ -1,6 +1,6 @@
 mod account_intelligence_api;
 mod admin;
-mod artifact_store;
+pub mod artifact_store;
 mod admin_api;
 mod api;
 mod browser_account_setup;
