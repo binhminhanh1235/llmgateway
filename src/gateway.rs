@@ -8,6 +8,7 @@ use crate::{
     quota_usage::{QuotaUsageStore, UsageEvent},
     quota_usage_runtime,
     routing::{RouteDecisionTrace, Router},
+    vision,
 };
 use axum::http::Response as HttpResponse;
 use futures_util::StreamExt;
@@ -197,6 +198,8 @@ fn upstream_stream_error_sse(message: &str) -> bytes::Bytes {
 pub enum GatewayError {
     #[error("{0}")]
     NoRoute(String),
+    #[error("unsupported capability '{0}'")]
+    UnsupportedCapability(String),
     #[error("missing credential environment variable '{0}'")]
     MissingCredential(String),
     #[error("invalid upstream configuration: {0}")]
@@ -454,6 +457,29 @@ impl Gateway {
             .await;
         if let Some(policy) = client_policy {
             routes.retain(|route| policy.route_allowed(&route.id));
+        }
+        if vision::request_has_image(body) {
+            let eligible_before_vision = routes.len();
+            routes.retain(|route| {
+                if !vision::route_supports_image(&route.capabilities) {
+                    return false;
+                }
+                let Some(account) = config.account(&route.account) else {
+                    return false;
+                };
+                let Some(provider) = config.provider(&account.provider) else {
+                    return false;
+                };
+                if !BrowserProviderRegistry::is_browser_kind(&provider.kind) {
+                    return true;
+                }
+                browser_provider_runtime::get()
+                    .is_some_and(|registry| registry.supports_image_input(&provider.kind))
+            });
+            if eligible_before_vision > 0 && routes.is_empty() {
+                let error = GatewayError::UnsupportedCapability("image_input".into());
+                return Err(self.finish_execution_error(&request_id, error).await);
+            }
         }
         if let Some(preferred_route) = preferred_route {
             if let Some(index) = routes.iter().position(|route| route.id == preferred_route) {
