@@ -764,26 +764,79 @@ impl ChatGptWebHttpAdapter {
             yield Ok(Bytes::from(format!("data: {role_event}\n\n")));
 
             let mut state = ChatGptStreamState::default();
-            let primary_result = stream_response_as_openai(
-                response,
-                &mut state,
-                &completion_id,
-                created,
-                &model,
-            ).await;
-            match primary_result {
-                Ok(chunks) => {
-                    for chunk in chunks {
-                        yield Ok(chunk);
+            let mut decoder = SseDecoder::default();
+            let mut upstream = response.bytes_stream();
+
+            while let Some(chunk) = upstream.next().await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        yield Err(std::io::Error::other(format!(
+                            "ChatGPT browserless stream body failed: {error}"
+                        )));
+                        return;
+                    }
+                };
+                let events = match decoder.push(&chunk) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        yield Err(std::io::Error::other(error));
+                        return;
+                    }
+                };
+                for event in events {
+                    let deltas = match state.ingest_event(&event.data) {
+                        Ok(deltas) => deltas,
+                        Err(error) => {
+                            yield Err(std::io::Error::other(error));
+                            return;
+                        }
+                    };
+                    for delta in deltas {
+                        let event = openai_delta_event(
+                            &completion_id,
+                            created,
+                            &model,
+                            &delta,
+                        );
+                        yield Ok(Bytes::from(format!("data: {event}\n\n")));
                     }
                 }
+            }
+
+            let tail_events = match decoder.finish() {
+                Ok(events) => events,
                 Err(error) => {
                     yield Err(std::io::Error::other(error));
                     return;
                 }
+            };
+            for event in tail_events {
+                let deltas = match state.ingest_event(&event.data) {
+                    Ok(deltas) => deltas,
+                    Err(error) => {
+                        yield Err(std::io::Error::other(error));
+                        return;
+                    }
+                };
+                for delta in deltas {
+                    let event = openai_delta_event(
+                        &completion_id,
+                        created,
+                        &model,
+                        &delta,
+                    );
+                    yield Ok(Bytes::from(format!("data: {event}\n\n")));
+                }
             }
 
             if state.handoff && !stream_success(&state) {
+                // The primary SSE can legitimately finish with [DONE] only to hand
+                // the turn to /resume. Final success must therefore observe a fresh
+                // [DONE] on the resumed stream rather than borrowing the primary one.
+                state.saw_done = false;
+                state.stream_complete = false;
+
                 let resumed = adapter
                     .resume_response(
                         &session,
@@ -801,21 +854,69 @@ impl ChatGptWebHttpAdapter {
                         return;
                     }
                 };
-                match stream_response_as_openai(
-                    resumed,
-                    &mut state,
-                    &completion_id,
-                    created,
-                    &model,
-                ).await {
-                    Ok(chunks) => {
-                        for chunk in chunks {
-                            yield Ok(chunk);
+
+                let mut resume_decoder = SseDecoder::default();
+                let mut resume_upstream = resumed.bytes_stream();
+                while let Some(chunk) = resume_upstream.next().await {
+                    let chunk = match chunk {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            yield Err(std::io::Error::other(format!(
+                                "ChatGPT browserless resume body failed: {error}"
+                            )));
+                            return;
+                        }
+                    };
+                    let events = match resume_decoder.push(&chunk) {
+                        Ok(events) => events,
+                        Err(error) => {
+                            yield Err(std::io::Error::other(error));
+                            return;
+                        }
+                    };
+                    for event in events {
+                        let deltas = match state.ingest_event(&event.data) {
+                            Ok(deltas) => deltas,
+                            Err(error) => {
+                                yield Err(std::io::Error::other(error));
+                                return;
+                            }
+                        };
+                        for delta in deltas {
+                            let event = openai_delta_event(
+                                &completion_id,
+                                created,
+                                &model,
+                                &delta,
+                            );
+                            yield Ok(Bytes::from(format!("data: {event}\n\n")));
                         }
                     }
+                }
+
+                let tail_events = match resume_decoder.finish() {
+                    Ok(events) => events,
                     Err(error) => {
                         yield Err(std::io::Error::other(error));
                         return;
+                    }
+                };
+                for event in tail_events {
+                    let deltas = match state.ingest_event(&event.data) {
+                        Ok(deltas) => deltas,
+                        Err(error) => {
+                            yield Err(std::io::Error::other(error));
+                            return;
+                        }
+                    };
+                    for delta in deltas {
+                        let event = openai_delta_event(
+                            &completion_id,
+                            created,
+                            &model,
+                            &delta,
+                        );
+                        yield Ok(Bytes::from(format!("data: {event}\n\n")));
                     }
                 }
             }
@@ -1554,52 +1655,23 @@ async fn consume_response_bytes(
     Ok(())
 }
 
-async fn stream_response_as_openai(
-    response: Response,
-    state: &mut ChatGptStreamState,
+fn openai_delta_event(
     completion_id: &str,
     created: i64,
     model: &str,
-) -> Result<Vec<Bytes>, String> {
-    let mut output = Vec::new();
-    let mut decoder = SseDecoder::default();
-    let mut bytes = response.bytes_stream();
-    while let Some(chunk) = bytes.next().await {
-        let chunk = chunk.map_err(|error| error.to_string())?;
-        for event in decoder.push(&chunk)? {
-            for delta in state.ingest_event(&event.data)? {
-                let event = json!({
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": delta},
-                        "finish_reason": Value::Null
-                    }]
-                });
-                output.push(Bytes::from(format!("data: {event}\n\n")));
-            }
-        }
-    }
-    for event in decoder.finish()? {
-        for delta in state.ingest_event(&event.data)? {
-            let event = json!({
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": delta},
-                    "finish_reason": Value::Null
-                }]
-            });
-            output.push(Bytes::from(format!("data: {event}\n\n")));
-        }
-    }
-    Ok(output)
+    delta: &str,
+) -> Value {
+    json!({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {"content": delta},
+            "finish_reason": Value::Null
+        }]
+    })
 }
 
 fn synthetic_json_response(
