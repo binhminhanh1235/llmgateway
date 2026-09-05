@@ -1118,6 +1118,22 @@ impl BrowserProviderRegistry {
             ) {
                 return true;
             }
+            if provider_kind == "browser-chatgpt"
+                && diagnostics.status == "requires_attention"
+                && matches!(
+                    binding.transport_mode,
+                    BrowserTransportMode::HttpPreferred | BrowserTransportMode::Auto
+                )
+                && self
+                    .adapters
+                    .get(provider_kind)
+                    .is_some_and(|adapter| adapter.is_cdp())
+            {
+                // A Sentinel challenge is a recoverable browser-verification state,
+                // not an unroutable account. Keep the route eligible so execute_chat
+                // can open the authenticated browser only for the challenged turn.
+                return true;
+            }
         }
 
         let adapter = match self.adapters.get(provider_kind) {
@@ -1375,8 +1391,13 @@ impl BrowserProviderRegistry {
                 .get(&account.id)
                 .is_some_and(|models| models.contains(&route.model))
                 && !binding.models.iter().any(|model| model == &route.model);
-            let direct_failure_can_open_browser =
-                direct_failure_can_open_browser(&provider.kind, binding.transport_mode);
+            let direct_failure_can_open_browser = direct_result.as_ref().err().is_some_and(|error| {
+                direct_failure_can_open_browser(
+                    &provider.kind,
+                    binding.transport_mode,
+                    error,
+                )
+            });
             let safe_fallback_candidate = direct_failure_can_open_browser
                 && direct_result.as_ref().err().is_some_and(|error| {
                     direct_error_allows_browser_fallback(
@@ -1446,7 +1467,13 @@ impl BrowserProviderRegistry {
                         .await;
                     "login_required"
                 } else if code == "browser_challenge_required" {
-                    "browser_fallback_required"
+                    let _ = self
+                        .require_attention(
+                            &account.id,
+                            &format!("browser verification required: {message}"),
+                        )
+                        .await;
+                    "requires_attention"
                 } else {
                     "adapter_incompatible"
                 };
@@ -1866,6 +1893,16 @@ impl CdpBrowserAdapter {
     fn model_label(&self, binding: &BrowserAccountBinding, model: &str) -> Option<String> {
         if let Some(label) = binding.model_labels.get(model) {
             return Some(label.clone());
+        }
+        if self.spec.provider == "chatgpt" {
+            return Some(
+                if model == "chatgpt-web-default" {
+                    "Auto"
+                } else {
+                    model
+                }
+                .to_string(),
+            );
         }
         if self.spec.builtin_script.is_none() {
             return Some(model.to_string());
@@ -3490,8 +3527,20 @@ fn contract_error_to_provider_error(
 fn direct_failure_can_open_browser(
     provider_kind: &str,
     mode: BrowserTransportMode,
+    error: &BrowserProviderError,
 ) -> bool {
-    provider_kind != "browser-chatgpt" || matches!(mode, BrowserTransportMode::Auto)
+    if provider_kind != "browser-chatgpt" {
+        return true;
+    }
+    match mode {
+        BrowserTransportMode::Auto => true,
+        BrowserTransportMode::HttpPreferred => matches!(
+            error,
+            BrowserProviderError::AdapterIncompatible { code, .. }
+                if matches!(code.as_str(), "browser_challenge_required" | "login_required")
+        ),
+        BrowserTransportMode::BrowserOnly => false,
+    }
 }
 
 fn direct_error_allows_browser_fallback(
@@ -3499,12 +3548,20 @@ fn direct_error_allows_browser_fallback(
     dynamic_model: bool,
     browser_adapter_is_cdp: bool,
 ) -> bool {
-    if dynamic_model || !browser_adapter_is_cdp {
+    if !browser_adapter_is_cdp {
         return false;
     }
     let BrowserProviderError::AdapterIncompatible { code, .. } = error else {
         return false;
     };
+    if dynamic_model
+        && !matches!(
+            code.as_str(),
+            "login_required" | "browser_challenge_required"
+        )
+    {
+        return false;
+    }
     matches!(
         code.as_str(),
         "login_required"
@@ -3714,6 +3771,62 @@ mod tests {
         assert!(!direct_error_allows_browser_fallback(&transport, false, true));
         assert!(!direct_error_allows_browser_fallback(&challenge, true, true));
         assert!(!direct_error_allows_browser_fallback(&challenge, false, false));
+    }
+
+    #[test]
+    fn chatgpt_http_preferred_opens_browser_only_for_interactive_recovery() {
+        let challenge = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "browser_challenge_required".into(),
+            message: "turnstile".into(),
+        };
+        let login = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "login_required".into(),
+            message: "login".into(),
+        };
+        let generic = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "conversation_prepare_failed".into(),
+            message: "prepare".into(),
+        };
+
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::HttpPreferred,
+            &challenge,
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::HttpPreferred,
+            &login,
+        ));
+        assert!(!direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::HttpPreferred,
+            &generic,
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::Auto,
+            &generic,
+        ));
+    }
+
+    #[test]
+    fn discovered_model_can_browser_recover_only_for_login_or_challenge() {
+        let challenge = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "browser_challenge_required".into(),
+            message: "turnstile".into(),
+        };
+        let generic = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "conversation_prepare_failed".into(),
+            message: "prepare".into(),
+        };
+        assert!(direct_error_allows_browser_fallback(&challenge, true, true));
+        assert!(!direct_error_allows_browser_fallback(&generic, true, true));
     }
 
     #[test]
