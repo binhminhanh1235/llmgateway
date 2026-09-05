@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/ui/account-control.css" />
   <link rel="stylesheet" href="/ui/account-intelligence.css" />
   <link rel="stylesheet" href="/ui/browser-control.css" />
+  <link rel="stylesheet" href="/ui/model-groups.css" />
   <link rel="stylesheet" href="/ui/trace-console.css" />
 </head>
 <body>
@@ -31,6 +32,7 @@
         <button class="nav-button active" data-view="chat" type="button">Chat</button>
         <button class="nav-button" data-view="accounts" type="button">Accounts</button>
         <button class="nav-button" data-view="models" type="button">Models</button>
+        <button class="nav-button" data-view="groups" type="button">Groups</button>
         <button class="nav-button" data-view="traces" type="button">Traces</button>
         <div class="gateway-status-row">
           <span id="statusDot" class="status-dot"></span>
@@ -89,6 +91,22 @@
           <input id="modelCatalogSearch" class="search-input compact" type="search" placeholder="Search models…" />
         </header>
         <div id="modelsContent" class="content-scroll"></div>
+      </section>
+
+      <section id="groupsView" class="view">
+        <header class="topbar">
+          <div>
+            <h1 class="page-title">Model groups</h1>
+            <div class="page-subtitle">Create logical models with strict ordered fallback tiers</div>
+          </div>
+          <div class="accounts-topbar-actions">
+            <button id="createModelGroupButton" class="primary-button" type="button">+ Create group</button>
+            <button id="refreshModelGroupsButton" class="secondary-button" type="button">Refresh</button>
+          </div>
+        </header>
+        <div id="groupsContent" class="content-scroll">
+          <div class="loading-box">Open Groups to load logical routing groups.</div>
+        </div>
       </section>
 
       <section id="tracesView" class="view">
@@ -195,6 +213,33 @@
     </div>
   </div>
 
+  <div id="modelGroupModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modelGroupModalTitle">
+    <div class="modal model-group-modal">
+      <div class="modal-header">
+        <div>
+          <h2 id="modelGroupModalTitle">Create model group</h2>
+          <p>Lower tier priority wins. Routes inside one tier still use normal health, quota, adaptive and task-aware scoring.</p>
+        </div>
+        <button class="icon-button" data-close-modal="modelGroupModal" type="button">✕</button>
+      </div>
+      <label class="group-editor-field">
+        <span>Group ID</span>
+        <input id="modelGroupIdInput" class="search-input" type="text" autocomplete="off" placeholder="e.g. llmgateway-fast-coding" />
+      </label>
+      <p class="group-editor-help">The group appears in <code>/v1/models</code> immediately after save and can be selected by Chat or API clients.</p>
+      <div id="modelGroupTiers" class="group-editor-tiers"></div>
+      <div class="group-editor-toolbar">
+        <button id="addModelGroupTierButton" class="secondary-button" type="button">+ Add fallback tier</button>
+        <span class="page-subtitle">A route may belong to only one tier in the same group.</span>
+      </div>
+      <div id="modelGroupError" class="form-error hidden"></div>
+      <div class="group-editor-actions">
+        <button type="button" class="secondary-button" data-close-modal="modelGroupModal">Cancel</button>
+        <button id="saveModelGroupButton" type="button" class="primary-button">Save group</button>
+      </div>
+    </div>
+  </div>
+
   <div id="authModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="authModalTitle">
     <div class="modal auth-modal">
       <div class="auth-logo">LG</div>
@@ -214,6 +259,7 @@
   <script src="/ui/account-control.js" defer></script>
   <script src="/ui/account-intelligence.js" defer></script>
   <script src="/ui/browser-control.js" defer></script>
+  <script src="/ui/model-groups.js" defer></script>
   <script src="/ui/trace-console.js" defer></script>
 </body>
 </html>
