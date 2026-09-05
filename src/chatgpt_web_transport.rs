@@ -3,7 +3,8 @@ use crate::{
     browser_auth_runtime, conversation_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
-        BrowserProviderAdapter, BrowserProviderError, BROWSER_ADAPTER_CONTRACT_VERSION,
+        BrowserProviderAdapter, BrowserProviderError, BrowserlessCapabilities,
+        BrowserTransportMode, BROWSER_ADAPTER_CONTRACT_VERSION,
     },
 };
 use async_trait::async_trait;
@@ -1122,6 +1123,10 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
 
     fn adapter_id(&self) -> &'static str {
         "chatgpt-web-http"
+    }
+
+    fn browserless_capabilities(&self) -> BrowserlessCapabilities {
+        BrowserlessCapabilities::preferred(BrowserTransportMode::Auto, true, false, true)
     }
 
     async fn diagnose(
