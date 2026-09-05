@@ -11,6 +11,7 @@ mod browser_session;
 mod browser_session_api;
 mod browser_session_runtime;
 mod catalog;
+mod chatgpt_web_transport;
 mod chromium_driver;
 mod chromium_driver_api;
 mod chromium_driver_runtime;
