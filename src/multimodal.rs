@@ -244,10 +244,23 @@ pub fn canonical_output_modalities() -> Vec<Modality> {
 pub fn validate_foundation_execution(
     request: &MultimodalRequest,
 ) -> Result<(), MultimodalError> {
+    validate_execution_modalities(request, &[Modality::Text])
+}
+
+pub fn validate_vision_execution(
+    request: &MultimodalRequest,
+) -> Result<(), MultimodalError> {
+    validate_execution_modalities(request, &[Modality::Text, Modality::Image])
+}
+
+fn validate_execution_modalities(
+    request: &MultimodalRequest,
+    allowed_inputs: &[Modality],
+) -> Result<(), MultimodalError> {
     for message in &request.messages {
         for content in &message.content {
             let modality = content.modality();
-            if modality != Modality::Text {
+            if !allowed_inputs.contains(&modality) {
                 return Err(MultimodalError::UnsupportedInputModality(modality));
             }
         }
@@ -339,5 +352,6 @@ mod tests {
         let error = validate_foundation_execution(&request).unwrap_err();
         assert_eq!(error.code(), "unsupported_input_modality");
         assert_eq!(error.to_string(), "unsupported input modality 'image'");
+        assert!(validate_vision_execution(&request).is_ok());
     }
 }
