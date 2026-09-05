@@ -353,10 +353,10 @@ impl AppConfig {
             .collect::<HashMap<_, _>>();
         for account in &mut self.accounts {
             if let Some(kind) = browser_provider_kinds.get(&account.provider) {
-                // Gemini HTTP-preferred accounts can discover their web model catalog
-                // directly from the authenticated session. Other browser providers keep
-                // the legacy no-discovery normalization until they implement that contract.
-                if kind != "browser-gemini" {
+                // Gemini and Qwen HTTP-preferred accounts can discover their web model
+                // catalogs directly from the authenticated session. Registry transport-mode
+                // gating still keeps Qwen discovery disabled while its binding remains Auto.
+                if !matches!(kind.as_str(), "browser-gemini" | "browser-qwen") {
                     account.discover_models = false;
                 }
             }
@@ -837,7 +837,7 @@ enabled = true"#,
             assert!(provider.is_browser());
             assert_eq!(provider.transport(), "browser");
             assert!(!account.credential_required(provider));
-            if kind == "browser-gemini" {
+            if matches!(kind, "browser-gemini" | "browser-qwen") {
                 assert!(account.discover_models);
             } else {
                 assert!(!account.discover_models);
@@ -913,6 +913,21 @@ discover_models = true"#,
             r#"[[providers]]
 id = "browser"
 kind = "browser-gemini""#,
+            r#"[[accounts]]
+id = "account"
+provider = "browser"
+enabled = true
+discover_models = true"#,
+        );
+        let mut config: AppConfig = toml::from_str(&raw).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+        assert!(config.account("account").unwrap().discover_models);
+
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "browser"
+kind = "browser-qwen""#,
             r#"[[accounts]]
 id = "account"
 provider = "browser"

@@ -259,9 +259,18 @@ pub async fn browser_thread_affinity_diagnostics(
 }
 
 fn summarize_provider_state(state: &Value) -> Value {
+    let transport = state.get("transport").and_then(Value::as_str);
+    let qwen_native = (transport == Some("qwen-http")).then(|| {
+        json!({
+            "chat_id": state.get("chat_id").and_then(Value::as_str),
+            "parent_id": state.get("parent_id").and_then(Value::as_str),
+            "request_parent_id": state.get("request_parent_id").and_then(Value::as_str),
+            "response_id": state.get("response_id").and_then(Value::as_str)
+        })
+    });
     json!({
         "present": true,
-        "transport": state.get("transport").and_then(Value::as_str),
+        "transport": transport,
         "needs_resync": state
             .get("needs_resync")
             .and_then(Value::as_bool)
@@ -271,6 +280,7 @@ fn summarize_provider_state(state: &Value) -> Value {
         "metadata_present": state.get("metadata").is_some_and(|value| !value.is_null()),
         "response_id_present": non_empty_string(state.get("response_id")),
         "candidate_id_present": non_empty_string(state.get("candidate_id")),
+        "qwen_native": qwen_native
     })
 }
 
@@ -291,6 +301,27 @@ fn unavailable(message: &str) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qwen_state_summary_exposes_only_native_chain_ids() {
+        let state = json!({
+            "transport": "qwen-http",
+            "chat_id": "chat-1",
+            "parent_id": "parent-1",
+            "request_parent_id": "response-0",
+            "response_id": "response-1",
+            "token": "secret-token",
+            "metadata": {"secret": "private"}
+        });
+        let summary = summarize_provider_state(&state);
+        assert_eq!(summary["qwen_native"]["chat_id"], "chat-1");
+        assert_eq!(summary["qwen_native"]["parent_id"], "parent-1");
+        assert_eq!(summary["qwen_native"]["request_parent_id"], "response-0");
+        assert_eq!(summary["qwen_native"]["response_id"], "response-1");
+        let rendered = summary.to_string();
+        assert!(!rendered.contains("secret-token"));
+        assert!(!rendered.contains("private"));
+    }
 
     #[test]
     fn provider_state_summary_does_not_expose_tokens_or_metadata_contents() {

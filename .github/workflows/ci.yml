@@ -29,6 +29,7 @@ jobs:
       - run: node scripts/test-browser-adapter-fixtures.mjs
       - run: bash -n scripts/live-browserless-acceptance.sh
       - run: bash -n scripts/live-gemini-model-selection.sh
+      - run: bash -n scripts/live-qwen-browserless-acceptance.sh
       - run: bash -n scripts/smoke-gemini-recovery.sh
       - run: RUSTFLAGS="-D warnings" cargo check --all-targets
       - run: cargo clippy --all-targets

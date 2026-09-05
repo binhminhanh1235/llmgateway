@@ -475,7 +475,10 @@ pub async fn send_thread_message(
 }
 
 fn supports_native_conversation_affinity(provider_kind: &str) -> bool {
-    matches!(provider_kind, "browser-gemini" | "browser-chatgpt")
+    matches!(
+        provider_kind,
+        "browser-gemini" | "browser-chatgpt" | "browser-qwen"
+    )
 }
 
 fn with_context_headers(
@@ -600,10 +603,10 @@ mod native_affinity_tests {
     use super::supports_native_conversation_affinity;
 
     #[test]
-    fn native_affinity_includes_gemini_and_chatgpt_only() {
+    fn native_affinity_includes_qwen_direct_threads() {
         assert!(supports_native_conversation_affinity("browser-gemini"));
         assert!(supports_native_conversation_affinity("browser-chatgpt"));
-        assert!(!supports_native_conversation_affinity("browser-qwen"));
+        assert!(supports_native_conversation_affinity("browser-qwen"));
         assert!(!supports_native_conversation_affinity("browser-cdp"));
         assert!(!supports_native_conversation_affinity("openai-compatible"));
     }

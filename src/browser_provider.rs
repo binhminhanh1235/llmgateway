@@ -3,6 +3,7 @@ use crate::{
     chatgpt_web_transport::ChatGptWebHttpAdapter,
     config::{AccountConfig, ProviderConfig, RouteConfig},
     gemini_web_transport::GeminiWebHttpAdapter,
+    qwen_web_transport::QwenWebHttpAdapter,
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
@@ -368,6 +369,7 @@ impl BrowserProviderRegistry {
         let qwen = Arc::new(CdpBrowserAdapter::qwen()?);
         let gemini_http = Arc::new(GeminiWebHttpAdapter::new()?);
         let chatgpt_http = Arc::new(ChatGptWebHttpAdapter::new()?);
+        let qwen_http = Arc::new(QwenWebHttpAdapter::new()?);
         let mut adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> = BTreeMap::new();
         adapters.insert(http.kind().to_string(), http);
         adapters.insert(cdp.kind().to_string(), cdp);
@@ -379,6 +381,7 @@ impl BrowserProviderRegistry {
             BTreeMap::new();
         direct_adapters.insert("browser-gemini".into(), gemini_http);
         direct_adapters.insert("browser-chatgpt".into(), chatgpt_http);
+        direct_adapters.insert("browser-qwen".into(), qwen_http);
         Ok(Self {
             config: Arc::new(StdRwLock::new(config)),
             adapters,
@@ -425,7 +428,7 @@ impl BrowserProviderRegistry {
             "browser-cdp"
         } else if matches!(
             adapter.adapter_id(),
-            "gemini-web-http" | "chatgpt-web-http"
+            "gemini-web-http" | "chatgpt-web-http" | "qwen-web-http"
         ) {
             "direct-http"
         } else {
@@ -565,6 +568,15 @@ impl BrowserProviderRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(account_id)
             .is_some_and(|models| models.contains(model))
+    }
+
+    pub fn discovered_models_for_account(&self, account_id: &str) -> Vec<String> {
+        self.discovered_models
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(account_id)
+            .map(|models| models.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn auth_material_available(&self, session_id: &str) -> bool {
@@ -3402,6 +3414,23 @@ mod tests {
         assert!(registry.model_allowed("account", "model-b"));
         assert!(!registry.model_allowed("account", "model-c"));
         assert!(registry.model_allowed("unbound-account", "model-c"));
+    }
+
+    #[test]
+    fn qwen_direct_http_requires_http_preferred_mode() {
+        let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
+        let mut binding = test_binding();
+        binding.transport_mode = BrowserTransportMode::Auto;
+        assert!(registry.direct_adapter("browser-qwen", &binding).is_none());
+
+        binding.transport_mode = BrowserTransportMode::HttpPreferred;
+        let direct = registry
+            .direct_adapter("browser-qwen", &binding)
+            .expect("Qwen direct adapter must be registered");
+        assert_eq!(direct.adapter_id(), "qwen-web-http");
+
+        binding.transport_mode = BrowserTransportMode::BrowserOnly;
+        assert!(registry.direct_adapter("browser-qwen", &binding).is_none());
     }
 
     #[test]
