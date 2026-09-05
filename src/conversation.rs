@@ -169,6 +169,21 @@ impl ConversationStore {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS provider_conversation_states (
+                thread_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(thread_id, provider, account_id),
+                FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -320,6 +335,59 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub async fn provider_conversation_state(
+        &self,
+        thread_id: &str,
+        provider: &str,
+        account_id: &str,
+    ) -> Result<Option<Value>, ConversationError> {
+        let raw = sqlx::query_scalar::<_, String>(
+            "SELECT state_json
+             FROM provider_conversation_states
+             WHERE thread_id = ? AND provider = ? AND account_id = ?",
+        )
+        .bind(thread_id)
+        .bind(provider)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        raw.map(|raw| {
+            serde_json::from_str(&raw)
+                .map_err(|error| ConversationError::InvalidJson(error.to_string()))
+        })
+        .transpose()
+    }
+
+    pub async fn upsert_provider_conversation_state(
+        &self,
+        thread_id: &str,
+        provider: &str,
+        account_id: &str,
+        state: &Value,
+    ) -> Result<(), ConversationError> {
+        if !self.thread_exists(thread_id).await? {
+            return Err(ConversationError::ThreadNotFound(thread_id.to_string()));
+        }
+        let state_json = serde_json::to_string(state)
+            .map_err(|error| ConversationError::InvalidJson(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO provider_conversation_states
+             (thread_id, provider, account_id, state_json)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(thread_id, provider, account_id) DO UPDATE SET
+               state_json = excluded.state_json,
+               updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(thread_id)
+        .bind(provider)
+        .bind(account_id)
+        .bind(state_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn mark_provider_conversation_synced(
         &self,
         thread_id: &str,
@@ -348,6 +416,16 @@ impl ConversationStore {
         provider: &str,
         account_id: &str,
     ) -> Result<(), ConversationError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM provider_conversation_states
+             WHERE thread_id = ? AND provider = ? AND account_id = ?",
+        )
+        .bind(thread_id)
+        .bind(provider)
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await?;
         sqlx::query(
             "DELETE FROM provider_conversations
              WHERE thread_id = ? AND provider = ? AND account_id = ?",
@@ -355,8 +433,9 @@ impl ConversationStore {
         .bind(thread_id)
         .bind(provider)
         .bind(account_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         Ok(())
     }
 

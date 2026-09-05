@@ -363,6 +363,9 @@
       const result = await request(`/_llmgateway/browser-sessions/${encodeURIComponent(sessionId)}/driver/verify`, { method: "POST" });
       if (result?.authenticated) {
         if (!quiet) browserToast(`${sessionId} connected`);
+        window.dispatchEvent(new CustomEvent("llmgateway:models-changed", {
+          detail: { sessionId }
+        }));
         await loadBrowserSessions(true);
         return true;
       }

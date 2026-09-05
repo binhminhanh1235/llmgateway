@@ -15,6 +15,9 @@ database_url = "sqlite://data/llmgateway.db"
 [browser]
 enabled = false
 profile_root = "data/browser-profiles"
+# Auth material captured after successful browser login is encrypted at rest here.
+# The browser profile remains the interactive re-auth source; adapters never expose raw cookies via API.
+auth_vault_root = "data/browser-auth"
 
 # Enable the browser section and one or more sessions when you are ready to use a browser adapter.
 # [browser.sessions.chatgpt-web-primary]
@@ -38,8 +41,10 @@ profile_root = "data/browser-profiles"
 # Browser-backed gateway accounts are explicitly bound to one isolated browser session.
 # Built-in first-class Gemini/ChatGPT/Qwen adapters have scripts embedded in the
 # binary, versioned by contract, and probed before routing; no adapter_script is required.
-# Provider UI model selection is optional. If model_labels is omitted, the adapter keeps
-# the model already selected in the provider UI.
+# Gemini HTTP-preferred accounts discover their selectable web models dynamically from the
+# authenticated account and route each request with provider-private model metadata, without
+# opening Chromium. model_labels remains useful for BrowserOnly/CDP model-picker automation.
+# Provider-private model recipe/header values are never exposed through the public model API.
 # [browser.bindings.chatgpt-web-account]
 # session = "chatgpt-web-primary"
 # adapter_contract_version = 1

@@ -4,9 +4,14 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,6 +27,8 @@ jobs:
       - run: node --check adapters/chatgpt-web.js
       - run: node --check adapters/qwen-web.js
       - run: node scripts/test-browser-adapter-fixtures.mjs
+      - run: bash -n scripts/live-browserless-acceptance.sh
+      - run: bash -n scripts/live-gemini-model-selection.sh
       - run: cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
@@ -48,10 +55,30 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Validate live browserless PowerShell runner
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/live-browserless-acceptance.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/live-gemini-model-selection.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
       - run: cargo check --all-targets
       - run: cargo test --all-targets
       - run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-chromium-driver-windows.ps1

@@ -1,16 +1,21 @@
 use crate::{
-    browser_session_runtime, chromium_driver_runtime, conversation_runtime,
+    browser_auth_runtime, browser_session_runtime, chromium_driver_runtime, conversation_runtime,
+    chatgpt_web_transport::ChatGptWebHttpAdapter,
     config::{AccountConfig, ProviderConfig, RouteConfig},
+    gemini_web_transport::GeminiWebHttpAdapter,
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use reqwest::{header::CONTENT_TYPE, Client, Url};
+use reqwest::{
+    header::{CONTENT_TYPE, COOKIE, USER_AGENT},
+    Client, Url,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
     sync::{Arc, RwLock as StdRwLock},
@@ -38,9 +43,20 @@ pub struct BrowserProviderConfig {
     pub bindings: BTreeMap<String, BrowserAccountBinding>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BrowserTransportMode {
+    #[default]
+    Auto,
+    BrowserOnly,
+    HttpPreferred,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct BrowserAccountBinding {
     pub session: String,
+    #[serde(default)]
+    pub transport_mode: BrowserTransportMode,
     #[serde(default)]
     pub target_url_prefix: Option<String>,
     #[serde(default)]
@@ -85,6 +101,15 @@ struct CachedAdapterDiagnostics {
     checked_at: Instant,
     session_marker: Option<String>,
     diagnostics: BrowserAdapterDiagnostics,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BrowserTransportExecution {
+    pub transport: String,
+    pub adapter_id: String,
+    pub model: String,
+    pub browser_fallback: bool,
+    pub recorded_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -167,6 +192,8 @@ pub enum BrowserProviderError {
     },
     #[error("browser model '{model}' is not available for account '{account_id}'")]
     ModelUnavailable { account_id: String, model: String },
+    #[error("model_recipe_stale: browser model recipe for '{model}' is stale for account '{account_id}'")]
+    ModelRecipeStale { account_id: String, model: String },
     #[error("browser provider transport error: {0}")]
     Transport(String),
     #[error("browser provider config read error: {0}")]
@@ -175,12 +202,37 @@ pub enum BrowserProviderError {
     Toml(#[from] toml::de::Error),
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct BrowserDiscoveredModel {
+    pub external_id: String,
+    pub display_name: String,
+    pub owned_by: String,
+    pub context_window: Option<i64>,
+    pub capabilities: Vec<String>,
+}
+
 #[async_trait]
 pub trait BrowserProviderAdapter: Send + Sync {
     fn kind(&self) -> &'static str;
     fn adapter_id(&self) -> &'static str;
     fn is_cdp(&self) -> bool {
         false
+    }
+
+    fn supports_model_discovery(&self) -> bool {
+        false
+    }
+
+    async fn discover_models(
+        &self,
+        _account_id: &str,
+        _binding: &BrowserAccountBinding,
+        _force: bool,
+    ) -> Result<Vec<BrowserDiscoveredModel>, BrowserProviderError> {
+        Err(BrowserProviderError::UnsupportedAdapter(format!(
+            "{} model discovery",
+            self.adapter_id()
+        )))
     }
 
     async fn diagnose(
@@ -199,7 +251,11 @@ pub trait BrowserProviderAdapter: Send + Sync {
 pub struct BrowserProviderRegistry {
     config: Arc<StdRwLock<BrowserProviderConfig>>,
     adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>>,
+    direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>>,
     adapter_health: Arc<RwLock<BTreeMap<String, CachedAdapterDiagnostics>>>,
+    last_transport: Arc<RwLock<BTreeMap<String, BrowserTransportExecution>>>,
+    discovered_models: Arc<StdRwLock<BTreeMap<String, BTreeSet<String>>>>,
+    model_catalog_refresh_required: Arc<StdRwLock<BTreeSet<String>>>,
 }
 
 impl BrowserProviderConfig {
@@ -310,16 +366,27 @@ impl BrowserProviderRegistry {
         let gemini = Arc::new(CdpBrowserAdapter::gemini()?);
         let chatgpt = Arc::new(CdpBrowserAdapter::chatgpt()?);
         let qwen = Arc::new(CdpBrowserAdapter::qwen()?);
+        let gemini_http = Arc::new(GeminiWebHttpAdapter::new()?);
+        let chatgpt_http = Arc::new(ChatGptWebHttpAdapter::new()?);
         let mut adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> = BTreeMap::new();
         adapters.insert(http.kind().to_string(), http);
         adapters.insert(cdp.kind().to_string(), cdp);
         adapters.insert(gemini.kind().to_string(), gemini);
         adapters.insert(chatgpt.kind().to_string(), chatgpt);
         adapters.insert(qwen.kind().to_string(), qwen);
+
+        let mut direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> =
+            BTreeMap::new();
+        direct_adapters.insert("browser-gemini".into(), gemini_http);
+        direct_adapters.insert("browser-chatgpt".into(), chatgpt_http);
         Ok(Self {
             config: Arc::new(StdRwLock::new(config)),
             adapters,
+            direct_adapters,
             adapter_health: Arc::new(RwLock::new(BTreeMap::new())),
+            last_transport: Arc::new(RwLock::new(BTreeMap::new())),
+            discovered_models: Arc::new(StdRwLock::new(BTreeMap::new())),
+            model_catalog_refresh_required: Arc::new(StdRwLock::new(BTreeSet::new())),
         })
     }
 
@@ -340,6 +407,42 @@ impl BrowserProviderRegistry {
         self.adapter_health.write().await.clear();
     }
 
+    pub async fn last_transport_execution(
+        &self,
+        account_id: &str,
+    ) -> Option<BrowserTransportExecution> {
+        self.last_transport.read().await.get(account_id).cloned()
+    }
+
+    async fn record_transport_execution(
+        &self,
+        account_id: &str,
+        model: &str,
+        adapter: &dyn BrowserProviderAdapter,
+        browser_fallback: bool,
+    ) {
+        let transport = if adapter.is_cdp() {
+            "browser-cdp"
+        } else if matches!(
+            adapter.adapter_id(),
+            "gemini-web-http" | "chatgpt-web-http"
+        ) {
+            "direct-http"
+        } else {
+            "browser-http"
+        };
+        self.last_transport.write().await.insert(
+            account_id.to_string(),
+            BrowserTransportExecution {
+                transport: transport.into(),
+                adapter_id: adapter.adapter_id().into(),
+                model: model.to_string(),
+                browser_fallback,
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
+    }
+
     fn config_snapshot(&self) -> BrowserProviderConfig {
         self.config
             .read()
@@ -355,6 +458,96 @@ impl BrowserProviderRegistry {
         self.adapters.contains_key(kind)
     }
 
+    pub fn supports_model_discovery(&self, provider_kind: &str) -> bool {
+        self.direct_adapters
+            .get(provider_kind)
+            .is_some_and(|adapter| adapter.supports_model_discovery())
+    }
+
+    pub fn account_supports_model_discovery(
+        &self,
+        provider_kind: &str,
+        account_id: &str,
+    ) -> bool {
+        let config = self.config_snapshot();
+        let Some(binding) = config.bindings.get(account_id) else {
+            return false;
+        };
+        self.direct_adapter(provider_kind, binding)
+            .is_some_and(|adapter| adapter.supports_model_discovery())
+    }
+
+    pub async fn discover_models(
+        &self,
+        provider_kind: &str,
+        account_id: &str,
+        force: bool,
+    ) -> Result<Vec<BrowserDiscoveredModel>, BrowserProviderError> {
+        let config = self.config_snapshot();
+        let binding = config
+            .bindings
+            .get(account_id)
+            .cloned()
+            .ok_or_else(|| BrowserProviderError::MissingBinding(account_id.to_string()))?;
+        let adapter = self
+            .direct_adapter(provider_kind, &binding)
+            .cloned()
+            .ok_or_else(|| {
+                BrowserProviderError::UnsupportedAdapter(format!(
+                    "{provider_kind} direct model discovery"
+                ))
+            })?;
+        if !adapter.supports_model_discovery() {
+            return Err(BrowserProviderError::UnsupportedAdapter(format!(
+                "{} model discovery",
+                adapter.adapter_id()
+            )));
+        }
+        let models = adapter.discover_models(account_id, &binding, force).await?;
+        self.remember_discovered_models(account_id, &models);
+        self.clear_model_catalog_refresh_required(account_id);
+        Ok(models)
+    }
+
+    pub fn model_catalog_refresh_required(&self, account_id: &str) -> bool {
+        self.model_catalog_refresh_required
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(account_id)
+    }
+
+    pub fn mark_model_catalog_refresh_required(&self, account_id: &str) {
+        self.model_catalog_refresh_required
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(account_id.to_string());
+    }
+
+    pub fn clear_model_catalog_refresh_required(&self, account_id: &str) {
+        self.model_catalog_refresh_required
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(account_id);
+    }
+
+    fn remember_discovered_models(
+        &self,
+        account_id: &str,
+        models: &[BrowserDiscoveredModel],
+    ) {
+        let mut guard = self
+            .discovered_models
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.insert(
+            account_id.to_string(),
+            models
+                .iter()
+                .map(|model| model.external_id.clone())
+                .collect(),
+        );
+    }
+
     pub fn session_id_for_account(&self, account_id: &str) -> Option<String> {
         self.config_snapshot()
             .bindings
@@ -363,12 +556,43 @@ impl BrowserProviderRegistry {
     }
 
     pub fn model_allowed(&self, account_id: &str, model: &str) -> bool {
-        self.config_snapshot()
+        let configured = self
+            .config_snapshot()
             .bindings
             .get(account_id)
             .is_none_or(|binding| {
                 binding.models.is_empty() || binding.models.iter().any(|allowed| allowed == model)
-            })
+            });
+        if configured {
+            return true;
+        }
+        self.discovered_models
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(account_id)
+            .is_some_and(|models| models.contains(model))
+    }
+
+    fn auth_material_available(&self, session_id: &str) -> bool {
+        browser_auth_runtime::get()
+            .is_some_and(|vault| vault.contains(session_id))
+    }
+
+    fn direct_adapter(
+        &self,
+        provider_kind: &str,
+        binding: &BrowserAccountBinding,
+    ) -> Option<&Arc<dyn BrowserProviderAdapter>> {
+        let enabled = match binding.transport_mode {
+            BrowserTransportMode::HttpPreferred => true,
+            BrowserTransportMode::Auto => {
+                matches!(provider_kind, "browser-gemini" | "browser-chatgpt")
+            },
+            BrowserTransportMode::BrowserOnly => false,
+        };
+        enabled
+            .then(|| self.direct_adapters.get(provider_kind))
+            .flatten()
     }
 
     pub async fn adapter_diagnostics(
@@ -446,28 +670,32 @@ impl BrowserProviderRegistry {
                 "browser session is disabled",
             );
         }
-        if session.status != "ready" {
-            let can_reprobe = adapter.is_cdp()
-                && cdp_session_status_probeable(&session.status)
-                && self.cdp_session_live(&binding.session).await;
-            if !can_reprobe {
-                // Session lifecycle can transition immediately during login/re-auth.
-                // Drop any prior ready probe so a later verified generation must be
-                // diagnosed again rather than borrowing stale adapter health.
-                self.invalidate_diagnostics(account_id).await;
-                return unavailable_diagnostics(
-                    account_id,
-                    provider_kind,
-                    adapter.adapter_id(),
-                    &binding,
-                    &format!("browser session is {}", session.status),
-                );
-            }
+        let direct_adapter = self.direct_adapter(provider_kind, &binding).cloned();
+        let direct_snapshot_ready = direct_adapter.is_some()
+            && self.auth_material_available(&binding.session);
+        let auth_snapshot_ready = (provider_kind == "browser-http"
+            && self.auth_material_available(&binding.session))
+            || direct_snapshot_ready;
+        let can_reprobe = adapter.is_cdp()
+            && cdp_session_status_probeable(&session.status)
+            && self.cdp_session_live(&binding.session).await;
+        if session.status != "ready" && !auth_snapshot_ready && !can_reprobe {
+            // Session lifecycle can transition immediately during login/re-auth.
+            // Drop any prior ready probe so a later verified generation must be
+            // diagnosed again rather than borrowing stale adapter health.
+            self.invalidate_diagnostics(account_id).await;
+            return unavailable_diagnostics(
+                account_id,
+                provider_kind,
+                adapter.adapter_id(),
+                &binding,
+                &format!("browser session is {}", session.status),
+            );
         }
 
         let mut session_marker = session.updated_at.clone();
         if let Some(cached) = self.adapter_health.read().await.get(account_id).cloned() {
-            let cache_ttl = if session.status == "ready" {
+            let cache_ttl = if session.status == "ready" || auth_snapshot_ready {
                 Duration::from_secs(ADAPTER_HEALTH_TTL_SECONDS)
             } else {
                 // Recoverable non-ready states must re-probe quickly after the user
@@ -482,11 +710,39 @@ impl BrowserProviderRegistry {
             }
         }
 
-        let diagnostics = adapter
-            .diagnose(account_id, &session.profile_dir, &binding)
-            .await;
+        let diagnostics = if direct_snapshot_ready {
+            let direct = direct_adapter.expect("direct adapter checked above");
+            let direct_diagnostics = direct
+                .diagnose(account_id, &session.profile_dir, &binding)
+                .await;
+            if direct_diagnostics.status == "ready" && direct.supports_model_discovery() {
+                match direct.discover_models(account_id, &binding, false).await {
+                    Ok(models) => self.remember_discovered_models(account_id, &models),
+                    Err(error) => warn!(
+                        %error,
+                        account = %account_id,
+                        adapter = %direct.adapter_id(),
+                        "browser direct model discovery warmup failed"
+                    ),
+                }
+            }
+            if direct_diagnostics.status == "ready" || !can_reprobe {
+                direct_diagnostics
+            } else {
+                adapter
+                    .diagnose(account_id, &session.profile_dir, &binding)
+                    .await
+            }
+        } else {
+            adapter
+                .diagnose(account_id, &session.profile_dir, &binding)
+                .await
+        };
 
-        if diagnostics.status == "ready" && session.status != "ready" {
+        if diagnostics.status == "ready"
+            && session.status != "ready"
+            && !auth_snapshot_ready
+        {
             if let Ok(recovered) = store.mark_ready(&binding.session).await {
                 session_marker = recovered.updated_at;
             }
@@ -559,6 +815,22 @@ impl BrowserProviderRegistry {
             return false;
         }
 
+        if provider_kind == "browser-http" && self.auth_material_available(&binding.session) {
+            return true;
+        }
+
+        if self.direct_adapter(provider_kind, &binding).is_some()
+            && self.auth_material_available(&binding.session)
+        {
+            let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
+            if matches!(
+                diagnostics.status.as_str(),
+                "ready" | "browser_fallback_required"
+            ) {
+                return true;
+            }
+        }
+
         let adapter = match self.adapters.get(provider_kind) {
             Some(adapter) => adapter,
             None => return false,
@@ -584,6 +856,63 @@ impl BrowserProviderRegistry {
         driver.status(session_id).await.is_ok_and(|status| {
             status.running && status.debugger_reachable && status.ready_match.is_some()
         })
+    }
+
+    async fn ensure_cdp_session_ready(&self, session_id: &str) -> bool {
+        if self.cdp_session_live(session_id).await {
+            return true;
+        }
+        let Some(driver) = chromium_driver_runtime::get() else {
+            return false;
+        };
+
+        if driver.launch(session_id).await.is_err()
+            && !driver
+                .status(session_id)
+                .await
+                .is_ok_and(|status| status.running)
+        {
+            return false;
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if driver
+                .verify(session_id)
+                .await
+                .is_ok_and(|verification| verification.authenticated)
+            {
+                return true;
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+        false
+    }
+
+    async fn mark_direct_state_unsynced(
+        &self,
+        request: &BrowserAdapterRequest,
+    ) -> Result<(), BrowserProviderError> {
+        let Some(thread_id) = request.thread_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(store) = conversation_runtime::get() else {
+            return Ok(());
+        };
+        store
+            .upsert_provider_conversation_state(
+                thread_id,
+                &request.provider.id,
+                &request.account.id,
+                &json!({
+                    "transport": "browser-cdp",
+                    "needs_resync": true
+                }),
+            )
+            .await
+            .map_err(|error| BrowserProviderError::Transport(format!(
+                "failed to mark provider state unsynced before browser fallback: {error}"
+            )))
     }
 
     pub async fn mark_degraded(
@@ -678,9 +1007,10 @@ impl BrowserProviderRegistry {
         body: &Value,
         thread_id: Option<&str>,
     ) -> Result<reqwest::Response, BrowserProviderError> {
-        let adapter = self
+        let browser_adapter = self
             .adapters
             .get(&provider.kind)
+            .cloned()
             .ok_or_else(|| BrowserProviderError::UnsupportedAdapter(provider.kind.clone()))?;
         let binding = self
             .config_snapshot()
@@ -689,7 +1019,16 @@ impl BrowserProviderRegistry {
             .cloned()
             .ok_or_else(|| BrowserProviderError::MissingBinding(account.id.clone()))?;
 
-        if !binding.models.is_empty() && !binding.models.iter().any(|model| model == &route.model) {
+        if !self.model_allowed(&account.id, &route.model)
+            && self.account_supports_model_discovery(&provider.kind, &account.id)
+        {
+            // The SQLite catalog survives process restarts while the registry's fast
+            // discovered-model allow-list is intentionally in-memory. Rehydrate that
+            // allow-list through the direct, non-generating discovery RPC before
+            // rejecting a physical model selected from the persisted catalog.
+            self.discover_models(&provider.kind, &account.id, false).await?;
+        }
+        if !self.model_allowed(&account.id, &route.model) {
             return Err(BrowserProviderError::ModelUnavailable {
                 account_id: account.id.clone(),
                 model: route.model.clone(),
@@ -709,28 +1048,100 @@ impl BrowserProviderRegistry {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
             })?;
-        if !session.enabled || session.status != "ready" {
+
+        let direct_adapter = self.direct_adapter(&provider.kind, &binding).cloned();
+        let direct_snapshot_ready = direct_adapter.is_some()
+            && self.auth_material_available(&binding.session);
+        let auth_snapshot_ready = (provider.kind == "browser-http"
+            && self.auth_material_available(&binding.session))
+            || direct_snapshot_ready;
+        if !session.enabled || (session.status != "ready" && !auth_snapshot_ready) {
             return Err(BrowserProviderError::SessionUnavailable {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
             });
         }
 
-        let result = adapter
-            .execute_chat(BrowserAdapterRequest {
-                provider: provider.clone(),
-                account: account.clone(),
-                route: route.clone(),
-                body: body.clone(),
-                session_id: binding.session.clone(),
-                profile_dir: session.profile_dir,
-                binding: binding.clone(),
-                thread_id: thread_id.map(str::to_string),
-            })
-            .await;
+        let adapter_request = BrowserAdapterRequest {
+            provider: provider.clone(),
+            account: account.clone(),
+            route: route.clone(),
+            body: body.clone(),
+            session_id: binding.session.clone(),
+            profile_dir: session.profile_dir.clone(),
+            binding: binding.clone(),
+            thread_id: thread_id.map(str::to_string),
+        };
+
+        let mut used_adapter = browser_adapter.clone();
+        let mut browser_fallback_used = false;
+        let result = if direct_snapshot_ready {
+            let direct = direct_adapter.expect("direct adapter checked above");
+            used_adapter = direct.clone();
+            let direct_result = direct.execute_chat(adapter_request.clone()).await;
+            let dynamic_model = self
+                .discovered_models
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&account.id)
+                .is_some_and(|models| models.contains(&route.model))
+                && !binding.models.iter().any(|model| model == &route.model);
+            let safe_fallback_candidate = direct_result.as_ref().err().is_some_and(|error| {
+                direct_error_allows_browser_fallback(
+                    error,
+                    dynamic_model,
+                    browser_adapter.is_cdp(),
+                )
+            });
+            let browser_was_live = safe_fallback_candidate
+                && self.cdp_session_live(&binding.session).await;
+            let safe_browser_fallback = if safe_fallback_candidate {
+                self.ensure_cdp_session_ready(&binding.session).await
+            } else {
+                false
+            };
+
+            if safe_browser_fallback {
+                browser_fallback_used = true;
+                used_adapter = browser_adapter.clone();
+                if let Err(error) = self.mark_direct_state_unsynced(&adapter_request).await {
+                    if !browser_was_live {
+                        stop_browser_runtime_soon(binding.session.clone());
+                    }
+                    Err(error)
+                } else {
+                    let fallback_result = browser_adapter.execute_chat(adapter_request).await;
+                    if browser_was_live {
+                        fallback_result
+                    } else {
+                        match fallback_result {
+                            Ok(response) => wrap_response_with_browser_stop(
+                                response,
+                                binding.session.clone(),
+                            ),
+                            Err(error) => {
+                                stop_browser_runtime_soon(binding.session.clone());
+                                Err(error)
+                            }
+                        }
+                    }
+                }
+            } else {
+                direct_result
+            }
+        } else {
+            browser_adapter.execute_chat(adapter_request).await
+        };
 
         match &result {
             Ok(_) => {
+                self.record_transport_execution(
+                    &account.id,
+                    &route.model,
+                    used_adapter.as_ref(),
+                    browser_fallback_used,
+                )
+                .await;
                 self.invalidate_diagnostics(&account.id).await;
             }
             Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
@@ -738,17 +1149,19 @@ impl BrowserProviderRegistry {
                     let _ = self
                         .mark_login_required(
                             &account.id,
-                            &format!("browser adapter login required: {message}"),
+                            &format!("browserless adapter login required: {message}"),
                         )
                         .await;
                     "login_required"
+                } else if code == "browser_challenge_required" {
+                    "browser_fallback_required"
                 } else {
                     "adapter_incompatible"
                 };
                 self.cache_diagnostics(BrowserAdapterDiagnostics {
                     account_id: account.id.clone(),
                     provider_kind: provider.kind.clone(),
-                    adapter_id: Some(adapter.adapter_id().to_string()),
+                    adapter_id: Some(used_adapter.adapter_id().to_string()),
                     adapter_version: None,
                     contract_version: None,
                     expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
@@ -762,7 +1175,7 @@ impl BrowserProviderRegistry {
             }
             Err(BrowserProviderError::SessionUnavailable { .. })
             | Err(BrowserProviderError::Transport(_))
-                if adapter.is_cdp() =>
+                if used_adapter.is_cdp() =>
             {
                 let error_text = result
                     .as_ref()
@@ -777,6 +1190,67 @@ impl BrowserProviderRegistry {
     }
 }
 
+
+struct BrowserFallbackStopGuard {
+    session_id: Option<String>,
+}
+
+impl BrowserFallbackStopGuard {
+    fn new(session_id: String) -> Self {
+        Self {
+            session_id: Some(session_id),
+        }
+    }
+}
+
+impl Drop for BrowserFallbackStopGuard {
+    fn drop(&mut self) {
+        if let Some(session_id) = self.session_id.take() {
+            stop_browser_runtime_soon(session_id);
+        }
+    }
+}
+
+fn stop_browser_runtime_soon(session_id: String) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        if let Some(driver) = chromium_driver_runtime::get() {
+            let _ = driver.stop(&session_id).await;
+        }
+    });
+}
+
+fn wrap_response_with_browser_stop(
+    response: reqwest::Response,
+    session_id: String,
+) -> Result<reqwest::Response, BrowserProviderError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    // Construct the guard outside the generator so the response owns it even if
+    // the body is dropped before its first poll.
+    let guard = BrowserFallbackStopGuard::new(session_id);
+    let stream = async_stream::stream! {
+        let _guard = guard;
+        let mut body = response.bytes_stream();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => yield Ok::<Bytes, std::io::Error>(bytes),
+                Err(error) => {
+                    yield Err(std::io::Error::other(error.to_string()));
+                    break;
+                }
+            }
+        }
+    };
+    let mut wrapped = HttpResponse::builder()
+        .status(status)
+        .body(reqwest::Body::wrap_stream(stream))
+        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+    *wrapped.headers_mut() = headers;
+    Ok(reqwest::Response::from(wrapped))
+}
 
 #[derive(Clone)]
 struct HttpBrowserAdapter {
@@ -839,12 +1313,27 @@ impl BrowserProviderAdapter for HttpBrowserAdapter {
             "{}/chat/completions",
             request.provider.base_url.trim_end_matches('/')
         );
-        self.client
+        let mut upstream = self
+            .client
             .post(url)
             .header(CONTENT_TYPE, "application/json")
-            .header("x-llmgateway-browser-session", request.session_id)
-            .header("x-llmgateway-browser-account", request.account.id)
-            .header("x-llmgateway-route", request.route.id)
+            .header("x-llmgateway-browser-session", &request.session_id)
+            .header("x-llmgateway-browser-account", &request.account.id)
+            .header("x-llmgateway-route", &request.route.id);
+
+        if let Some(vault) = browser_auth_runtime::get() {
+            if let Ok(material) = vault.load(&request.session_id) {
+                let cookie_header = material.cookie_header();
+                if !cookie_header.is_empty() {
+                    upstream = upstream.header(COOKIE, cookie_header);
+                }
+                if !material.user_agent.trim().is_empty() {
+                    upstream = upstream.header(USER_AGENT, material.user_agent);
+                }
+            }
+        }
+
+        upstream
             .json(&upstream_body)
             .send()
             .await
@@ -1784,11 +2273,10 @@ impl CdpBrowserAdapter {
                         }
                     }
 
-                    // Once the provider reports done, finish browser-side cleanup before exposing
-                    // the logical terminal event. Some OpenAI-compatible clients stop reading as
-                    // soon as finish_reason becomes non-null. Emitting the final event and [DONE]
-                    // in one body chunk prevents that normal behavior from looking like a
-                    // downstream cancellation and avoids cancelling an already-finished provider.
+                    // Finish browser-side cleanup before exposing the logical terminal event.
+                    // Some OpenAI-compatible clients stop reading as soon as finish_reason is
+                    // non-null. Emit terminal events and [DONE] in one body chunk so a normal
+                    // client close cannot look like downstream cancellation.
                     cleanup.complete().await;
                     let terminal_len = encoded_events.iter().map(|bytes| bytes.len()).sum::<usize>()
                         + b"data: [DONE]\n\n".len();
@@ -2661,6 +3149,20 @@ fn contract_error_to_provider_error(
 }
 
 
+fn direct_error_allows_browser_fallback(
+    error: &BrowserProviderError,
+    dynamic_model: bool,
+    browser_adapter_is_cdp: bool,
+) -> bool {
+    !dynamic_model
+        && browser_adapter_is_cdp
+        && matches!(
+            error,
+            BrowserProviderError::AdapterIncompatible { .. }
+                | BrowserProviderError::ModelUnavailable { .. }
+        )
+}
+
 fn cdp_session_status_probeable(status: &str) -> bool {
     matches!(
         status,
@@ -2816,6 +3318,35 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn stale_model_recipe_never_allows_browser_fallback() {
+        let stale = BrowserProviderError::ModelRecipeStale {
+            account_id: "account-a".into(),
+            model: "gemini-web-pro".into(),
+        };
+        assert!(!direct_error_allows_browser_fallback(&stale, false, true));
+    }
+
+    #[test]
+    fn only_pre_submit_compatible_errors_allow_browser_fallback() {
+        let incompatible = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "challenge".into(),
+            message: "browser challenge".into(),
+        };
+        let unavailable = BrowserProviderError::ModelUnavailable {
+            account_id: "account-a".into(),
+            model: "configured-model".into(),
+        };
+        let transport = BrowserProviderError::Transport("post-submit stream failed".into());
+
+        assert!(direct_error_allows_browser_fallback(&incompatible, false, true));
+        assert!(direct_error_allows_browser_fallback(&unavailable, false, true));
+        assert!(!direct_error_allows_browser_fallback(&transport, false, true));
+        assert!(!direct_error_allows_browser_fallback(&incompatible, true, true));
+        assert!(!direct_error_allows_browser_fallback(&incompatible, false, false));
+    }
+
+    #[test]
     fn cdp_session_recovery_states_are_probeable() {
         for status in ["ready", "degraded", "requires_attention", "login_required"] {
             assert!(cdp_session_status_probeable(status), "{status}");
@@ -2869,6 +3400,29 @@ mod tests {
         assert!(registry.model_allowed("account", "model-b"));
         assert!(!registry.model_allowed("account", "model-c"));
         assert!(registry.model_allowed("unbound-account", "model-c"));
+    }
+
+    #[test]
+    fn discovered_models_extend_the_binding_allowlist() {
+        let mut binding = test_binding();
+        binding.models = vec!["gemini-web-default".into()];
+        let mut config = BrowserProviderConfig::default();
+        config.bindings.insert("account".into(), binding);
+        let registry = BrowserProviderRegistry::new(config).unwrap();
+
+        assert!(!registry.model_allowed("account", "gemini-web-pro"));
+        registry.remember_discovered_models(
+            "account",
+            &[BrowserDiscoveredModel {
+                external_id: "gemini-web-pro".into(),
+                display_name: "Gemini Pro".into(),
+                owned_by: "Google".into(),
+                context_window: None,
+                capabilities: vec!["chat".into(), "reasoning".into()],
+            }],
+        );
+        assert!(registry.model_allowed("account", "gemini-web-pro"));
+        assert!(!registry.model_allowed("account", "gemini-web-flash"));
     }
 
     #[test]
@@ -3255,6 +3809,7 @@ mod tests {
     fn test_binding() -> BrowserAccountBinding {
         BrowserAccountBinding {
             session: "fixture-session".into(),
+            transport_mode: BrowserTransportMode::BrowserOnly,
             target_url_prefix: None,
             adapter_script: None,
             adapter_contract_version: Some(BROWSER_ADAPTER_CONTRACT_VERSION),

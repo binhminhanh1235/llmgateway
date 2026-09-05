@@ -3,12 +3,16 @@ mod admin;
 mod admin_api;
 mod api;
 mod browser_account_setup;
+mod browser_auth;
+mod browser_auth_runtime;
 mod browser_provider;
 mod browser_provider_runtime;
+mod browser_runtime_api;
 mod browser_session;
 mod browser_session_api;
 mod browser_session_runtime;
 mod catalog;
+mod chatgpt_web_transport;
 mod chromium_driver;
 mod chromium_driver_api;
 mod chromium_driver_runtime;
@@ -24,6 +28,7 @@ mod embedding_runtime;
 mod execution_trace;
 mod execution_trace_api;
 mod gateway;
+mod gemini_web_transport;
 mod live_config;
 mod memory_api;
 mod memory_backfill;
@@ -53,8 +58,12 @@ use axum::{
 use browser_account_setup::{
     browser_account_setup_presets, create_browser_account_setup, set_browser_account_enabled,
 };
+use browser_auth::BrowserAuthVault;
 use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
 use browser_session::{BrowserConfig, BrowserSessionStore};
+use browser_runtime_api::{
+    browser_account_runtime_diagnostics, browser_thread_affinity_diagnostics,
+};
 use browser_session_api::{
     begin_browser_login, complete_browser_login, get_browser_session, list_browser_sessions,
     require_browser_attention, reset_browser_session, verify_browser_session,
@@ -107,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
     let usage_config = UsageConfig::load_from_gateway_config(&config_path)?;
     let browser_config = BrowserConfig::load_from_gateway_config(&config_path)?;
+    let browser_auth_vault_root = browser_config.auth_vault_root.clone();
     let browser_provider_config = BrowserProviderConfig::load_from_gateway_config(&config_path)?;
     let chromium_config = ChromiumConfig::load_from_gateway_config(&config_path)?;
     let config = Arc::new(AppConfig::load(&config_path)?);
@@ -126,7 +136,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let browser_sessions = Arc::new(BrowserSessionStore::connect(config.clone(), browser_config).await?);
     let browser_session_count = browser_sessions.summary().await?.sessions.len();
-    let chromium_driver = Arc::new(ChromiumDriver::new(chromium_config, browser_sessions.clone())?);
+    let browser_auth_vault = Arc::new(BrowserAuthVault::open(&browser_auth_vault_root)?);
+    browser_auth_runtime::install(browser_auth_vault.clone())
+        .map_err(|_| "browser auth vault was already initialized")?;
+    let chromium_driver = Arc::new(ChromiumDriver::new(
+        chromium_config,
+        browser_sessions.clone(),
+        browser_auth_vault,
+    )?);
     let chromium_driver_enabled = chromium_driver.enabled();
     let startup_browser_reconcile = chromium_driver.reconcile_all().await;
     chromium_driver_runtime::install(chromium_driver.clone())
@@ -291,6 +308,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/_llmgateway/browser-account-setup/{account_id}",
             axum::routing::patch(set_browser_account_enabled),
+        )
+        .route(
+            "/_llmgateway/browser-accounts/{account_id}/runtime",
+            get(browser_account_runtime_diagnostics),
+        )
+        .route(
+            "/_llmgateway/threads/{thread_id}/browser-affinity/{account_id}",
+            get(browser_thread_affinity_diagnostics),
         )
         .route("/_llmgateway/browser-sessions", get(list_browser_sessions))
         .route(

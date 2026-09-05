@@ -21,6 +21,8 @@ pub struct BrowserConfig {
     pub enabled: bool,
     #[serde(default = "default_profile_root")]
     pub profile_root: String,
+    #[serde(default = "default_auth_vault_root")]
+    pub auth_vault_root: String,
     #[serde(default)]
     pub sessions: BTreeMap<String, BrowserSessionSpec>,
 }
@@ -30,6 +32,7 @@ impl Default for BrowserConfig {
         Self {
             enabled: false,
             profile_root: default_profile_root(),
+            auth_vault_root: default_auth_vault_root(),
             sessions: BTreeMap::new(),
         }
     }
@@ -478,6 +481,11 @@ fn validate_browser_config(config: &BrowserConfig) -> Result<(), BrowserSessionE
             "browser.profile_root must not be empty".into(),
         ));
     }
+    if config.auth_vault_root.trim().is_empty() {
+        return Err(BrowserSessionError::InvalidConfig(
+            "browser.auth_vault_root must not be empty".into(),
+        ));
+    }
     for (id, spec) in &config.sessions {
         if id.is_empty()
             || !id
@@ -542,6 +550,10 @@ fn default_profile_root() -> String {
     "data/browser-profiles".into()
 }
 
+fn default_auth_vault_root() -> String {
+    "data/browser-auth".into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +574,10 @@ mod tests {
             enabled: true,
             profile_root: std::env::temp_dir()
                 .join("llmgateway-browser-session-migration-test")
+                .display()
+                .to_string(),
+            auth_vault_root: std::env::temp_dir()
+                .join("llmgateway-browser-auth-migration-test")
                 .display()
                 .to_string(),
             sessions,
@@ -631,6 +647,7 @@ mod tests {
         let config = BrowserConfig {
             enabled: true,
             profile_root: "data/browser-profiles".into(),
+            auth_vault_root: "data/browser-auth".into(),
             sessions,
         };
         assert!(validate_browser_config(&config).is_err());

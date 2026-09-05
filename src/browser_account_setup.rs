@@ -166,7 +166,7 @@ pub async fn create_browser_account_setup(
                 result.next_steps = vec![
                     "Open Accounts and choose Login with browser for the new account.".into(),
                     "Complete provider login, CAPTCHA, and 2FA normally in Chromium if requested.".into(),
-                    "Verify the authenticated page; browser-first routing will make the route eligible immediately.".into(),
+                    "Verify the authenticated page; supported web transports capture reusable auth material and can keep Chromium closed until browser-only re-auth or challenge handling is needed.".into(),
                 ];
                 json_response(StatusCode::CREATED, json!(result), None)
             }
@@ -362,6 +362,9 @@ pub fn apply_browser_account_setup(
         if !browser.contains_key("profile_root") {
             browser["profile_root"] = value("data/browser-profiles");
         }
+        if !browser.contains_key("auth_vault_root") {
+            browser["auth_vault_root"] = value("data/browser-auth");
+        }
         let sessions = ensure_table(browser, "sessions")?;
         if sessions.contains_key(&session_id) {
             return Err(BrowserAccountSetupError::Conflict(account_id));
@@ -375,6 +378,9 @@ pub fn apply_browser_account_setup(
         let bindings = ensure_table(browser, "bindings")?;
         let binding = ensure_table(bindings, &account_id)?;
         binding["session"] = value(&session_id);
+        if matches!(preset.id, "gemini" | "chatgpt") {
+            binding["transport_mode"] = value("http-preferred");
+        }
         binding["adapter_contract_version"] = value(1);
         binding["models"] = Item::Value(Value::Array(string_array([model_id.as_str()])));
         binding["ephemeral_chat"] = value(true);
@@ -432,7 +438,7 @@ pub fn apply_browser_account_setup(
         let account = append_new_by_id(accounts, &account_id)?;
         account["provider"] = value(preset.provider_id);
         account["enabled"] = value(true);
-        account["discover_models"] = value(false);
+        account["discover_models"] = value(preset.id == "gemini");
 
         let routes = ensure_aot(doc.as_table_mut(), "routes")?;
         let route = append_new_by_id(routes, &route_id)?;
@@ -479,7 +485,7 @@ pub fn apply_browser_account_setup(
             "Restart llmgateway so the managed browser account becomes active.".into(),
             "Open Accounts and choose Login with browser for the new account.".into(),
             "Complete provider login, CAPTCHA, and 2FA normally in Chromium if requested.".into(),
-            "Verify the authenticated page; browser-first routing will then make the route eligible."
+            "Verify the authenticated page; supported providers can prefer direct HTTP after reusable auth material is captured."
                 .into(),
         ],
     })
@@ -778,6 +784,7 @@ routes = ["api"]
         assert_eq!(provider.kind, "browser-chatgpt");
         let account = parsed.account("chatgpt-a").unwrap();
         assert_eq!(account.provider, "chatgpt-web");
+        assert!(!account.discover_models);
         let route = parsed.route("chatgpt-a-route").unwrap();
         assert_eq!(route.model, "chatgpt-web-default");
         assert_eq!(route.priority, 4);
@@ -826,6 +833,7 @@ routes = ["api"]
         assert_eq!(provider.kind, "browser-gemini");
         let account = parsed.account("gemini-a").unwrap();
         assert_eq!(account.provider, "gemini-web");
+        assert!(account.discover_models);
         let route = parsed.route("gemini-a-route").unwrap();
         assert_eq!(route.model, "gemini-web-pro");
         assert_eq!(route.priority, 5);

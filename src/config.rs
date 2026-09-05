@@ -297,15 +297,20 @@ impl AppConfig {
     }
 
     fn normalize(&mut self) {
-        let browser_providers = self
+        let browser_provider_kinds = self
             .providers
             .iter()
             .filter(|provider| provider.is_browser())
-            .map(|provider| provider.id.clone())
-            .collect::<HashSet<_>>();
+            .map(|provider| (provider.id.clone(), provider.kind.clone()))
+            .collect::<HashMap<_, _>>();
         for account in &mut self.accounts {
-            if browser_providers.contains(&account.provider) {
-                account.discover_models = false;
+            if let Some(kind) = browser_provider_kinds.get(&account.provider) {
+                // Gemini HTTP-preferred accounts can discover their web model catalog
+                // directly from the authenticated session. Other browser providers keep
+                // the legacy no-discovery normalization until they implement that contract.
+                if kind != "browser-gemini" {
+                    account.discover_models = false;
+                }
             }
         }
     }
@@ -731,7 +736,11 @@ enabled = true"#,
             assert!(provider.is_browser());
             assert_eq!(provider.transport(), "browser");
             assert!(!account.credential_required(provider));
-            assert!(!account.discover_models);
+            if kind == "browser-gemini" {
+                assert!(account.discover_models);
+            } else {
+                assert!(!account.discover_models);
+            }
         }
     }
 
@@ -783,7 +792,7 @@ enabled = true"#,
     }
 
     #[test]
-    fn browser_account_explicit_discovery_is_normalized_off() {
+    fn browser_account_discovery_normalization_is_provider_aware() {
         let raw = minimal_config(
             r#"[[providers]]
 id = "browser"
@@ -798,6 +807,21 @@ discover_models = true"#,
         config.normalize();
         config.validate().unwrap();
         assert!(!config.account("account").unwrap().discover_models);
+
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "browser"
+kind = "browser-gemini""#,
+            r#"[[accounts]]
+id = "account"
+provider = "browser"
+enabled = true
+discover_models = true"#,
+        );
+        let mut config: AppConfig = toml::from_str(&raw).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+        assert!(config.account("account").unwrap().discover_models);
     }
 
     #[test]

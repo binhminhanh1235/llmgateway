@@ -209,6 +209,8 @@ pub enum GatewayError {
     BrowserAdapterIncompatible(String),
     #[error("browser model unavailable: {0}")]
     BrowserModelUnavailable(String),
+    #[error("model_recipe_stale: {0}")]
+    BrowserModelRecipeStale(String),
     #[error("upstream rejected request with {status}: {body}")]
     Upstream { status: StatusCode, body: String },
     #[error("{source}")]
@@ -546,13 +548,15 @@ impl Gateway {
                     let duration_ms = attempt_started.elapsed().as_millis();
                     let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     let error_text = error.to_string();
+                    let non_retryable_post_submit = !is_retryable_attempt_error(&error);
                     let adaptive_failure = matches!(
                         &error,
                         GatewayError::Transport(_) | GatewayError::BrowserTransport(_)
                     );
                     let route_cooldown_secs = match &error {
                         GatewayError::BrowserAdapterIncompatible(_)
-                        | GatewayError::BrowserModelUnavailable(_) => 0,
+                        | GatewayError::BrowserModelUnavailable(_)
+                        | GatewayError::BrowserModelRecipeStale(_) => 0,
                         GatewayError::BrowserSessionUnavailable(_) => 2,
                         _ => 10,
                     };
@@ -570,6 +574,7 @@ impl Gateway {
                         GatewayError::BrowserTransport(_) => "browser_transport_error",
                         GatewayError::BrowserAdapterIncompatible(_) => "browser_adapter_incompatible",
                         GatewayError::BrowserModelUnavailable(_) => "browser_model_unavailable",
+                        GatewayError::BrowserModelRecipeStale(_) => "model_recipe_stale",
                         _ => "transport_error",
                     };
                     self.record_execution_attempt(AttemptRecord {
@@ -580,7 +585,7 @@ impl Gateway {
                         model: &route.model,
                         status_code: None,
                         outcome,
-                        retryable: true,
+                        retryable: !non_retryable_post_submit,
                         duration_ms,
                         error: Some(&error_text),
                     })
@@ -594,6 +599,9 @@ impl Gateway {
                         Some(&error_text),
                     )
                     .await;
+                    if non_retryable_post_submit {
+                        return Err(self.finish_execution_error(&request_id, error).await);
+                    }
                     last_error = Some(error);
                 }
             }
@@ -826,6 +834,9 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
         BrowserProviderError::ModelUnavailable { .. } => {
             GatewayError::BrowserModelUnavailable(error.to_string())
         }
+        BrowserProviderError::ModelRecipeStale { .. } => {
+            GatewayError::BrowserModelRecipeStale(error.to_string())
+        }
         BrowserProviderError::Transport(_) => GatewayError::BrowserTransport(error.to_string())
     }
 }
@@ -895,6 +906,10 @@ fn no_route_message(trace: &RouteDecisionTrace) -> String {
     )
 }
 
+fn is_retryable_attempt_error(error: &GatewayError) -> bool {
+    !matches!(error, GatewayError::BrowserModelRecipeStale(_))
+}
+
 fn is_retryable_status(status: StatusCode) -> bool {
     matches!(
         status.as_u16(),
@@ -914,7 +929,20 @@ fn cooldown_for(status: StatusCode) -> i64 {
 
 #[cfg(test)]
 mod stream_trace_tests {
-    use super::{observe_terminal_sse_completion, stream_error_message, upstream_stream_error_sse};
+    use super::{
+        is_retryable_attempt_error, observe_terminal_sse_completion, stream_error_message,
+        upstream_stream_error_sse, GatewayError,
+    };
+
+    #[test]
+    fn stale_model_recipe_is_not_retryable_after_submit() {
+        assert!(!is_retryable_attempt_error(
+            &GatewayError::BrowserModelRecipeStale("stale".into())
+        ));
+        assert!(is_retryable_attempt_error(
+            &GatewayError::BrowserTransport("network".into())
+        ));
+    }
 
     #[test]
     fn terminal_detector_requires_a_complete_sse_data_frame() {
