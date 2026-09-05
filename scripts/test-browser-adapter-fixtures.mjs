@@ -45,7 +45,7 @@ globalThis.KeyboardEvent = class {
 globalThis.sessionStorage = new FakeSessionStorage();
 
 function installPage({ host, path = "/app", nodes = {} }) {
-  globalThis.location = { hostname: host, pathname: path };
+  globalThis.location = { hostname: host, pathname: path, search: "" };
   globalThis.document = {
     querySelector(selector) {
       return nodes[selector] ?? null;
@@ -165,6 +165,90 @@ async function testChatGPT() {
   probe = await adapter.probe({ probe_timeout_ms: 20 });
   assert.equal(probe.ok, false);
   assert.equal(probe.code, "wrong_page");
+}
+
+async function testChatGPTProseMirrorStateSyncBeforeSubmit() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "#prompt-textarea": input,
+    "[data-message-author-role='assistant'] .markdown": []
+  };
+  let inputEvents = 0;
+  let sendClicks = 0;
+  let enterKeydowns = 0;
+
+  input.onDispatch = (event) => {
+    if (event.type === "input") {
+      inputEvents += 1;
+      if (String(input.textContent || "").includes("ProseMirror state sync")) {
+        nodes["#composer-submit-button"] = send;
+      }
+    }
+    if (event.type === "keydown" && event.key === "Enter") enterKeydowns += 1;
+    return true;
+  };
+  send.onClick = () => {
+    sendClicks += 1;
+    response.innerText = "prosemirror-submit-ok";
+    response.textContent = response.innerText;
+    nodes["[data-message-author-role='assistant'] .markdown"] = [response];
+  };
+
+  installPage({ host: "chatgpt.com", path: "/", nodes });
+  const adapter = loadAdapter("adapters/chatgpt-web.js");
+  const result = await adapter.chat({
+    model: "chatgpt-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "ProseMirror state sync" }]
+  }, {
+    submit_timeout_ms: 80,
+    response_timeout_ms: 1200,
+    response_stable_ms: 40
+  });
+
+  assert.ok(inputEvents >= 1, "ProseMirror composer must emit an input transaction signal");
+  assert.equal(sendClicks, 1, "send must occur after composer state becomes non-empty");
+  assert.equal(enterKeydowns, 0, "Enter fallback must not run when Send appears after state sync");
+  assert.equal(globalThis.location.search, "", "composer submit must not create a fallback GET query");
+  assert.equal(result.body.choices[0].message.content, "prosemirror-submit-ok");
+}
+
+async function testChatGPTEnterFallbackAvoidsHiddenGetForm() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const nodes = {
+    "#prompt-textarea": input,
+    "[data-message-author-role='assistant'] .markdown": []
+  };
+  let enterKeydowns = 0;
+
+  input.onDispatch = (event) => {
+    if (event.type === "keydown" && event.key === "Enter") {
+      enterKeydowns += 1;
+      response.innerText = "enter-submit-ok";
+      response.textContent = response.innerText;
+      nodes["[data-message-author-role='assistant'] .markdown"] = [response];
+    }
+    return true;
+  };
+
+  installPage({ host: "chatgpt.com", path: "/", nodes });
+  const adapter = loadAdapter("adapters/chatgpt-web.js");
+  const result = await adapter.chat({
+    model: "chatgpt-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "Submit with editor Enter" }]
+  }, {
+    submit_timeout_ms: 20,
+    response_timeout_ms: 1200,
+    response_stable_ms: 40
+  });
+
+  assert.equal(enterKeydowns, 1, "editor Enter fallback must submit exactly once");
+  assert.equal(globalThis.location.search, "", "Enter fallback must not submit the hidden GET form");
+  assert.equal(result.body.choices[0].message.content, "enter-submit-ok");
 }
 
 async function testQwen() {
@@ -1141,6 +1225,8 @@ async function testMidRequestLoginExpiry() {
 
 await testGemini();
 await testChatGPT();
+await testChatGPTProseMirrorStateSyncBeforeSubmit();
+await testChatGPTEnterFallbackAvoidsHiddenGetForm();
 await testQwen();
 await testDeepSeek();
 await testQwenReactComposerSubmit();
