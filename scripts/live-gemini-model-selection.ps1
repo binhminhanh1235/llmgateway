@@ -159,8 +159,8 @@ try {
     Write-Host ""
     Write-Host "GEMINI BROWSERLESS MODEL SELECTION: PASS" -ForegroundColor Green
     Write-Host "Account: $AccountId"
-    Write-Host "Model A: $($selectedA.id) -> discovered:$AccountId:$($selectedA.external_id)"
-    Write-Host "Model B: $($selectedB.id) -> discovered:$AccountId:$($selectedB.external_id)"
+    Write-Host "Model A: $($selectedA.id) -> discovered:${AccountId}:$($selectedA.external_id)"
+    Write-Host "Model B: $($selectedB.id) -> discovered:${AccountId}:$($selectedB.external_id)"
     Write-Host "Chromium running: false"
 } finally {
     Cleanup
