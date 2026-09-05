@@ -1,6 +1,6 @@
 use crate::{
     browser_auth::{BrowserAuthMaterial, BrowserAuthVault},
-    browser_auth_runtime, browser_provider_runtime, conversation_runtime,
+    browser_auth_runtime, conversation_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
         BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
