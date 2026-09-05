@@ -6,8 +6,9 @@ use crate::{
     response_state::{response_to_openai_assistant, responses_stream_with_capture},
 };
 use axum::{
-    body::Body,
-    extract::{Path, State},
+    body::{to_bytes, Body},
+    extract::{Path, Request, State},
+    middleware::Next,
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         HeaderMap, HeaderValue, Response, StatusCode,
@@ -438,6 +439,63 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "threads":threads,
         "routes":routes
     }))
+}
+
+pub(crate) async fn normalize_json_rejections(
+    request: Request,
+    next: Next,
+) -> Response<Body> {
+    let request_is_json = request
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("application/json"));
+
+    let response = next.run(request).await;
+    if !request_is_json
+        || !matches!(
+            response.status(),
+            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+        )
+    {
+        return response;
+    }
+
+    let is_plain_text = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/plain"));
+    if !is_plain_text {
+        return response;
+    }
+
+    let status = response.status();
+    let (_, body) = response.into_parts();
+    let raw = match to_bytes(body, 1024 * 1024).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
+        Err(error) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "request_body_error",
+                &format!("failed to read rejected request body: {error}"),
+            )
+        }
+    };
+    let message = normalize_json_rejection_message(&raw);
+    json_error(status, "invalid_request_error", &message)
+}
+
+fn normalize_json_rejection_message(raw: &str) -> String {
+    if let Some(detail) = raw.strip_prefix("Failed to parse the request body as JSON: ") {
+        return format!("Failed to parse request JSON: {detail}");
+    }
+    if let Some(detail) =
+        raw.strip_prefix("Failed to deserialize the JSON body into the target type: ")
+    {
+        return format!("Invalid request JSON: {detail}");
+    }
+    format!("Invalid request JSON: {raw}")
 }
 
 pub(crate) fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), Response<Body>> {
