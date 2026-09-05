@@ -1,5 +1,6 @@
 use crate::{
     browser_auth_runtime, browser_session_runtime, chromium_driver_runtime, conversation_runtime,
+    chatgpt_web_transport::ChatGptWebHttpAdapter,
     config::{AccountConfig, ProviderConfig, RouteConfig},
     gemini_web_transport::GeminiWebHttpAdapter,
 };
@@ -327,6 +328,7 @@ impl BrowserProviderRegistry {
         let chatgpt = Arc::new(CdpBrowserAdapter::chatgpt()?);
         let qwen = Arc::new(CdpBrowserAdapter::qwen()?);
         let gemini_http = Arc::new(GeminiWebHttpAdapter::new()?);
+        let chatgpt_http = Arc::new(ChatGptWebHttpAdapter::new()?);
         let mut adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> = BTreeMap::new();
         adapters.insert(http.kind().to_string(), http);
         adapters.insert(cdp.kind().to_string(), cdp);
@@ -337,6 +339,7 @@ impl BrowserProviderRegistry {
         let mut direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> =
             BTreeMap::new();
         direct_adapters.insert("browser-gemini".into(), gemini_http);
+        direct_adapters.insert("browser-chatgpt".into(), chatgpt_http);
         Ok(Self {
             config: Arc::new(StdRwLock::new(config)),
             adapters,
@@ -405,7 +408,9 @@ impl BrowserProviderRegistry {
     ) -> Option<&Arc<dyn BrowserProviderAdapter>> {
         let enabled = match binding.transport_mode {
             BrowserTransportMode::HttpPreferred => true,
-            BrowserTransportMode::Auto => provider_kind == "browser-gemini",
+            BrowserTransportMode::Auto => {
+                matches!(provider_kind, "browser-gemini" | "browser-chatgpt")
+            },
             BrowserTransportMode::BrowserOnly => false,
         };
         enabled
