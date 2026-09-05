@@ -632,10 +632,10 @@ impl ChatGptWebHttpAdapter {
     }
 
     fn prepare_payload(
-        request: &BrowserAdapterRequest,
         native: &NativeConversation,
         partial_query: &Value,
         model: &str,
+        temporary: bool,
     ) -> (Value, Option<&'static str>) {
         let existing_conversation = native.conversation_id.is_some();
         let mut payload = json!({
@@ -653,7 +653,7 @@ impl ChatGptWebHttpAdapter {
             "supports_buffering": true,
             "supported_encodings": ["v1"],
             "client_contextual_info": {"app_name": "chatgpt.com"},
-            "history_and_training_disabled": request.thread_id.is_none()
+            "history_and_training_disabled": temporary
         });
         if let Some(conversation_id) = native.conversation_id.as_ref() {
             payload["conversation_id"] = Value::String(conversation_id.clone());
@@ -677,7 +677,7 @@ impl ChatGptWebHttpAdapter {
         referer: &str,
     ) -> Result<String, BrowserProviderError> {
         let (payload, initial_conduit) =
-            Self::prepare_payload(request, native, partial_query, model);
+            Self::prepare_payload(native, partial_query, model, request.thread_id.is_none());
 
         let mut builder = self
             .base_request(
@@ -2388,39 +2388,8 @@ mod tests {
         }
     }
 
-    fn test_browser_request(thread_id: Option<&str>) -> BrowserAdapterRequest {
-        BrowserAdapterRequest {
-            provider: crate::config::ProviderConfig {
-                id: "chatgpt-web".into(),
-                kind: "browser-chatgpt".into(),
-                base_url: String::new(),
-            },
-            account: crate::config::AccountConfig {
-                id: "account-a".into(),
-                provider: "chatgpt-web".into(),
-                enabled: true,
-                api_key_env: String::new(),
-                auth: Default::default(),
-                discover_models: true,
-            },
-            route: crate::config::RouteConfig {
-                id: "route-a".into(),
-                model: "gpt-5-6".into(),
-                account: "account-a".into(),
-                enabled: true,
-                ..Default::default()
-            },
-            body: json!({"messages":[{"role":"user","content":"hello"}]}),
-            session_id: "session-a".into(),
-            profile_dir: "profile".into(),
-            binding: BrowserAccountBinding::default(),
-            thread_id: thread_id.map(str::to_string),
-        }
-    }
-
     #[test]
     fn existing_chat_prepare_uses_single_context_change_shape() {
-        let request = test_browser_request(Some("thread-a"));
         let native = NativeConversation {
             conversation_id: Some("conv-a".into()),
             parent_message_id: Some("parent-a".into()),
@@ -2431,7 +2400,7 @@ mod tests {
             "content":{"content_type":"text","parts":["hello"]}
         });
         let (payload, initial_conduit) =
-            ChatGptWebHttpAdapter::prepare_payload(&request, &native, &partial, "gpt-5-6");
+            ChatGptWebHttpAdapter::prepare_payload(&native, &partial, "gpt-5-6", false);
         assert_eq!(payload["client_prepare_state"], "none");
         assert_eq!(payload["client_prepare_dispatch"], "immediate");
         assert_eq!(payload["client_prepare_source"], "context_change");
@@ -2442,11 +2411,10 @@ mod tests {
 
     #[test]
     fn new_chat_prepare_uses_window_focus_shape_without_legacy_fields() {
-        let request = test_browser_request(Some("thread-a"));
         let native = NativeConversation::default();
         let partial = json!({"id":"user-a"});
         let (payload, initial_conduit) =
-            ChatGptWebHttpAdapter::prepare_payload(&request, &native, &partial, "gpt-5-6");
+            ChatGptWebHttpAdapter::prepare_payload(&native, &partial, "gpt-5-6", false);
         assert_eq!(payload["parent_message_id"], "client-created-root");
         assert_eq!(payload["client_prepare_state"], "none");
         assert_eq!(payload["client_prepare_dispatch"], "debounced");
