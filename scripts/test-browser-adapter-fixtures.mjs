@@ -19,6 +19,13 @@ class FakeElement {
 
 class FakeTextAreaElement extends FakeElement {}
 class FakeInputElement extends FakeElement {}
+class FakeSessionStorage {
+  constructor() { this.values = new Map(); }
+  getItem(key) { return this.values.has(key) ? this.values.get(key) : null; }
+  setItem(key, value) { this.values.set(String(key), String(value)); }
+  removeItem(key) { this.values.delete(String(key)); }
+  clear() { this.values.clear(); }
+}
 
 globalThis.HTMLTextAreaElement = FakeTextAreaElement;
 globalThis.HTMLInputElement = FakeInputElement;
@@ -31,6 +38,7 @@ globalThis.Event = class {
 globalThis.KeyboardEvent = class {
   constructor(type, init = {}) { this.type = type; Object.assign(this, init); }
 };
+globalThis.sessionStorage = new FakeSessionStorage();
 
 function installPage({ host, path = "/app", nodes = {} }) {
   globalThis.location = { hostname: host, pathname: path };
@@ -405,6 +413,62 @@ async function testChatGPTFreshStreamSkipsRedundantNewChatAndSubmitsBeforeReturn
     assert.equal(polled.error, null, JSON.stringify(polled));
   }
   assert.equal(polled.done, true, JSON.stringify(polled));
+}
+
+async function testChatGPTStreamRecoversAfterDocumentReplacement() {
+  const input = new FakeElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  const finalText = "Recovered ChatGPT stream. ".repeat(12);
+  const nodes = {
+    "#prompt-textarea": input,
+    "#composer-submit-button": send,
+    "[data-message-author-role='assistant'] .markdown": []
+  };
+
+  send.onClick = () => {
+    globalThis.location.pathname = "/c/recovered-stream";
+    response.innerText = finalText;
+    response.textContent = finalText;
+    nodes["[data-message-author-role='assistant'] .markdown"] = [response];
+  };
+
+  installPage({ host: "chatgpt.com", path: "/", nodes });
+  let adapter = loadAdapter("adapters/chatgpt-web.js");
+  const started = await adapter.streamStart({
+    model: "chatgpt-web-test",
+    stream: true,
+    messages: [{ role: "user", content: "recover after navigation" }]
+  }, {
+    start_new_conversation: true,
+    response_timeout_ms: 1500,
+    response_stable_ms: 60
+  });
+
+  assert.ok(started.stream_id);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  // Simulate a hard document replacement: the page-side Map disappears,
+  // while same-tab sessionStorage and the rendered native conversation survive.
+  delete globalThis.__LLMGATEWAY_STREAM_JOBS__;
+  installPage({ host: "chatgpt.com", path: "/c/recovered-stream", nodes });
+  adapter = loadAdapter("adapters/chatgpt-web.js");
+
+  const emitted = [];
+  let polled = await adapter.streamPoll({ stream_id: started.stream_id });
+  assert.equal(polled.error, null, JSON.stringify(polled));
+  emitted.push(...polled.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
+
+  if (!polled.done) {
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    polled = await adapter.streamPoll({ stream_id: started.stream_id });
+    assert.equal(polled.error, null, JSON.stringify(polled));
+    emitted.push(...polled.events.map((event) => event.choices?.[0]?.delta?.content || "").filter(Boolean));
+  }
+
+  assert.equal(polled.done, true, JSON.stringify(polled));
+  assert.equal(emitted.join(""), finalText);
+  assert.equal(polled.events.at(-1).choices[0].finish_reason, "stop");
 }
 
 async function testChatGPTReopenWaitsForStableHistory() {
@@ -898,6 +962,7 @@ await testChatGPTToolBridge();
 await testChatGPTModelPickerFlow();
 await testChatGPTFreshThreadForcesNewChat();
 await testChatGPTFreshStreamSkipsRedundantNewChatAndSubmitsBeforeReturn();
+await testChatGPTStreamRecoversAfterDocumentReplacement();
 await testChatGPTReopenWaitsForStableHistory();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
