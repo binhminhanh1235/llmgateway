@@ -138,11 +138,17 @@ impl Router {
         best: &RouteConfig,
     ) -> bool {
         let resolved_model = config.resolve_model_alias(requested_model);
-        if config.virtual_models.contains_key(resolved_model)
-            && self.transport_preference_rank(config, preferred)
+        if let Some(group) = config.virtual_models.get(resolved_model) {
+            if group.is_tiered()
+                && group.tier_priority(&preferred.id) != group.tier_priority(&best.id)
+            {
+                return false;
+            }
+            if self.transport_preference_rank(config, preferred)
                 != self.transport_preference_rank(config, best)
-        {
-            return false;
+            {
+                return false;
+            }
         }
         if self.route_transport(config, preferred) == "browser"
             && !config.routing.browser_sticky_affinity
