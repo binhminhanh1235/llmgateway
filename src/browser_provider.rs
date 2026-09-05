@@ -1298,13 +1298,16 @@ impl BrowserProviderRegistry {
                 .get(&account.id)
                 .is_some_and(|models| models.contains(&route.model))
                 && !binding.models.iter().any(|model| model == &route.model);
-            let safe_fallback_candidate = direct_result.as_ref().err().is_some_and(|error| {
-                direct_error_allows_browser_fallback(
-                    error,
-                    dynamic_model,
-                    browser_adapter.is_cdp(),
-                )
-            });
+            let direct_failure_can_open_browser =
+                direct_failure_can_open_browser(&provider.kind, binding.transport_mode);
+            let safe_fallback_candidate = direct_failure_can_open_browser
+                && direct_result.as_ref().err().is_some_and(|error| {
+                    direct_error_allows_browser_fallback(
+                        error,
+                        dynamic_model,
+                        browser_adapter.is_cdp(),
+                    )
+                });
             let browser_was_live = safe_fallback_candidate
                 && self.cdp_session_live(&binding.session).await;
             let safe_browser_fallback = if safe_fallback_candidate {
@@ -3369,6 +3372,13 @@ fn contract_error_to_provider_error(
 }
 
 
+fn direct_failure_can_open_browser(
+    provider_kind: &str,
+    mode: BrowserTransportMode,
+) -> bool {
+    provider_kind != "browser-chatgpt" || matches!(mode, BrowserTransportMode::Auto)
+}
+
 fn direct_error_allows_browser_fallback(
     error: &BrowserProviderError,
     dynamic_model: bool,
@@ -4244,6 +4254,22 @@ mod browser_transport_policy_tests {
     }
 
     #[test]
+    fn chatgpt_http_preferred_never_reopens_browser_on_direct_failure() {
+        assert!(!direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::HttpPreferred
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::Auto
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-gemini",
+            BrowserTransportMode::HttpPreferred
+        ));
+    }
+
+    #[test]
     fn built_in_direct_adapters_publish_provider_neutral_capabilities() {
         let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
 
@@ -4256,8 +4282,11 @@ mod browser_transport_policy_tests {
 
         let chatgpt = registry.transport_capabilities("browser-chatgpt");
         assert!(chatgpt.supported);
-        assert_eq!(chatgpt.recommended_mode, Some(BrowserTransportMode::Auto));
-        assert!(!chatgpt.supports_direct_model_discovery);
+        assert_eq!(
+            chatgpt.recommended_mode,
+            Some(BrowserTransportMode::HttpPreferred)
+        );
+        assert!(chatgpt.supports_direct_model_discovery);
         assert!(chatgpt.supports_native_conversation);
 
         let qwen = registry.transport_capabilities("browser-qwen");

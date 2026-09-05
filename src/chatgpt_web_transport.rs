@@ -3,7 +3,8 @@ use crate::{
     browser_auth_runtime, conversation_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
-        BrowserProviderAdapter, BrowserProviderError, BrowserlessCapabilities,
+        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
+        BrowserlessCapabilities,
         BrowserTransportMode, BROWSER_ADAPTER_CONTRACT_VERSION,
     },
 };
@@ -39,7 +40,9 @@ const CHATGPT_CONVERSATION_PREPARE_URL: &str =
 const CHATGPT_CONVERSATION_URL: &str = "https://chatgpt.com/backend-api/f/conversation";
 const CHATGPT_CONVERSATION_RESUME_URL: &str =
     "https://chatgpt.com/backend-api/f/conversation/resume";
-const CHATGPT_ADAPTER_VERSION: &str = "experimental-1";
+const CHATGPT_MODELS_URL: &str =
+    "https://chatgpt.com/backend-api/models?iim=false&is_gizmo=false&supports_model_picker_upgrade_presets=true";
+const CHATGPT_ADAPTER_VERSION: &str = "experimental-2";
 const CHATGPT_DIRECT_MODEL: &str = "chatgpt-web-default";
 const CHATGPT_WEB_MODEL: &str = "auto";
 const POW_MAX_ATTEMPTS: u32 = 500_000;
@@ -274,6 +277,57 @@ impl ChatGptWebHttpAdapter {
         })
     }
 
+    async fn discover_models_impl(
+        &self,
+        account_id: &str,
+        binding: &BrowserAccountBinding,
+    ) -> Result<Vec<BrowserDiscoveredModel>, BrowserProviderError> {
+        let material = self.auth_material(&binding.session, account_id)?;
+        let timeout_duration =
+            Duration::from_millis(binding.probe_timeout_ms.unwrap_or(8_000).max(3_000));
+        let session = self
+            .init_session(&material, account_id, timeout_duration)
+            .await?;
+        let response = self
+            .base_request(
+                &session,
+                reqwest::Method::GET,
+                CHATGPT_MODELS_URL,
+                "/backend-api/models",
+            )
+            .header(ACCEPT, "application/json")
+            .header(REFERER, format!("{CHATGPT_BASE}/"))
+            .timeout(timeout_duration)
+            .send()
+            .await
+            .map_err(|error| preflight_error(account_id, "model_catalog_failed", error))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: account_id.to_string(),
+                code: if matches!(status.as_u16(), 401 | 403) {
+                    "login_required".into()
+                } else {
+                    "model_catalog_failed".into()
+                },
+                message: format!("ChatGPT model catalog returned HTTP {status}"),
+            });
+        }
+        let payload: Value = response
+            .json()
+            .await
+            .map_err(|error| preflight_error(account_id, "model_catalog_invalid", error))?;
+        let models = parse_chatgpt_model_catalog(&payload);
+        if models.is_empty() {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: account_id.to_string(),
+                code: "model_catalog_empty".into(),
+                message: "ChatGPT model catalog contained no selectable models".into(),
+            });
+        }
+        Ok(models)
+    }
+
     fn base_request(
         &self,
         session: &ChatGptSession,
@@ -344,7 +398,7 @@ impl ChatGptWebHttpAdapter {
                     account_id: account_id.to_string(),
                     code: "browser_challenge_required".into(),
                     message: format!(
-                        "ChatGPT Sentinel requires {challenge}; direct transport will reopen the authenticated browser instead of attempting to bypass the challenge"
+                        "ChatGPT Sentinel requires {challenge}; direct transport will not bypass the challenge"
                     ),
                 });
             }
@@ -581,6 +635,7 @@ impl ChatGptWebHttpAdapter {
         session: &ChatGptSession,
         native: &NativeConversation,
         partial_query: &Value,
+        model: &str,
         trace_id: &str,
         referer: &str,
     ) -> Result<String, BrowserProviderError> {
@@ -595,7 +650,7 @@ impl ChatGptWebHttpAdapter {
                 "action": "next",
                 "fork_from_shared_post": false,
                 "parent_message_id": native.parent_message_id.as_deref().unwrap_or("client-created-root"),
-                "model": CHATGPT_WEB_MODEL,
+                "model": model,
                 "client_prepare_state": prepare_state,
                 "timezone_offset_min": -420,
                 "timezone": "Asia/Bangkok",
@@ -691,13 +746,14 @@ impl ChatGptWebHttpAdapter {
         native: &NativeConversation,
         user_message: Value,
         conduit: &str,
+        model: &str,
         trace_id: &str,
         referer: &str,
     ) -> Result<Response, BrowserProviderError> {
         let mut payload = json!({
             "action": "next",
             "messages": [user_message],
-            "model": CHATGPT_WEB_MODEL,
+            "model": model,
             "parent_message_id": native.parent_message_id.as_deref().unwrap_or("client-created-root"),
             "client_prepare_state": "success",
             "timezone_offset_min": -420,
@@ -1126,7 +1182,20 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
     }
 
     fn browserless_capabilities(&self) -> BrowserlessCapabilities {
-        BrowserlessCapabilities::preferred(BrowserTransportMode::Auto, true, false, true)
+        BrowserlessCapabilities::preferred(BrowserTransportMode::HttpPreferred, true, true, true)
+    }
+
+    fn supports_model_discovery(&self) -> bool {
+        true
+    }
+
+    async fn discover_models(
+        &self,
+        account_id: &str,
+        binding: &BrowserAccountBinding,
+        _force: bool,
+    ) -> Result<Vec<BrowserDiscoveredModel>, BrowserProviderError> {
+        self.discover_models_impl(account_id, binding).await
     }
 
     async fn diagnose(
@@ -1135,19 +1204,6 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
         _profile_dir: &str,
         binding: &BrowserAccountBinding,
     ) -> BrowserAdapterDiagnostics {
-        if binding
-            .models
-            .iter()
-            .any(|model| model != CHATGPT_DIRECT_MODEL)
-        {
-            return diagnostics(
-                account_id,
-                binding,
-                "adapter_incompatible",
-                "ChatGPT direct HTTP currently supports chatgpt-web-default only; pinned web models keep Chromium fallback",
-            );
-        }
-
         let result = async {
             let material = self.auth_material(&binding.session, account_id)?;
             self.warm_preflight(
@@ -1165,12 +1221,12 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
                 account_id,
                 binding,
                 "ready",
-                "ChatGPT direct HTTP preflight is ready; Chromium can stay closed until a browser-only challenge appears",
+                "ChatGPT direct HTTP preflight is ready; authenticated web models can run without Chromium",
             ),
             Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
                 let status = match code.as_str() {
                     "login_required" => "login_required",
-                    "browser_challenge_required" => "browser_fallback_required",
+                    "browser_challenge_required" => "requires_attention",
                     _ => "adapter_incompatible",
                 };
                 diagnostics(account_id, binding, status, &message)
@@ -1183,13 +1239,7 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
         &self,
         request: BrowserAdapterRequest,
     ) -> Result<reqwest::Response, BrowserProviderError> {
-        if request.route.model != CHATGPT_DIRECT_MODEL {
-            return Err(BrowserProviderError::ModelUnavailable {
-                account_id: request.account.id.clone(),
-                model: request.route.model.clone(),
-            });
-        }
-
+        let web_model = chatgpt_wire_model(&request.route.model);
         let material = self.auth_material(&request.session_id, &request.account.id)?;
         let preflight = self
             .take_or_build_preflight(
@@ -1223,6 +1273,7 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
                 &session,
                 &native,
                 &partial_query,
+                &web_model,
                 &trace_id,
                 &referer,
             )
@@ -1235,6 +1286,7 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
                 &native,
                 user_message,
                 &conduit,
+                &web_model,
                 &trace_id,
                 &referer,
             )
@@ -1423,6 +1475,125 @@ fn fnv_avalanche_hex(input: &str) -> String {
     current = current.wrapping_mul(3_266_489_909);
     current ^= current >> 16;
     format!("{current:08x}")
+}
+
+fn chatgpt_wire_model(requested: &str) -> String {
+    let trimmed = requested.trim().trim_start_matches("chatgpt-web/");
+    if trimmed.is_empty()
+        || trimmed == CHATGPT_DIRECT_MODEL
+        || trimmed.eq_ignore_ascii_case(CHATGPT_WEB_MODEL)
+    {
+        CHATGPT_WEB_MODEL.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
+    let items = payload
+        .get("models")
+        .and_then(Value::as_array)
+        .or_else(|| payload.get("data").and_then(Value::as_array))
+        .or_else(|| payload.as_array());
+    let Some(items) = items else {
+        return Vec::new();
+    };
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut models = Vec::new();
+    for item in items {
+        let hidden_tag = item
+            .get("tags")
+            .and_then(Value::as_array)
+            .is_some_and(|tags| {
+                tags.iter().filter_map(Value::as_str).any(|tag| {
+                    matches!(tag.to_ascii_lowercase().as_str(), "hidden" | "confidential")
+                })
+            });
+        if item.get("enabled").and_then(Value::as_bool) == Some(false)
+            || item.get("hidden").and_then(Value::as_bool) == Some(true)
+            || item.get("is_visible").and_then(Value::as_bool) == Some(false)
+            || item.get("show_in_picker").and_then(Value::as_bool) == Some(false)
+            || item.get("showInPicker").and_then(Value::as_bool) == Some(false)
+            || hidden_tag
+        {
+            continue;
+        }
+        let slug = item
+            .get("slug")
+            .or_else(|| item.get("model_slug"))
+            .or_else(|| item.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(slug) = slug else {
+            continue;
+        };
+        let external_id = if slug.eq_ignore_ascii_case(CHATGPT_WEB_MODEL) {
+            CHATGPT_DIRECT_MODEL.to_string()
+        } else {
+            slug.to_string()
+        };
+        if !seen.insert(external_id.clone()) {
+            continue;
+        }
+
+        let display_name = item
+            .get("title")
+            .or_else(|| item.get("display_name"))
+            .or_else(|| item.get("displayName"))
+            .or_else(|| item.get("name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(slug)
+            .to_string();
+        let description = item
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let context_window = item
+            .get("max_tokens")
+            .or_else(|| item.get("context_window"))
+            .or_else(|| item.get("contextWindow"))
+            .or_else(|| item.get("max_context_tokens"))
+            .and_then(Value::as_i64);
+
+        let haystack = format!("{slug} {display_name} {description}").to_ascii_lowercase();
+        let mut capabilities = vec!["chat".to_string(), "streaming".to_string()];
+        if haystack.contains("think")
+            || haystack.contains("reason")
+            || haystack.contains("pro")
+            || haystack.contains("gpt-5")
+        {
+            capabilities.push("reasoning".into());
+        }
+        if haystack.contains("code") || haystack.contains("codex") || haystack.contains("gpt-5") {
+            capabilities.push("coding".into());
+        }
+
+        models.push(BrowserDiscoveredModel {
+            external_id,
+            display_name,
+            owned_by: "OpenAI".into(),
+            context_window,
+            capabilities,
+        });
+    }
+
+    if !seen.contains(CHATGPT_DIRECT_MODEL) {
+        models.insert(
+            0,
+            BrowserDiscoveredModel {
+                external_id: CHATGPT_DIRECT_MODEL.into(),
+                display_name: "ChatGPT Auto".into(),
+                owned_by: "OpenAI".into(),
+                context_window: None,
+                capabilities: vec!["chat".into(), "streaming".into()],
+            },
+        );
+    }
+    models
 }
 
 fn serialize_prompt(body: &Value, native_continuation: bool) -> Result<String, BrowserProviderError> {
@@ -1953,6 +2124,57 @@ mod tests {
         });
         assert_eq!(serialize_prompt(&body, true).unwrap(), "second");
         assert!(serialize_prompt(&body, false).unwrap().contains("User: first"));
+    }
+
+    #[test]
+    fn model_catalog_maps_auto_and_preserves_physical_slugs() {
+        let models = parse_chatgpt_model_catalog(&json!({
+            "models": [
+                {
+                    "slug": "auto",
+                    "title": "Auto",
+                    "max_tokens": 32768
+                },
+                {
+                    "slug": "gpt-5-thinking",
+                    "title": "GPT-5 Thinking",
+                    "description": "Reasoning model",
+                    "max_tokens": 196000
+                },
+                {
+                    "slug": "hidden-model",
+                    "title": "Hidden",
+                    "hidden": true
+                }
+            ]
+        }));
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].external_id, CHATGPT_DIRECT_MODEL);
+        assert_eq!(models[0].display_name, "Auto");
+        let thinking = models
+            .iter()
+            .find(|model| model.external_id == "gpt-5-thinking")
+            .unwrap();
+        assert_eq!(thinking.display_name, "GPT-5 Thinking");
+        assert_eq!(thinking.context_window, Some(196000));
+        assert!(thinking.capabilities.contains(&"reasoning".to_string()));
+        assert!(thinking.capabilities.contains(&"coding".to_string()));
+    }
+
+    #[test]
+    fn model_catalog_keeps_legacy_default_when_auto_row_is_absent() {
+        let models = parse_chatgpt_model_catalog(&json!({
+            "models": [{"slug":"gpt-5","title":"GPT-5"}]
+        }));
+        assert_eq!(models[0].external_id, CHATGPT_DIRECT_MODEL);
+        assert!(models.iter().any(|model| model.external_id == "gpt-5"));
+    }
+
+    #[test]
+    fn wire_model_maps_only_legacy_default_to_auto() {
+        assert_eq!(chatgpt_wire_model(CHATGPT_DIRECT_MODEL), CHATGPT_WEB_MODEL);
+        assert_eq!(chatgpt_wire_model("chatgpt-web/auto"), CHATGPT_WEB_MODEL);
+        assert_eq!(chatgpt_wire_model("gpt-5-thinking"), "gpt-5-thinking");
     }
 
     #[test]

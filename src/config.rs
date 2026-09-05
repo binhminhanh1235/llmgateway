@@ -353,10 +353,13 @@ impl AppConfig {
             .collect::<HashMap<_, _>>();
         for account in &mut self.accounts {
             if let Some(kind) = browser_provider_kinds.get(&account.provider) {
-                // Gemini and Qwen HTTP-preferred accounts can discover their web model
+                // Gemini, ChatGPT, and Qwen browserless accounts can discover their web model
                 // catalogs directly from the authenticated session. Registry transport-mode
-                // gating still keeps Qwen discovery disabled while its binding remains Auto.
-                if !matches!(kind.as_str(), "browser-gemini" | "browser-qwen") {
+                // gating still controls whether a direct adapter is active for the binding.
+                if !matches!(
+                    kind.as_str(),
+                    "browser-gemini" | "browser-chatgpt" | "browser-qwen"
+                ) {
                     account.discover_models = false;
                 }
             }
@@ -837,7 +840,10 @@ enabled = true"#,
             assert!(provider.is_browser());
             assert_eq!(provider.transport(), "browser");
             assert!(!account.credential_required(provider));
-            if matches!(kind, "browser-gemini" | "browser-qwen") {
+            if matches!(
+                kind,
+                "browser-gemini" | "browser-chatgpt" | "browser-qwen"
+            ) {
                 assert!(account.discover_models);
             } else {
                 assert!(!account.discover_models);
