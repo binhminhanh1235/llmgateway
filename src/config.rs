@@ -387,6 +387,26 @@ impl VirtualModelConfig {
             .find(|tier| tier.models.iter().any(|candidate| candidate == &canonical_model))
             .map(|tier| tier.priority)
     }
+
+    pub fn model_order_for_route(
+        &self,
+        config: &AppConfig,
+        route: &RouteConfig,
+    ) -> Option<usize> {
+        let account = config.account(&route.account)?;
+        let canonical_model = format!(
+            "{}/{}",
+            account.provider.trim_matches('/'),
+            route.model.trim_start_matches('/')
+        );
+        self.tiers
+            .iter()
+            .find_map(|tier| {
+                tier.models
+                    .iter()
+                    .position(|candidate| candidate == &canonical_model)
+            })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1186,6 +1206,7 @@ enabled = true"#,
         assert!(group.route_ids().is_empty());
         let route = config.route("route").unwrap();
         assert_eq!(group.tier_priority_for_route(&config, route), Some(10));
+        assert_eq!(group.model_order_for_route(&config, route), Some(0));
     }
 
     #[test]
