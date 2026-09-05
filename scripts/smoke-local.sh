@@ -2,10 +2,13 @@
 set -euo pipefail
 
 export LLMGATEWAY_API_KEY="ci-local-key"
+export LLMGATEWAY_FILE_CLIENT_A_KEY="ci-file-client-a"
+export LLMGATEWAY_FILE_CLIENT_B_KEY="ci-file-client-b"
 export FAKE_API_KEY="fake-key"
 export LLMGATEWAY_CONFIG="/tmp/llmgateway-smoke.toml"
 
 rm -f data/llmgateway.db data/llmgateway.db-shm data/llmgateway.db-wal
+rm -rf data/artifacts
 mkdir -p data
 
 cat >/tmp/llmgateway-smoke.toml <<'EOF'
@@ -17,8 +20,23 @@ port = 7331
 key_env = "LLMGATEWAY_API_KEY"
 default_model = "llmgateway-auto"
 
+[clients.file-a]
+key_env = "LLMGATEWAY_FILE_CLIENT_A_KEY"
+enabled = true
+
+[clients.file-b]
+key_env = "LLMGATEWAY_FILE_CLIENT_B_KEY"
+enabled = true
+
 [storage]
 database_url = "sqlite://data/llmgateway.db"
+
+[artifacts]
+root = "data/artifacts"
+max_file_size_bytes = 1024
+max_request_size_bytes = 2048
+max_files_per_request = 2
+remote_url_ingestion = false
 
 [context]
 enabled = true
@@ -71,7 +89,7 @@ FAKE_PID=$!
 cargo build --quiet
 ./target/debug/llmgateway >/tmp/llmgateway-smoke.log 2>&1 &
 PID=$!
-trap 'kill "$PID" "$FAKE_PID" 2>/dev/null || true; rm -f data/llmgateway.db data/llmgateway.db-shm data/llmgateway.db-wal /tmp/llmgateway-smoke.toml' EXIT
+trap 'kill "$PID" "$FAKE_PID" 2>/dev/null || true; rm -f data/llmgateway.db data/llmgateway.db-shm data/llmgateway.db-wal /tmp/llmgateway-smoke.toml /tmp/llmgateway-artifact-a.txt /tmp/llmgateway-artifact-b.txt /tmp/llmgateway-artifact-spoof.pdf /tmp/llmgateway-artifact-big.bin /tmp/llmgateway-artifact-download.txt; rm -rf data/artifacts' EXIT
 
 for _ in {1..40}; do
   if curl -fsS http://127.0.0.1:7331/_llmgateway/health >/dev/null; then
@@ -185,8 +203,96 @@ assert x["canonical_modalities"]["input"] == ["text","image","file","audio"], x
 assert x["canonical_modalities"]["output"] == ["text","image","audio","file"], x
 assert x["gateway_execution"]["input_modalities"] == ["text"], x
 assert x["live_attachments"] is False, x
+assert x["artifact_store"]["enabled"] is True, x
+assert x["artifact_store"]["max_file_size_bytes"] == 1024, x
+assert x["artifact_store"]["max_request_size_bytes"] == 2048, x
+assert x["artifact_store"]["max_files_per_request"] == 2, x
+assert x["artifact_store"]["remote_url_ingestion"] is False, x
 assert any(a["id"]=="fake" and a["transport"]=="api" for a in x["adapters"]), x
 '
+
+printf 'artifact smoke payload\n' >/tmp/llmgateway-artifact-a.txt
+cp /tmp/llmgateway-artifact-a.txt /tmp/llmgateway-artifact-b.txt
+
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
+  http://127.0.0.1:7331/v1/files \
+  -F 'purpose=assistants' \
+  -F 'file=@/tmp/llmgateway-artifact-a.txt;type=text/plain')
+assert_json_error 401 authentication_error "$STATUS"
+
+FILE_A_JSON=$(curl -fsS -X POST http://127.0.0.1:7331/v1/files \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}" \
+  -F 'purpose=assistants' \
+  -F 'file=@/tmp/llmgateway-artifact-a.txt;type=text/plain')
+FILE_A_ID=$(printf '%s' "$FILE_A_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+FILE_A_SHA=$(printf '%s' "$FILE_A_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha256"])')
+printf '%s' "$FILE_A_JSON" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["object"] == "file", x
+assert x["status"] == "processed", x
+assert x["mime_type"] == "text/plain", x
+assert x["bytes"] > 0, x
+assert x["llmgateway"]["source"] == "api_upload", x
+assert "path" not in x and "relative_path" not in x, x
+'
+
+FILE_A_META=$(curl -fsS "http://127.0.0.1:7331/v1/files/${FILE_A_ID}" \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}")
+test "$(printf '%s' "$FILE_A_META" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha256"])')" = "$FILE_A_SHA"
+
+curl -fsS "http://127.0.0.1:7331/v1/files/${FILE_A_ID}/content" \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}" \
+  -o /tmp/llmgateway-artifact-download.txt
+cmp /tmp/llmgateway-artifact-a.txt /tmp/llmgateway-artifact-download.txt
+rm -f /tmp/llmgateway-artifact-download.txt
+
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' \
+  "http://127.0.0.1:7331/v1/files/${FILE_A_ID}" \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_B_KEY}")
+assert_json_error 404 not_found_error "$STATUS"
+
+FILE_B_JSON=$(curl -fsS -X POST http://127.0.0.1:7331/v1/files \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}" \
+  -F 'purpose=assistants' \
+  -F 'file=@/tmp/llmgateway-artifact-b.txt;type=text/plain')
+FILE_B_ID=$(printf '%s' "$FILE_B_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+FILE_B_SHA=$(printf '%s' "$FILE_B_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha256"])')
+test "$FILE_A_ID" != "$FILE_B_ID"
+test "$FILE_A_SHA" = "$FILE_B_SHA"
+test "$(find data/artifacts/blobs -type f | wc -l | tr -d ' ')" = "1"
+
+printf '%%PDF-1.7\nspoof\n' >/tmp/llmgateway-artifact-spoof.pdf
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
+  http://127.0.0.1:7331/v1/files \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}" \
+  -F 'purpose=assistants' \
+  -F 'file=@/tmp/llmgateway-artifact-spoof.pdf;type=image/png')
+assert_json_error 415 mime_type_mismatch "$STATUS"
+
+python3 - <<'PY'
+with open("/tmp/llmgateway-artifact-big.bin","wb") as f:
+    f.write(b"x"*1025)
+PY
+STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
+  http://127.0.0.1:7331/v1/files \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}" \
+  -F 'purpose=assistants' \
+  -F 'file=@/tmp/llmgateway-artifact-big.bin;type=application/octet-stream')
+assert_json_error 413 file_too_large "$STATUS"
+
+curl -fsS -X DELETE "http://127.0.0.1:7331/v1/files/${FILE_A_ID}" \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}" | grep -q '"deleted":true'
+curl -fsS "http://127.0.0.1:7331/v1/files/${FILE_B_ID}/content" \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}" \
+  -o /tmp/llmgateway-artifact-download.txt
+cmp /tmp/llmgateway-artifact-b.txt /tmp/llmgateway-artifact-download.txt
+rm -f /tmp/llmgateway-artifact-download.txt
+test "$(find data/artifacts/blobs -type f | wc -l | tr -d ' ')" = "1"
+
+curl -fsS -X DELETE "http://127.0.0.1:7331/v1/files/${FILE_B_ID}" \
+  -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}" | grep -q '"deleted":true'
+test "$(find data/artifacts/blobs -type f | wc -l | tr -d ' ')" = "0"
 
 curl -fsS -X POST http://127.0.0.1:7331/v1/chat/completions \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
