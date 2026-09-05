@@ -120,10 +120,10 @@ async fn session_can_release_browser(state: &AppState, session_id: &str) -> bool
             .adapter_diagnostics(&provider.kind, &account.id)
             .await;
         if diagnostics.status != "ready"
-            || !matches!(
-                diagnostics.adapter_id.as_deref(),
-                Some("gemini-web-http" | "chatgpt-web-http")
-            )
+            || !diagnostics
+                .adapter_id
+                .as_deref()
+                .is_some_and(|adapter_id| registry.is_direct_http_adapter_id(adapter_id))
         {
             return false;
         }
