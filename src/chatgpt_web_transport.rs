@@ -771,9 +771,16 @@ impl ChatGptWebHttpAdapter {
                 created,
                 &model,
             ).await;
-            if let Err(error) = primary_result {
-                yield Err(std::io::Error::other(error));
-                return;
+            match primary_result {
+                Ok(chunks) => {
+                    for chunk in chunks {
+                        yield Ok(chunk);
+                    }
+                }
+                Err(error) => {
+                    yield Err(std::io::Error::other(error));
+                    return;
+                }
             }
 
             if state.handoff && !stream_success(&state) {
@@ -794,15 +801,22 @@ impl ChatGptWebHttpAdapter {
                         return;
                     }
                 };
-                if let Err(error) = stream_response_as_openai(
+                match stream_response_as_openai(
                     resumed,
                     &mut state,
                     &completion_id,
                     created,
                     &model,
                 ).await {
-                    yield Err(std::io::Error::other(error));
-                    return;
+                    Ok(chunks) => {
+                        for chunk in chunks {
+                            yield Ok(chunk);
+                        }
+                    }
+                    Err(error) => {
+                        yield Err(std::io::Error::other(error));
+                        return;
+                    }
                 }
             }
 
