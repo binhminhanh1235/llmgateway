@@ -4304,6 +4304,45 @@ mod browser_transport_policy_tests {
     }
 
     #[test]
+    fn request_config_snapshot_stays_immutable_across_policy_reload() {
+        let mut initial = BrowserProviderConfig::default();
+        initial.bindings.insert(
+            "account-a".into(),
+            BrowserAccountBinding {
+                session: "session-a".into(),
+                transport_mode: BrowserTransportMode::BrowserOnly,
+                target_url_prefix: None,
+                adapter_script: None,
+                adapter_contract_version: None,
+                models: Vec::new(),
+                model_labels: BTreeMap::new(),
+                selector_overrides: BTreeMap::new(),
+                ephemeral_chat: None,
+                probe_timeout_ms: None,
+                response_timeout_ms: None,
+                first_byte_timeout_ms: None,
+                idle_stream_timeout_ms: None,
+            },
+        );
+        let registry = BrowserProviderRegistry::new(initial).unwrap();
+        let request_snapshot = registry.config_snapshot();
+
+        let mut updated = request_snapshot.clone();
+        updated.bindings.get_mut("account-a").unwrap().transport_mode =
+            BrowserTransportMode::HttpPreferred;
+        registry.reload(updated).unwrap();
+
+        assert_eq!(
+            request_snapshot.bindings["account-a"].transport_mode,
+            BrowserTransportMode::BrowserOnly
+        );
+        assert_eq!(
+            registry.config_snapshot().bindings["account-a"].transport_mode,
+            BrowserTransportMode::HttpPreferred
+        );
+    }
+
+    #[test]
     fn transport_policy_parser_is_semantic_and_strict() {
         assert_eq!(
             BrowserTransportPolicy::parse("browser-only").unwrap(),
