@@ -11,6 +11,7 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::Arc;
+use tracing::warn;
 
 pub async fn launch_chromium_login(
     State(state): State<AppState>,
@@ -59,18 +60,44 @@ pub async fn verify_chromium_login(
     };
     match driver.verify(&session_id).await {
         Ok(mut verification) => {
-            if verification.authenticated
-                && verification.auth_material_captured
-                && session_can_release_browser(&state, &session_id).await
-            {
-                if let Ok(status) = driver.stop(&session_id).await {
-                    verification.browser_closed_after_capture = true;
-                    verification.status = status;
+            if verification.authenticated && verification.auth_material_captured {
+                refresh_session_browser_models(&state, &session_id).await;
+                if session_can_release_browser(&state, &session_id).await {
+                    if let Ok(status) = driver.stop(&session_id).await {
+                        verification.browser_closed_after_capture = true;
+                        verification.status = status;
+                    }
                 }
             }
             json_response(StatusCode::OK, json!(verification), None)
         }
         Err(error) => driver_error(error),
+    }
+}
+
+async fn refresh_session_browser_models(state: &AppState, session_id: &str) {
+    let Some(registry) = browser_provider_runtime::get() else {
+        return;
+    };
+    let config = state.gateway.config_snapshot();
+    for account in config.accounts.iter().filter(|account| account.enabled) {
+        if registry.session_id_for_account(&account.id).as_deref() != Some(session_id) {
+            continue;
+        }
+        let Some(provider) = config.provider(&account.provider) else {
+            continue;
+        };
+        if !registry.supports_model_discovery(&provider.kind) {
+            continue;
+        }
+        if let Err(error) = state.catalog.refresh_account(&account.id).await {
+            warn!(
+                %error,
+                account = %account.id,
+                provider = %provider.id,
+                "browser account model discovery after login failed"
+            );
+        }
     }
 }
 
