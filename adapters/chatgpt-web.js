@@ -271,11 +271,22 @@
       const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
       if (setter) setter.call(node, value);
       else node.value = value;
+      node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+      node.dispatchEvent(new Event("change", { bubbles: true }));
     } else {
-      node.textContent = value;
+      let inserted = false;
+      try {
+        if (typeof document !== "undefined" && typeof document.execCommand === "function") {
+          document.execCommand("selectAll", false, null);
+          inserted = document.execCommand("insertText", false, value);
+        }
+      } catch (_) {}
+      if (!inserted || !node.textContent || !node.textContent.includes(value)) {
+        node.textContent = value;
+        node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+        node.dispatchEvent(new Event("change", { bubbles: true }));
+      }
     }
-    node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-    node.dispatchEvent(new Event("change", { bubbles: true }));
   };
 
   const selectModel = async (context) => {

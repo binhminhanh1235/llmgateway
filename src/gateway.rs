@@ -123,7 +123,10 @@ fn observe_terminal_sse_completion(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
     let mut saw_terminal = false;
 
     loop {
-        let lf_end = buffer.windows(2).position(|window| window == b"\n\n").map(|pos| (pos, 2));
+        let lf_end = buffer
+            .windows(2)
+            .position(|window| window == b"\n\n")
+            .map(|pos| (pos, 2));
         let crlf_end = buffer
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
@@ -165,7 +168,6 @@ fn observe_terminal_sse_completion(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
 
     saw_terminal
 }
-
 
 fn stream_error_message(error: &(dyn std::error::Error + 'static)) -> String {
     let mut message = error.to_string();
@@ -254,16 +256,14 @@ impl Gateway {
             .await?;
         Ok(self
             .router
-            .restore_adaptive_samples(
-                samples
-                    .into_iter()
-                    .map(|sample| (
-                        sample.route_id,
-                        sample.success,
-                        sample.duration_ms,
-                        sample.observed_at_ms,
-                    )),
-            )
+            .restore_adaptive_samples(samples.into_iter().map(|sample| {
+                (
+                    sample.route_id,
+                    sample.success,
+                    sample.duration_ms,
+                    sample.observed_at_ms,
+                )
+            }))
             .await)
     }
 
@@ -331,15 +331,13 @@ impl Gateway {
         if let Some(preferred_route) = preferred_route {
             if let Some(index) = routes.iter().position(|route| route.id == preferred_route) {
                 let keep_sticky = index == 0
-                    || self
-                        .router
-                        .sticky_route_matches_best_task_fit_with_config(
-                            config.as_ref(),
-                            requested_model,
-                            body,
-                            &routes[index],
-                            &routes[0],
-                        );
+                    || self.router.sticky_route_matches_best_task_fit_with_config(
+                        config.as_ref(),
+                        requested_model,
+                        body,
+                        &routes[index],
+                        &routes[0],
+                    );
                 if keep_sticky {
                     let preferred = routes.remove(index);
                     routes.insert(0, preferred);
@@ -363,10 +361,8 @@ impl Gateway {
             let account = match config.account(&route.account) {
                 Some(account) => account,
                 None => {
-                    let error = GatewayError::InvalidConfig(format!(
-                        "unknown account '{}'",
-                        route.account
-                    ));
+                    let error =
+                        GatewayError::InvalidConfig(format!("unknown account '{}'", route.account));
                     return Err(self.finish_execution_error(&request_id, error).await);
                 }
             };
@@ -386,13 +382,7 @@ impl Gateway {
 
             let attempt_started = Instant::now();
             match self
-                .send_route_chat(
-                    provider,
-                    account,
-                    &route,
-                    &upstream_body,
-                    thread_id,
-                )
+                .send_route_chat(provider, account, &route, &upstream_body, thread_id)
                 .await
             {
                 Ok(response) if response.status().is_success() => {
@@ -423,14 +413,18 @@ impl Gateway {
                         )
                         .await;
                     if let Some(usage) = quota_usage_runtime::get() {
-                        if let Err(error) = usage.observe_headers(&account.id, response.headers()).await {
+                        if let Err(error) =
+                            usage.observe_headers(&account.id, response.headers()).await
+                        {
                             warn!(%error, account = %account.id, "failed to observe quota headers");
                         }
                         if let Err(error) = usage.mark_success(&account.id).await {
                             warn!(%error, account = %account.id, "failed to clear quota cooldown");
                         }
                     }
-                    self.router.mark_success(&route.id, adaptive_latency_ms).await;
+                    self.router
+                        .mark_success(&route.id, adaptive_latency_ms)
+                        .await;
                     if is_stream {
                         if let Err(error) = self
                             .execution_traces
@@ -457,7 +451,9 @@ impl Gateway {
                     let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     let retry_after = QuotaUsageStore::retry_after_seconds(response.headers());
                     if let Some(usage) = quota_usage_runtime::get() {
-                        if let Err(error) = usage.observe_headers(&account.id, response.headers()).await {
+                        if let Err(error) =
+                            usage.observe_headers(&account.id, response.headers()).await
+                        {
                             warn!(%error, account = %account.id, "failed to observe quota headers");
                         }
                     }
@@ -527,7 +523,10 @@ impl Gateway {
                     {
                         if let Some(registry) = browser_provider_runtime::get() {
                             if let Err(error) = registry
-                                .require_attention(&account.id, &format!("HTTP {status}: {body_text}"))
+                                .require_attention(
+                                    &account.id,
+                                    &format!("HTTP {status}: {body_text}"),
+                                )
                                 .await
                             {
                                 warn!(%error, account = %account.id, "failed to mark browser session as requiring attention");
@@ -548,15 +547,21 @@ impl Gateway {
                     let duration_ms = attempt_started.elapsed().as_millis();
                     let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     let error_text = error.to_string();
+                    let is_model_binding_conflict = matches!(
+                        &error,
+                        GatewayError::BrowserTransport(msg)
+                            if msg.contains("native conversation is already bound to model")
+                    );
                     let non_retryable_post_submit = !is_retryable_attempt_error(&error);
                     let adaptive_failure = matches!(
                         &error,
                         GatewayError::Transport(_) | GatewayError::BrowserTransport(_)
-                    );
+                    ) && !is_model_binding_conflict;
                     let route_cooldown_secs = match &error {
                         GatewayError::BrowserAdapterIncompatible(_)
                         | GatewayError::BrowserModelUnavailable(_)
                         | GatewayError::BrowserModelRecipeStale(_) => 0,
+                        GatewayError::BrowserTransport(_) if is_model_binding_conflict => 0,
                         GatewayError::BrowserSessionUnavailable(_) => 2,
                         _ => 10,
                     };
@@ -572,7 +577,9 @@ impl Gateway {
                     let outcome = match &error {
                         GatewayError::BrowserSessionUnavailable(_) => "browser_session_unavailable",
                         GatewayError::BrowserTransport(_) => "browser_transport_error",
-                        GatewayError::BrowserAdapterIncompatible(_) => "browser_adapter_incompatible",
+                        GatewayError::BrowserAdapterIncompatible(_) => {
+                            "browser_adapter_incompatible"
+                        }
                         GatewayError::BrowserModelUnavailable(_) => "browser_model_unavailable",
                         GatewayError::BrowserModelRecipeStale(_) => "model_recipe_stale",
                         _ => "transport_error",
@@ -837,7 +844,7 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
         BrowserProviderError::ModelRecipeStale { .. } => {
             GatewayError::BrowserModelRecipeStale(error.to_string())
         }
-        BrowserProviderError::Transport(_) => GatewayError::BrowserTransport(error.to_string())
+        BrowserProviderError::Transport(_) => GatewayError::BrowserTransport(error.to_string()),
     }
 }
 
@@ -908,6 +915,11 @@ fn no_route_message(trace: &RouteDecisionTrace) -> String {
 
 fn is_retryable_attempt_error(error: &GatewayError) -> bool {
     !matches!(error, GatewayError::BrowserModelRecipeStale(_))
+        && !matches!(
+            error,
+            GatewayError::BrowserTransport(msg)
+                if msg.contains("native conversation is already bound to model")
+        )
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -926,7 +938,6 @@ fn cooldown_for(status: StatusCode) -> i64 {
     }
 }
 
-
 #[cfg(test)]
 mod stream_trace_tests {
     use super::{
@@ -939,9 +950,14 @@ mod stream_trace_tests {
         assert!(!is_retryable_attempt_error(
             &GatewayError::BrowserModelRecipeStale("stale".into())
         ));
-        assert!(is_retryable_attempt_error(
-            &GatewayError::BrowserTransport("network".into())
+        assert!(!is_retryable_attempt_error(
+            &GatewayError::BrowserTransport(
+                "Gemini native conversation is already bound to model 'pro'".into()
+            )
         ));
+        assert!(is_retryable_attempt_error(&GatewayError::BrowserTransport(
+            "network".into()
+        )));
     }
 
     #[test]
@@ -981,10 +997,7 @@ mod stream_trace_tests {
 
     #[test]
     fn stream_error_message_prefers_the_deepest_source() {
-        let error = std::io::Error::new(
-            std::io::ErrorKind::Other,
-            NestedStreamError,
-        );
+        let error = std::io::Error::new(std::io::ErrorKind::Other, NestedStreamError);
         assert_eq!(
             stream_error_message(&error),
             "forced browser stream poll failure"
