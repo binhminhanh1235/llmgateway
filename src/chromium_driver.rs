@@ -24,7 +24,7 @@ use tokio::{
     io::AsyncReadExt,
     process::{Child, Command},
     sync::Mutex,
-    time::{sleep, Instant},
+    time::{sleep, timeout, Instant},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
