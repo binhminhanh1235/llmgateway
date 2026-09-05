@@ -1742,7 +1742,7 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
         // public intelligence version, but "Instant" is an execution lane and
         // should not overwrite a concrete model title such as GPT-5.6 Luna.
         let display_name = match (row_label, category_label) {
-            (Some(row), Some(category))
+            (Some(_row), Some(category))
                 if !category.eq_ignore_ascii_case("instant")
                     && !category.eq_ignore_ascii_case("auto") =>
             {
