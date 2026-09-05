@@ -735,6 +735,7 @@
           message: "provider rewrote text inside the committed stream prefix after " + Array.from(state.delivered).length + " emitted characters"
         };
         streamJobs.delete(state.streamId);
+        clearStreamRecovery(state.streamId);
         return { events: [], done: true, error: state.error };
       }
 
