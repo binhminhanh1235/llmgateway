@@ -359,6 +359,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(stop_chromium),
         )
         .with_state(state)
+        .layer(axum::middleware::from_fn(api::normalize_json_rejections))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
 
