@@ -271,6 +271,56 @@ print(int(mapping.get("last_synced_ordinal") or 0))
 PY
 }
 
+assert_model_switch_rejected() {
+  local thread="$1" from_model="$2" to_model="$3" expected_url="$4" expected_ordinal="$5"
+  api GET "/v1/threads/$thread" "$TMP_DIR/model-switch-thread-before.json"
+  local before_count body http_code
+  before_count="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1],encoding="utf-8")).get("messages",[])))' "$TMP_DIR/model-switch-thread-before.json")"
+  body="$(python3 - "$to_model" <<'PY'
+import json,sys
+print(json.dumps({
+    "content":"This request must be rejected before provider submit.",
+    "model":sys.argv[1],
+    "stream":False
+}))
+PY
+)"
+  http_code="$(curl -sS -o "$TMP_DIR/model-switch-error.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $API_KEY" \
+    -H "Content-Type: application/json" \
+    --data-binary "$body" \
+    "$BASE_URL/v1/threads/$thread/messages")"
+  [[ "$http_code" -ge 400 ]] || { echo "MODEL ACCEPTANCE FAILED: switching $from_model -> $to_model unexpectedly succeeded" >&2; exit 1; }
+  grep -Fq 'start a new llmgateway thread' "$TMP_DIR/model-switch-error.json" \
+    || { echo "MODEL ACCEPTANCE FAILED: model-switch rejection did not come from Gemini native model affinity" >&2; cat "$TMP_DIR/model-switch-error.json" >&2; exit 1; }
+
+  api GET "/_llmgateway/browser-accounts/$ACCOUNT_ID/runtime" "$TMP_DIR/model-switch-runtime.json"
+  python3 - "$TMP_DIR/model-switch-runtime.json" <<'PY'
+import json,sys
+runtime=json.load(open(sys.argv[1],encoding="utf-8"))
+if runtime.get("browser_running"):
+    raise SystemExit("MODEL ACCEPTANCE FAILED: Chromium started while rejecting a model switch")
+PY
+
+  api GET "/_llmgateway/threads/$thread/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/model-switch-affinity.json"
+  python3 - "$TMP_DIR/model-switch-affinity.json" "$expected_url" "$expected_ordinal" <<'PY'
+import json,sys
+mapping=(json.load(open(sys.argv[1],encoding="utf-8")).get("mapping") or {})
+if str(mapping.get("conversation_url") or "") != sys.argv[2]:
+    raise SystemExit("MODEL ACCEPTANCE FAILED: model-switch rejection changed native Gemini conversation")
+if int(mapping.get("last_synced_ordinal") or 0) != int(sys.argv[3]):
+    raise SystemExit("MODEL ACCEPTANCE FAILED: model-switch rejection advanced native Gemini affinity")
+PY
+
+  api GET "/v1/threads/$thread" "$TMP_DIR/model-switch-thread-after.json"
+  python3 - "$TMP_DIR/model-switch-thread-after.json" "$before_count" <<'PY'
+import json,sys
+count=len(json.load(open(sys.argv[1],encoding="utf-8")).get("messages",[]))
+if count != int(sys.argv[2]):
+    raise SystemExit("MODEL ACCEPTANCE FAILED: model-switch rejection persisted a local user/assistant message")
+PY
+}
+
 create_thread "Gemini model A acceptance" "$MODEL_A_ID" "$TMP_DIR/thread-a.json"
 THREAD_A="$LAST_THREAD"
 send_model "$THREAD_A" "$MODEL_A_ID" "$MODEL_A_EXTERNAL" "Reply with exactly: model-a" "a"
@@ -289,6 +339,9 @@ URL_B="${B1[0]:-}"
 ORD_B="${B1[1]:-0}"
 [[ -n "$URL_A" && -n "$URL_B" ]] || { echo "MODEL ACCEPTANCE FAILED: native Gemini affinity missing" >&2; exit 1; }
 [[ "$URL_A" != "$URL_B" ]] || { echo "MODEL ACCEPTANCE FAILED: two local threads share one native conversation" >&2; exit 1; }
+
+echo "[gemini-model-live] Verifying mid-thread model switch is rejected before submit"
+assert_model_switch_rejected "$THREAD_A" "$MODEL_A_ID" "$MODEL_B_ID" "$URL_A" "$ORD_A"
 
 send_model "$THREAD_A" "$MODEL_A_ID" "$MODEL_A_EXTERNAL" "Reply with exactly: model-a-continued" "a2"
 api GET "/_llmgateway/threads/$THREAD_A/browser-affinity/$ACCOUNT_ID" "$TMP_DIR/affinity-a2.json"
