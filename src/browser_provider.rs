@@ -78,13 +78,6 @@ impl BrowserTransportPolicy {
             other => Err(BrowserProviderError::InvalidTransportPolicy(other.to_string())),
         }
     }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::BrowserOnly => "browser-only",
-            Self::BrowserlessPreferred => "browserless-preferred",
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
