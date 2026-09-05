@@ -1,5 +1,5 @@
 use crate::{
-    api::{authorize, gateway_error, json_error, json_response, response_with_route, AppState},
+    api::{authorize, gateway_error, json_error, json_response, response_with_route, vision_error, AppState},
     context_engine::{ContextError, PreparedContext},
     context_runtime,
     browser_provider_runtime,
@@ -12,6 +12,7 @@ use crate::{
         augment_messages_with_retrieval, estimate_json_messages_tokens, retrieve_relevant_history,
         RetrievalResult,
     },
+    vision,
 };
 use axum::{
     body::Body,
@@ -67,7 +68,17 @@ pub async fn create_thread(
     };
 
     if let Some(messages) = body.messages {
-        for message in messages {
+        for mut message in messages {
+            if let Err(error) = vision::resolve_image_inputs(
+                &mut message,
+                &state.artifacts,
+                None,
+                true,
+            )
+            .await
+            {
+                return vision_error(error);
+            }
             if let Err(error) = state
                 .conversations
                 .append_message(&created.id, &message, Some(model), None)
@@ -75,6 +86,9 @@ pub async fn create_thread(
             {
                 return conversation_error(error);
             }
+        }
+        if let Err(response) = sync_thread_artifact_references(&state, &created.id).await {
+            return response;
         }
     }
 
@@ -120,7 +134,20 @@ pub async fn delete_thread(
         return response;
     }
     match state.conversations.delete_thread(&thread_id).await {
-        Ok(()) => json_response(StatusCode::OK, json!({"deleted":true,"id":thread_id}), None),
+        Ok(()) => {
+            if let Err(error) = state
+                .artifacts
+                .sync_references("thread", &thread_id, &[])
+                .await
+            {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "artifact_reference_error",
+                    &error.to_string(),
+                );
+            }
+            json_response(StatusCode::OK, json!({"deleted":true,"id":thread_id}), None)
+        }
         Err(error) => conversation_error(error),
     }
 }
@@ -213,7 +240,17 @@ pub async fn send_thread_message(
         }
     };
 
-    let user_message = json!({"role":"user","content":body.content});
+    let mut user_message = json!({"role":"user","content":body.content});
+    if let Err(error) = vision::resolve_image_inputs(
+        &mut user_message,
+        &state.artifacts,
+        None,
+        true,
+    )
+    .await
+    {
+        return vision_error(error);
+    }
     let mut prepared = match engine
         .prepare_turn(&thread_id, &requested_model, &user_message)
         .await
@@ -325,11 +362,22 @@ pub async fn send_thread_message(
         }
     }
 
-    let request = json!({
+    let stable_request = json!({
         "model":requested_model,
         "messages":prepared.messages,
         "stream":body.stream
     });
+    let request = match vision::materialize_image_inputs(
+        &stable_request,
+        &state.artifacts,
+        None,
+        true,
+    )
+    .await
+    {
+        Ok(request) => request,
+        Err(error) => return vision_error(error),
+    };
 
     let routed = match state
         .gateway
@@ -367,6 +415,9 @@ pub async fn send_thread_message(
         .await
     {
         return conversation_error(error);
+    }
+    if let Err(response) = sync_thread_artifact_references(&state, &thread_id).await {
+        return response;
     }
     if let Err(error) = state
         .conversations
@@ -477,6 +528,34 @@ pub async fn send_thread_message(
         }
         Err(error) => gateway_error(GatewayError::Transport(error.to_string())),
     }
+}
+
+async fn sync_thread_artifact_references(
+    state: &AppState,
+    thread_id: &str,
+) -> Result<(), Response<Body>> {
+    let detail = state
+        .conversations
+        .thread(thread_id)
+        .await
+        .map_err(conversation_error)?;
+    let mut artifact_ids = Vec::new();
+    for message in detail.messages {
+        artifact_ids.extend(vision::image_artifact_ids(&message.message));
+    }
+    artifact_ids.sort();
+    artifact_ids.dedup();
+    state
+        .artifacts
+        .sync_references("thread", thread_id, &artifact_ids)
+        .await
+        .map_err(|error| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "artifact_reference_error",
+                &error.to_string(),
+            )
+        })
 }
 
 fn with_context_headers(
