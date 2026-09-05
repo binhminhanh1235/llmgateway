@@ -259,6 +259,12 @@ impl ModelCatalog {
                 })
                 .collect::<Vec<_>>()
         } else {
+            if provider.is_browser() {
+                return Err(CatalogError::InvalidConfig(format!(
+                    "browser model discovery is unavailable for account '{account_id}' with provider kind '{}'",
+                    provider.kind
+                )));
+            }
             if !account.discover_models {
                 return Err(CatalogError::InvalidConfig(format!(
                     "model discovery is disabled for account '{account_id}'"
@@ -373,11 +379,21 @@ impl ModelCatalog {
                         })
                 })
                 .unwrap_or(false);
+            let discover_models = config
+                .provider(&account.provider)
+                .map(|provider| {
+                    if provider.is_browser() {
+                        browser_discovery
+                    } else {
+                        account.discover_models
+                    }
+                })
+                .unwrap_or(false);
             result.push(AccountView {
                 id: account.id.clone(),
                 provider: account.provider.clone(),
                 enabled: account.enabled,
-                discover_models: account.discover_models || browser_discovery,
+                discover_models,
                 model_count: row.try_get("model_count")?,
                 available_model_count: row.try_get("available_model_count")?,
             });
