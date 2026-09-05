@@ -2,7 +2,7 @@
 // Contract v1. Runs inside an authenticated chat.qwen.ai page through loopback CDP.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.6";
+  const ADAPTER_VERSION = "2026.09.7";
 
   const defaults = {
     input: [
@@ -210,11 +210,56 @@
 
   const setComposer = (node, value) => {
     node.focus();
+    const previousValue = String(node.value || "");
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
     if (setter && node instanceof HTMLTextAreaElement) setter.call(node, value);
     else node.value = value;
-    node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+
+    // React tracks the last DOM value for controlled form fields. Reset the tracker to
+    // the pre-update value so the synthetic input event is observed as a real change.
+    const tracker = node?._valueTracker;
+    if (tracker && typeof tracker.setValue === "function") {
+      try { tracker.setValue(previousValue); } catch (_) {}
+    }
+
+    const inputEvent = typeof InputEvent === "function"
+      ? new InputEvent("input", { bubbles: true, inputType: "insertText", data: value })
+      : new Event("input", { bubbles: true });
+    node.dispatchEvent(inputEvent);
     node.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  const usableSendControl = (node) => {
+    if (!node || node.disabled === true) return false;
+    const ariaDisabled = String(node.getAttribute?.("aria-disabled") || "").toLowerCase();
+    return ariaDisabled !== "true";
+  };
+
+  const submitComposer = (context, composer) => {
+    const send = queryFirst(context, "send");
+    if (usableSendControl(send)) {
+      send.click();
+      return "send-control";
+    }
+
+    if (queryFirst(context, "login")) {
+      throw new Error("LOGIN_REQUIRED: Qwen session expired");
+    }
+
+    // Qwen's composer handles Enter on keydown. Use this only when a usable send
+    // control is absent so one request can never be submitted through both paths.
+    const accepted = composer.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true
+    }));
+    if (accepted === false) {
+      throw new Error("ADAPTER_INCOMPATIBLE: Qwen Enter submit was rejected by the composer");
+    }
+    return "enter-keydown";
   };
 
   const selectModel = async (context) => {
@@ -328,13 +373,8 @@
         setComposer(composer, prompt);
         markStreamProgress(state, "prompt-ready");
 
-        const send = await waitFor(() => queryFirst(context, "send"), 5000);
-        if (!send) {
-          if (queryFirst(context, "login")) throw new Error("LOGIN_REQUIRED: Qwen session expired");
-          throw new Error("ADAPTER_INCOMPATIBLE: Qwen send control was not found");
-        }
-        send.click();
-        markStreamProgress(state, "submitted");
+        const submitMethod = submitComposer(context, composer);
+        markStreamProgress(state, "submitted-" + submitMethod);
 
         const startedAt = Date.now();
         let last = "";
@@ -529,12 +569,7 @@
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
       setComposer(composer, prompt);
 
-      const send = await waitFor(() => queryFirst(context, "send"), 5000);
-      if (!send) {
-        if (queryFirst(context, "login")) throw new Error("LOGIN_REQUIRED: Qwen session expired");
-        throw new Error("ADAPTER_INCOMPATIBLE: Qwen send control was not found");
-      }
-      send.click();
+      submitComposer(context, composer);
 
       const startedAt = Date.now();
       let last = "";
