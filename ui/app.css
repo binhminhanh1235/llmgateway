@@ -237,10 +237,10 @@ button { cursor: pointer; }
   padding: 24px 24px 14px;
   background: linear-gradient(to bottom, transparent, var(--bg) 28%, var(--bg));
 }
-.composer, .route-notice, .composer-help { width: min(880px, 100%); margin-left: auto; margin-right: auto; }
+.composer, .route-notice, .composer-help, .attachment-preview { width: min(880px, 100%); margin-left: auto; margin-right: auto; }
 .composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: end;
   gap: 10px;
   padding: 10px 10px 10px 15px;
@@ -251,6 +251,59 @@ button { cursor: pointer; }
 }
 .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 70%, var(--border)); }
 .composer textarea { resize: none; max-height: 180px; min-height: 28px; padding: 5px 0; border: 0; outline: 0; background: transparent; line-height: 1.45; }
+.composer.drag-active { border-color: var(--accent); background: var(--accent-soft); }
+.attach-button {
+  width: 32px;
+  height: 32px;
+  align-self: end;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+}
+.attach-button:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
+.attach-button:disabled { opacity: .38; cursor: default; }
+.attachment-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.attachment-chip {
+  position: relative;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 190px;
+  max-width: 280px;
+  padding: 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 6px 20px rgba(20, 30, 25, .06);
+}
+.attachment-chip img {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--panel-soft);
+}
+.attachment-copy { min-width: 0; }
+.attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 680; }
+.attachment-state { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.attachment-state.error { color: var(--danger); }
+.attachment-remove {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+.attachment-remove:hover { background: var(--panel-soft); color: var(--text); }
 .send-button { width: 36px; height: 36px; background: var(--text); color: var(--panel); font-size: 20px; font-weight: 760; }
 .send-button:disabled { opacity: .4; cursor: default; }
 .composer-help { padding-top: 6px; text-align: center; font-size: 10px; color: var(--muted); }
