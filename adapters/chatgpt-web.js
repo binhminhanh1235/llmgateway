@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04.4";
+  const ADAPTER_VERSION = "2026.09.05.1";
 
   const defaults = {
     input: [
@@ -408,6 +408,92 @@
   const streamJobs = globalThis.__LLMGATEWAY_STREAM_JOBS__ || new Map();
   globalThis.__LLMGATEWAY_STREAM_JOBS__ = streamJobs;
 
+  const STREAM_RECOVERY_PREFIX = "__llmgateway_chatgpt_stream__:";
+  const recoveryStorage = () => {
+    try { return globalThis.sessionStorage || null; } catch (_) { return null; }
+  };
+  const recoveryKey = (streamId) => STREAM_RECOVERY_PREFIX + String(streamId || "");
+  const clearStreamRecovery = (streamId) => {
+    const storage = recoveryStorage();
+    if (!storage) return;
+    try { storage.removeItem(recoveryKey(streamId)); } catch (_) {}
+  };
+  const saveStreamRecovery = (state) => {
+    if (!state?.recoveryArmed) return;
+    const storage = recoveryStorage();
+    if (!storage) return;
+    const request = state.request || {};
+    const context = state.context || {};
+    const payload = {
+      streamId: state.streamId,
+      completionId: state.completionId,
+      model: state.model,
+      baselineCount: Number(state.baselineCount || 0),
+      delivered: String(state.delivered || ""),
+      roleEmitted: Boolean(state.roleEmitted),
+      progressSeq: Number(state.progressSeq || 0),
+      progressPhase: String(state.progressPhase || "submitted"),
+      lastProgressAt: Number(state.lastProgressAt || Date.now()),
+      startedAt: Number(state.startedAt || Date.now()),
+      stableSince: Number(state.stableSince || 0),
+      responseTimeoutMs: Number(context.response_timeout_ms || 180000),
+      responseStableMs: Number(context.response_stable_ms || 900),
+      tools: Array.isArray(request.tools) ? request.tools : [],
+      toolChoice: request.tool_choice ?? "auto"
+    };
+    try { storage.setItem(recoveryKey(state.streamId), JSON.stringify(payload)); } catch (_) {}
+  };
+  const recoverStreamJob = (streamId) => {
+    const storage = recoveryStorage();
+    if (!storage) return null;
+    let payload;
+    try {
+      payload = JSON.parse(storage.getItem(recoveryKey(streamId)) || "null");
+    } catch (_) {
+      clearStreamRecovery(streamId);
+      return null;
+    }
+    if (!payload || payload.streamId !== streamId) return null;
+    const startedAt = Number(payload.startedAt || 0);
+    const responseTimeoutMs = Number(payload.responseTimeoutMs || 180000);
+    if (!startedAt || Date.now() - startedAt > Math.max(responseTimeoutMs + 60000, 300000)) {
+      clearStreamRecovery(streamId);
+      return null;
+    }
+    const state = {
+      streamId,
+      completionId: String(payload.completionId || ("chatcmpl_chatgpt_web_" + Date.now())),
+      model: String(payload.model || "chatgpt-web"),
+      request: {
+        stream: true,
+        tools: Array.isArray(payload.tools) ? payload.tools : [],
+        tool_choice: payload.toolChoice ?? "auto"
+      },
+      context: {
+        response_timeout_ms: responseTimeoutMs,
+        response_stable_ms: Number(payload.responseStableMs || 900)
+      },
+      answer: "",
+      delivered: String(payload.delivered || ""),
+      done: false,
+      finalEmitted: false,
+      roleEmitted: Boolean(payload.roleEmitted),
+      cancelled: false,
+      error: null,
+      toolCalls: null,
+      progressSeq: Number(payload.progressSeq || 1),
+      progressPhase: String(payload.progressPhase || "recovered"),
+      lastProgressAt: Number(payload.lastProgressAt || Date.now()),
+      startedAt,
+      stableSince: Number(payload.stableSince || 0),
+      baselineCount: Number(payload.baselineCount || 0),
+      recoveryArmed: true,
+      recovered: true
+    };
+    streamJobs.set(streamId, state);
+    return state;
+  };
+
   const classifyStreamError = (error) => {
     const message = String(error?.message || error || "browser stream failed");
     let code = "adapter_execution_error";
@@ -446,6 +532,7 @@
     state.progressPhase = nextPhase;
     state.progressSeq = Number(state.progressSeq || 0) + 1;
     state.lastProgressAt = now;
+    saveStreamRecovery(state);
   };
 
   const startStreamJob = async (request, context) => {
@@ -466,7 +553,12 @@
       toolCalls: null,
       progressSeq: 1,
       progressPhase: "starting",
-      lastProgressAt: Date.now()
+      lastProgressAt: Date.now(),
+      startedAt: Date.now(),
+      stableSince: 0,
+      baselineCount: 0,
+      recoveryArmed: false,
+      recovered: false
     };
     streamJobs.set(streamId, state);
 
@@ -481,6 +573,7 @@
       markStreamProgress(state, "composer-ready");
 
       before = await captureResponseBaseline(context);
+      state.baselineCount = Number(before?.count || 0);
       markStreamProgress(state, "history-ready");
       const prompt = formatMessages(request);
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
@@ -492,6 +585,8 @@
         if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: ChatGPT session expired");
         throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT send control was not found");
       }
+      state.recoveryArmed = true;
+      saveStreamRecovery(state);
       send.click();
       markStreamProgress(state, "submitted");
     } catch (error) {
@@ -507,11 +602,9 @@
 
     Promise.resolve().then(async () => {
       try {
-        const startedAt = Date.now();
         let last = "";
-        let stableSince = 0;
         let answer = "";
-        while (Date.now() - startedAt < Number(context?.response_timeout_ms || 180000)) {
+        while (Date.now() - state.startedAt < Number(context?.response_timeout_ms || 180000)) {
           if (state.cancelled) {
             const stop = queryVisible(context, "completion");
             try { stop?.click(); } catch (_) {}
@@ -536,9 +629,9 @@
             last = candidate;
             answer = candidate;
             state.answer = candidate;
-            stableSince = Date.now();
+            state.stableSince = Date.now();
             markStreamProgress(state, "response-advanced", true);
-          } else if (candidate && !generating && stableSince && Date.now() - stableSince >= Number(context?.response_stable_ms || 900)) {
+          } else if (candidate && !generating && state.stableSince && Date.now() - state.stableSince >= Number(context?.response_stable_ms || 900)) {
             answer = candidate;
             state.answer = candidate;
             break;
@@ -558,6 +651,7 @@
       } finally {
         const cleanupTimer = setTimeout(() => {
           if (streamJobs.get(streamId) === state) streamJobs.delete(streamId);
+          clearStreamRecovery(streamId);
         }, 60000);
         cleanupTimer?.unref?.();
       }
@@ -570,8 +664,54 @@
     };
   };
 
+  const advanceRecoveredStream = (state) => {
+    if (!state?.recovered || state.done || state.error) return;
+    try {
+      if (state.cancelled) throw new Error("STREAM_CANCELLED: client disconnected or cancelled");
+      if (loginIndicator(state.context)) {
+        throw new Error("LOGIN_REQUIRED: ChatGPT session expired while recovering a response");
+      }
+
+      const now = Date.now();
+      const responses = responseLeaves(state.context);
+      const candidate = responses.length > state.baselineCount
+        ? text(responses[responses.length - 1])
+        : "";
+      const generating = Boolean(queryVisible(state.context, "completion"));
+      const submittedAndWaiting = generating || !queryVisible(state.context, "send");
+      if (submittedAndWaiting) {
+        markStreamProgress(state, generating ? "generating" : "submitted-wait", true);
+      }
+
+      if (candidate && candidate !== state.answer) {
+        state.answer = candidate;
+        state.stableSince = now;
+        markStreamProgress(state, "response-advanced", true);
+      } else if (
+        candidate &&
+        !generating &&
+        state.stableSince &&
+        now - state.stableSince >= Number(state.context?.response_stable_ms || 900)
+      ) {
+        state.answer = candidate;
+        state.toolCalls = parseToolCalls(candidate, state.request);
+        state.done = true;
+        markStreamProgress(state, "completed");
+      } else if (now - state.startedAt >= Number(state.context?.response_timeout_ms || 180000)) {
+        throw new Error("RESPONSE_TIMEOUT: ChatGPT did not produce a readable response after browser navigation recovery");
+      }
+
+      saveStreamRecovery(state);
+    } catch (error) {
+      state.error = classifyStreamError(error);
+      state.done = true;
+      markStreamProgress(state, "failed");
+    }
+  };
+
   const pollStreamJob = (streamId) => {
-    const state = streamJobs.get(String(streamId || ""));
+    const normalizedStreamId = String(streamId || "");
+    const state = streamJobs.get(normalizedStreamId) || recoverStreamJob(normalizedStreamId);
     if (!state) {
       return {
         events: [],
@@ -579,8 +719,10 @@
         error: { code: "stream_not_found", message: "browser stream no longer exists" }
       };
     }
+    advanceRecoveredStream(state);
     if (state.error) {
       streamJobs.delete(state.streamId);
+      clearStreamRecovery(state.streamId);
       return { events: [], done: true, error: state.error };
     }
 
@@ -627,12 +769,18 @@
       progress_seq: state.progressSeq,
       progress_phase: state.progressPhase
     };
-    if (done) streamJobs.delete(state.streamId);
+    if (done) {
+      streamJobs.delete(state.streamId);
+      clearStreamRecovery(state.streamId);
+    } else {
+      saveStreamRecovery(state);
+    }
     return result;
   };
 
   const cancelStreamJob = (streamId) => {
-    const state = streamJobs.get(String(streamId || ""));
+    const normalizedStreamId = String(streamId || "");
+    const state = streamJobs.get(normalizedStreamId) || recoverStreamJob(normalizedStreamId);
     if (!state) return { cancelled: false, missing: true };
     state.cancelled = true;
     try { queryVisible(state.context, "completion")?.click(); } catch (_) {}
