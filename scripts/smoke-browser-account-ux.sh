@@ -136,6 +136,110 @@ assert x["browser"]["bindings"]["qwen-ci"]["session"] == "qwen-ci", x["browser"]
 assert x["chromium"]["sessions"]["qwen-ci"]["enabled"] is True, x["chromium"]
 PY
 
+TRANSPORT_BEFORE=$(curl -fsS http://127.0.0.1:7331/_llmgateway/accounts/qwen-ci/transport "${AUTH[@]}")
+printf '%s' "$TRANSPORT_BEFORE" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["desired_policy"] == "browser-only", x
+assert x["configured_mode"] == "auto", x
+assert x["browserless"]["supported"] is True, x
+assert x["browserless"]["recommended_mode"] == "http-preferred", x
+assert x["browserless"]["supports_direct_model_discovery"] is True, x
+assert x["browserless"]["supports_native_conversation"] is True, x
+assert x["auth_state"] == "unavailable", x
+'
+
+TRANSPORT_ON=$(curl -fsS -X PATCH \
+  http://127.0.0.1:7331/_llmgateway/accounts/qwen-ci/transport \
+  "${AUTH[@]}" "${JSON[@]}" -d '{"transport_policy":"browserless-preferred"}')
+printf '%s' "$TRANSPORT_ON" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["desired_policy"] == "browserless-preferred", x
+assert x["configured_mode"] == "http-preferred", x
+assert x["browserless"]["recommended_mode"] == "http-preferred", x
+assert x["effective_transport"] == "unavailable", x
+'
+
+python3 - "$LLMGATEWAY_CONFIG" <<'PY'
+import sys,tomllib
+with open(sys.argv[1], "rb") as f: x=tomllib.load(f)
+assert x["browser"]["bindings"]["qwen-ci"]["transport_mode"] == "http-preferred", x["browser"]["bindings"]["qwen-ci"]
+PY
+
+kill "$PID" 2>/dev/null || true
+wait "$PID" 2>/dev/null || true
+./target/debug/llmgateway >/tmp/llmgateway-browser-account-ux.log 2>&1 &
+PID=$!
+for _ in {1..60}; do
+  curl -fsS http://127.0.0.1:7331/_llmgateway/health >/dev/null && break
+  sleep 0.2
+done
+
+TRANSPORT_AFTER_ON_RESTART=$(curl -fsS http://127.0.0.1:7331/_llmgateway/accounts/qwen-ci/transport "${AUTH[@]}")
+printf '%s' "$TRANSPORT_AFTER_ON_RESTART" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["desired_policy"] == "browserless-preferred", x
+assert x["configured_mode"] == "http-preferred", x
+'
+
+TRANSPORT_OFF=$(curl -fsS -X PATCH \
+  http://127.0.0.1:7331/_llmgateway/accounts/qwen-ci/transport \
+  "${AUTH[@]}" "${JSON[@]}" -d '{"transport_policy":"browser-only"}')
+printf '%s' "$TRANSPORT_OFF" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["desired_policy"] == "browser-only", x
+assert x["configured_mode"] == "browser-only", x
+'
+
+kill "$PID" 2>/dev/null || true
+wait "$PID" 2>/dev/null || true
+./target/debug/llmgateway >/tmp/llmgateway-browser-account-ux.log 2>&1 &
+PID=$!
+for _ in {1..60}; do
+  curl -fsS http://127.0.0.1:7331/_llmgateway/health >/dev/null && break
+  sleep 0.2
+done
+
+TRANSPORT_AFTER_OFF_RESTART=$(curl -fsS http://127.0.0.1:7331/_llmgateway/accounts/qwen-ci/transport "${AUTH[@]}")
+printf '%s' "$TRANSPORT_AFTER_OFF_RESTART" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["desired_policy"] == "browser-only", x
+assert x["configured_mode"] == "browser-only", x
+'
+
+for SPEC in "gemini gemini-toggle Gemini" "chatgpt chatgpt-toggle ChatGPT"; do
+  read -r PROVIDER ACCOUNT LABEL <<<"$SPEC"
+  curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-account-setup \
+    "${AUTH[@]}" "${JSON[@]}" \
+    -d "{\"provider\":\"${PROVIDER}\",\"account_id\":\"${ACCOUNT}\",\"label\":\"${LABEL} Toggle\",\"priority\":50}" >/dev/null
+
+  OFF=$(curl -fsS -X PATCH \
+    "http://127.0.0.1:7331/_llmgateway/accounts/${ACCOUNT}/transport" \
+    "${AUTH[@]}" "${JSON[@]}" -d '{"transport_policy":"browser-only"}')
+  printf '%s' "$OFF" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["desired_policy"] == "browser-only", x
+assert x["configured_mode"] == "browser-only", x
+assert x["browserless"]["supported"] is True, x
+'
+
+  ON=$(curl -fsS -X PATCH \
+    "http://127.0.0.1:7331/_llmgateway/accounts/${ACCOUNT}/transport" \
+    "${AUTH[@]}" "${JSON[@]}" -d '{"transport_policy":"browserless-preferred"}')
+  printf '%s' "$ON" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["desired_policy"] == "browserless-preferred", x
+assert x["configured_mode"] == "auto", x
+assert x["browserless"]["recommended_mode"] == "auto", x
+'
+done
+
 ACCOUNTS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/accounts "${AUTH[@]}")
 printf '%s' "$ACCOUNTS" | python3 -c '
 import json,sys

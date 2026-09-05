@@ -1,6 +1,8 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
-    browser_provider::BrowserProviderConfig,
+    browser_provider::{
+        BrowserProviderConfig, BrowserProviderError, BrowserTransportMode, BrowserTransportPolicy,
+    },
     browser_provider_runtime,
     browser_session::BrowserConfig,
     browser_session_runtime,
@@ -42,6 +44,11 @@ pub struct BrowserAccountProviderPreset {
 #[derive(Debug, Deserialize)]
 pub struct BrowserAccountEnabledRequest {
     pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AccountTransportPolicyRequest {
+    pub transport_policy: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +157,174 @@ pub async fn set_browser_account_enabled(
         Err(error) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "browser_account_setup_error",
+            &error.to_string(),
+        ),
+    }
+}
+
+fn browser_account_provider_kind(
+    state: &AppState,
+    account_id: &str,
+) -> Result<String, Response<Body>> {
+    let config = state.gateway.config_snapshot();
+    let account = config.account(account_id).ok_or_else(|| {
+        json_error(
+            StatusCode::NOT_FOUND,
+            "account_transport_not_found",
+            &format!("unknown account '{account_id}'"),
+        )
+    })?;
+    let provider = config.provider(&account.provider).ok_or_else(|| {
+        json_error(
+            StatusCode::CONFLICT,
+            "account_transport_incompatible_adapter_capability",
+            &format!(
+                "account '{account_id}' references unknown provider '{}'",
+                account.provider
+            ),
+        )
+    })?;
+    if !provider.is_browser() {
+        return Err(json_error(
+            StatusCode::CONFLICT,
+            "account_transport_not_browser_backed",
+            &format!("account '{account_id}' is not browser-backed"),
+        ));
+    }
+    Ok(provider.kind.clone())
+}
+
+pub async fn get_account_transport_policy(
+    State(state): State<AppState>,
+    axum::extract::Path(account_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    let provider_kind = match browser_account_provider_kind(&state, &account_id) {
+        Ok(kind) => kind,
+        Err(response) => return response,
+    };
+    let Some(registry) = browser_provider_runtime::get() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "account_transport_capability_unavailable",
+            "browser provider runtime is not initialized",
+        );
+    };
+    match registry
+        .account_transport_state(&provider_kind, &account_id)
+        .await
+    {
+        Ok(transport) => json_response(StatusCode::OK, json!(transport), None),
+        Err(BrowserProviderError::MissingBinding(_)) => json_error(
+            StatusCode::CONFLICT,
+            "account_transport_incompatible_adapter_capability",
+            &format!("browser account '{account_id}' has no browser binding"),
+        ),
+        Err(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "account_transport_error",
+            &error.to_string(),
+        ),
+    }
+}
+
+pub async fn set_account_transport_policy(
+    State(state): State<AppState>,
+    axum::extract::Path(account_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<AccountTransportPolicyRequest>,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+    let policy = match BrowserTransportPolicy::parse(body.transport_policy.trim()) {
+        Ok(policy) => policy,
+        Err(BrowserProviderError::InvalidTransportPolicy(_)) => {
+            return json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_transport_policy",
+                "transport_policy must be 'browser-only' or 'browserless-preferred'",
+            )
+        }
+        Err(error) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "account_transport_error",
+                &error.to_string(),
+            )
+        }
+    };
+    let provider_kind = match browser_account_provider_kind(&state, &account_id) {
+        Ok(kind) => kind,
+        Err(response) => return response,
+    };
+    let Some(registry) = browser_provider_runtime::get() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "account_transport_capability_unavailable",
+            "browser provider runtime is not initialized",
+        );
+    };
+    let mode = match registry.resolve_transport_policy(&provider_kind, policy) {
+        Ok(mode) => mode,
+        Err(BrowserProviderError::UnsupportedBrowserless(_)) => {
+            return json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "browserless_unsupported",
+                &format!(
+                    "browserless transport is not supported by adapter capability for '{provider_kind}'"
+                ),
+            )
+        }
+        Err(error) => {
+            return json_error(
+                StatusCode::CONFLICT,
+                "account_transport_incompatible_adapter_capability",
+                &error.to_string(),
+            )
+        }
+    };
+
+    let config_path =
+        env::var("LLMGATEWAY_CONFIG").unwrap_or_else(|_| "config/llmgateway.toml".into());
+    if let Err(error) = apply_browser_account_transport_mode(&config_path, &account_id, mode) {
+        return match error {
+            BrowserAccountSetupError::NotFound(_) => json_error(
+                StatusCode::NOT_FOUND,
+                "account_transport_not_found",
+                &format!("unknown account '{account_id}'"),
+            ),
+            BrowserAccountSetupError::Invalid(message) => json_error(
+                StatusCode::CONFLICT,
+                "account_transport_incompatible_adapter_capability",
+                &message,
+            ),
+            other => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "account_transport_persistence_error",
+                &other.to_string(),
+            ),
+        };
+    }
+    if let Err(error) = activate_browser_account_setup(&state, &config_path).await {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "account_transport_hot_activation_error",
+            &error.to_string(),
+        );
+    }
+    registry.clear_last_transport_execution(&account_id).await;
+    match registry
+        .account_transport_state(&provider_kind, &account_id)
+        .await
+    {
+        Ok(transport) => json_response(StatusCode::OK, json!(transport), None),
+        Err(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "account_transport_error",
             &error.to_string(),
         ),
     }
@@ -290,6 +465,51 @@ pub fn apply_browser_account_enabled(
             BrowserAccountSetupError::NotFound(account_id.to_string())
         })?;
     table["enabled"] = value(enabled);
+
+    let rendered = doc.to_string();
+    AppConfig::parse(&rendered)?;
+    write_validated_config(path, &rendered)?;
+    Ok(())
+}
+
+pub fn apply_browser_account_transport_mode(
+    path: impl AsRef<Path>,
+    account_id: &str,
+    mode: BrowserTransportMode,
+) -> Result<(), BrowserAccountSetupError> {
+    validate_id("account_id", account_id)?;
+    let path = path.as_ref();
+    let raw = fs::read_to_string(path)?;
+    let current = AppConfig::parse(&raw)?;
+    let account = current
+        .account(account_id)
+        .ok_or_else(|| BrowserAccountSetupError::NotFound(account_id.to_string()))?;
+    let provider = current.provider(&account.provider).ok_or_else(|| {
+        BrowserAccountSetupError::Invalid(format!(
+            "account '{account_id}' references unknown provider '{}'",
+            account.provider
+        ))
+    })?;
+    if !provider.is_browser() {
+        return Err(BrowserAccountSetupError::Invalid(format!(
+            "account '{account_id}' is not browser-backed"
+        )));
+    }
+
+    let mut doc = raw.parse::<DocumentMut>()?;
+    let binding = doc
+        .get_mut("browser")
+        .and_then(Item::as_table_mut)
+        .and_then(|browser| browser.get_mut("bindings"))
+        .and_then(Item::as_table_mut)
+        .and_then(|bindings| bindings.get_mut(account_id))
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| {
+            BrowserAccountSetupError::Invalid(format!(
+                "browser account '{account_id}' has no [browser.bindings] entry"
+            ))
+        })?;
+    binding["transport_mode"] = value(mode.as_str());
 
     let rendered = doc.to_string();
     AppConfig::parse(&rendered)?;
@@ -756,7 +976,7 @@ routes = ["api"]
         .to_string()
     }
 
-    fn temp_config() -> PathBuf {
+    pub(super) fn temp_config() -> PathBuf {
         let dir = env::temp_dir().join(format!(
             "llmgateway-browser-setup-{}",
             Uuid::new_v4().simple()
@@ -901,5 +1121,65 @@ routes = ["api"]
         ));
         assert_eq!(first, fs::read_to_string(&path).unwrap());
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+
+#[cfg(test)]
+mod account_transport_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn transport_mode_persists_for_managed_browser_account() {
+        let path = super::tests::temp_config();
+        apply_browser_account_setup(
+            &path,
+            CreateBrowserAccountRequest {
+                provider: "qwen".into(),
+                account_id: Some("qwen-transport".into()),
+                label: Some("Qwen Transport".into()),
+                model_id: None,
+                model_label: None,
+                priority: Some(5),
+            },
+        )
+        .unwrap();
+
+        apply_browser_account_transport_mode(
+            &path,
+            "qwen-transport",
+            BrowserTransportMode::HttpPreferred,
+        )
+        .unwrap();
+        let parsed = BrowserProviderConfig::load_from_gateway_config(&path).unwrap();
+        assert_eq!(
+            parsed.bindings["qwen-transport"].transport_mode,
+            BrowserTransportMode::HttpPreferred
+        );
+
+        apply_browser_account_transport_mode(
+            &path,
+            "qwen-transport",
+            BrowserTransportMode::BrowserOnly,
+        )
+        .unwrap();
+        let parsed = BrowserProviderConfig::load_from_gateway_config(&path).unwrap();
+        assert_eq!(
+            parsed.bindings["qwen-transport"].transport_mode,
+            BrowserTransportMode::BrowserOnly
+        );
+    }
+
+    #[test]
+    fn non_browser_account_rejects_transport_control() {
+        let path = super::tests::temp_config();
+        let error = apply_browser_account_transport_mode(
+            &path,
+            "api",
+            BrowserTransportMode::BrowserOnly,
+        )
+        .unwrap_err();
+        assert!(matches!(error, BrowserAccountSetupError::Invalid(_)));
+        assert!(error.to_string().contains("not browser-backed"));
     }
 }

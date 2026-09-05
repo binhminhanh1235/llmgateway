@@ -19,6 +19,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: node --check ui/app.js
+      - run: node scripts/test-account-transport-ui.mjs
       - run: node --check ui/account-control.js
       - run: node --check ui/account-intelligence.js
       - run: node --check ui/browser-control.js

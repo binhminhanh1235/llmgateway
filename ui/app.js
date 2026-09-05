@@ -472,8 +472,12 @@
       if (!response.ok) throw new Error(extractError(await response.text(), response.status));
       state.accounts = (await response.json()).data || [];
       await Promise.all(state.accounts.map(async (account) => {
-        const modelResponse = await apiFetch(`/_llmgateway/accounts/${encodeURIComponent(account.id)}/models`);
+        const [modelResponse, transportResponse] = await Promise.all([
+          apiFetch(`/_llmgateway/accounts/${encodeURIComponent(account.id)}/models`),
+          apiFetch(`/_llmgateway/accounts/${encodeURIComponent(account.id)}/transport`),
+        ]);
         account.models = modelResponse.ok ? ((await modelResponse.json()).data || []) : [];
+        account.transport_control = transportResponse.ok ? await transportResponse.json() : null;
       }));
       renderAccounts();
     } catch (error) { elements.accountsContent.innerHTML = `<div class="error-box">${escapeHtml(error.message || error)}</div>`; }
@@ -488,10 +492,91 @@
         const badges = [binding.availability, ...(model.capabilities || []).slice(0, 3)].map((badge, i) => `<span class="badge ${i === 0 ? escapeAttr(binding.availability) : ""}">${escapeHtml(badge)}</span>`).join("");
         return `<div class="account-model-row"><div><div class="model-name">${escapeHtml(model.display_name || model.external_id)}</div><div class="model-meta">${badges}</div></div><label class="toggle"><input type="checkbox" data-toggle-account="${escapeAttr(account.id)}" data-toggle-model="${escapeAttr(model.id)}" ${binding.enabled ? "checked" : ""}/><span class="toggle-track"></span></label></div>`;
       }).join("") || '<div class="account-model-row"><div class="model-meta">No models discovered yet</div></div>';
-      return `<article class="account-card"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button></div><div class="account-models">${rows}</div></article>`;
+      const transport = accountTransportHtml(account);
+      return `<article class="account-card"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button></div>${transport}<div class="account-models">${rows}</div></article>`;
     }).join("")}</div>`;
     elements.accountsContent.querySelectorAll(".refresh-account").forEach((button) => button.addEventListener("click", () => refreshAccountModels(button.dataset.account, button)));
     elements.accountsContent.querySelectorAll("[data-toggle-model]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleAccountModel(checkbox)));
+    elements.accountsContent.querySelectorAll("[data-toggle-browserless]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleBrowserless(checkbox)));
+  }
+
+  function accountTransportHtml(account) {
+    const transport = account.transport_control;
+    if (!transport) return "";
+    const capability = transport.browserless || {};
+    const browserlessOn = transport.desired_policy === "browserless-preferred";
+    const supported = capability.supported === true;
+    const effectiveLabels = {
+      "direct-http": "Direct HTTP",
+      "browser": "Browser",
+      "browser-fallback": "Browser fallback",
+      "unavailable": "Unavailable",
+    };
+    const effectiveState = Object.prototype.hasOwnProperty.call(effectiveLabels, transport.effective_transport)
+      ? transport.effective_transport
+      : "unavailable";
+    const effective = effectiveLabels[effectiveState];
+    const effectiveTone = effectiveState === "unavailable"
+      ? "warning"
+      : (effectiveState === "browser-fallback" ? "fallback" : "ready");
+    const authWarning = browserlessOn && capability.requires_auth_snapshot && transport.auth_state !== "captured"
+      ? '<span class="transport-warning">Authentication required</span>'
+      : "";
+    const supportNote = supported
+      ? (browserlessOn ? "Prefer the transport recommended by this adapter." : "Force browser transport for new requests.")
+      : "Browserless is not supported by this adapter.";
+    const adapterBadge = transport.effective_adapter_id
+      ? `<code class="account-transport-adapter">${escapeHtml(transport.effective_adapter_id)}</code>`
+      : "";
+    return `
+      <section class="account-transport-panel ${browserlessOn ? "is-enabled" : "is-disabled"}">
+        <div class="account-transport-row">
+          <div class="account-transport-copy">
+            <div class="account-transport-label">Browserless</div>
+            <div class="account-transport-note">${escapeHtml(supportNote)}</div>
+          </div>
+          <label class="toggle account-transport-toggle" title="${supported ? "Prefer adapter-recommended browserless transport" : "Browserless is not supported by this adapter"}">
+            <input type="checkbox"
+              data-toggle-browserless="${escapeAttr(account.id)}"
+              ${browserlessOn ? "checked" : ""}
+              ${supported ? "" : "disabled"}
+              aria-label="Browserless for ${escapeAttr(account.id)}"/>
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div class="account-transport-effective ${effectiveTone}">
+          <span class="account-transport-status-icon" aria-hidden="true">${effectiveTone === "warning" ? "!" : "✓"}</span>
+          <div class="account-transport-status-copy">
+            <span class="account-transport-status-label">Effective transport</span>
+            <strong>${escapeHtml(effective)}</strong>
+            ${authWarning}
+          </div>
+          ${adapterBadge}
+        </div>
+      </section>`;
+  }
+
+  async function toggleBrowserless(checkbox) {
+    const accountId = checkbox.dataset.toggleBrowserless;
+    const desired = checkbox.checked;
+    checkbox.disabled = true;
+    try {
+      const response = await apiFetch(`/_llmgateway/accounts/${encodeURIComponent(accountId)}/transport`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transport_policy: desired ? "browserless-preferred" : "browser-only" }),
+      });
+      if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      const transport = await response.json();
+      const account = state.accounts.find((candidate) => candidate.id === accountId);
+      if (account) account.transport_control = transport;
+      toast(`Browserless ${desired ? "enabled" : "disabled"} for ${accountId}`);
+      renderAccounts();
+    } catch (error) {
+      checkbox.checked = !desired;
+      checkbox.disabled = false;
+      toast(error.message || String(error));
+    }
   }
 
   async function refreshAccountModels(accountId, button) {

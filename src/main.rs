@@ -59,7 +59,8 @@ use axum::{
     Router,
 };
 use browser_account_setup::{
-    browser_account_setup_presets, create_browser_account_setup, set_browser_account_enabled,
+    browser_account_setup_presets, create_browser_account_setup, get_account_transport_policy,
+    set_account_transport_policy, set_browser_account_enabled,
 };
 use browser_auth::BrowserAuthVault;
 use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
@@ -295,6 +296,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_llmgateway/routes/explain", post(explain_routes))
         .route("/_llmgateway/executions", get(list_executions))
         .route("/_llmgateway/executions/{request_id}", get(get_execution))
+        .route(
+            "/_llmgateway/accounts/{account_id}/transport",
+            get(get_account_transport_policy).patch(set_account_transport_policy),
+        )
+        .route(
+            "/accounts/{account_id}/transport",
+            get(get_account_transport_policy).patch(set_account_transport_policy),
+        )
         .route(
             "/_llmgateway/accounts/{account_id}/models",
             get(admin_account_models).patch(set_account_model),
