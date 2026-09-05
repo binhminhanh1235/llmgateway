@@ -419,7 +419,7 @@ async function testChatGPTStreamRecoversAfterDocumentReplacement() {
   const input = new FakeElement();
   const response = new FakeElement("");
   const send = new FakeElement("Send");
-  const finalText = "Recovered ChatGPT stream. ".repeat(12);
+  const finalText = Array(12).fill("Recovered ChatGPT stream.").join(" ");
   const nodes = {
     "#prompt-textarea": input,
     "#composer-submit-button": send,
