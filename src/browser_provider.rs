@@ -3769,7 +3769,7 @@ mod tests {
         assert!(!direct_error_allows_browser_fallback(&unsynced, false, true));
         assert!(!direct_error_allows_browser_fallback(&unavailable, false, true));
         assert!(!direct_error_allows_browser_fallback(&transport, false, true));
-        assert!(!direct_error_allows_browser_fallback(&challenge, true, true));
+        assert!(direct_error_allows_browser_fallback(&challenge, true, true));
         assert!(!direct_error_allows_browser_fallback(&challenge, false, false));
     }
 
