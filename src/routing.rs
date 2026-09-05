@@ -140,7 +140,8 @@ impl Router {
         let resolved_model = config.resolve_model_alias(requested_model);
         if let Some(group) = config.virtual_models.get(resolved_model) {
             if group.is_tiered()
-                && group.tier_priority(&preferred.id) != group.tier_priority(&best.id)
+                && group.tier_priority_for_route(config, preferred)
+                    != group.tier_priority_for_route(config, best)
             {
                 return false;
             }
@@ -266,7 +267,7 @@ impl Router {
             let group_tier_priority = config
                 .virtual_models
                 .get(&resolved_model)
-                .and_then(|group| group.tier_priority(&route.id));
+                .and_then(|group| group.tier_priority_for_route(config.as_ref(), &route));
             let task_fit = evaluate_task_fit(&task, &route, &config.routing);
             let task_adjustment = task_fit.snapshot.adjustment;
             let mut exclusion_reasons = Vec::new();
@@ -523,11 +524,31 @@ impl Router {
         resolved: &str,
     ) -> Vec<RouteConfig> {
         if let Some(vm) = config.virtual_models.get(resolved) {
-            let routes = vm
+            let route_ids = vm
                 .route_ids()
                 .into_iter()
-                .filter_map(|id| config.route(id).cloned())
-                .collect();
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let model_ids = vm
+                .model_ids()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+
+            let mut routes = route_ids
+                .into_iter()
+                .filter_map(|id| config.route(&id).cloned())
+                .collect::<Vec<_>>();
+
+            for model_id in model_ids {
+                routes.extend(
+                    self.routes_for_physical_model(config.clone(), &model_id)
+                        .await,
+                );
+            }
+
+            let mut seen = HashSet::new();
+            routes.retain(|route| seen.insert(route.id.clone()));
             self.enrich_configured_routes(config.as_ref(), routes).await
         } else if let Some(route) = config.route(resolved) {
             self.enrich_configured_routes(config.as_ref(), vec![route.clone()])
