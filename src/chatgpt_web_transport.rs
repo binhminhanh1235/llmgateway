@@ -1489,39 +1489,6 @@ fn chatgpt_wire_model(requested: &str) -> String {
     }
 }
 
-fn chatgpt_picker_category_labels(payload: &Value) -> std::collections::BTreeMap<String, String> {
-    let mut labels = std::collections::BTreeMap::new();
-    let Some(categories) = payload.get("categories").and_then(Value::as_array) else {
-        return labels;
-    };
-
-    for category in categories {
-        let Some(model) = category
-            .get("default_model")
-            .or_else(|| category.get("model"))
-            .or_else(|| category.get("model_slug"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let Some(label) = category
-            .get("human_category_name")
-            .or_else(|| category.get("human_category_short_name"))
-            .or_else(|| category.get("title"))
-            .or_else(|| category.get("name"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        labels.insert(model.to_string(), label.to_string());
-    }
-    labels
-}
-
 fn normalized_picker_label(value: &str) -> String {
     value
         .chars()
@@ -1530,8 +1497,178 @@ fn normalized_picker_label(value: &str) -> String {
         .collect()
 }
 
-fn is_gpt_5_6_family_slug(slug: &str) -> bool {
-    slug == "gpt-5-6" || slug.starts_with("gpt-5-6-")
+fn chatgpt_model_slug(item: &Value) -> Option<&str> {
+    item.get("slug")
+        .or_else(|| item.get("model_slug"))
+        .or_else(|| item.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn chatgpt_model_row_selectable(item: &Value) -> bool {
+    let hidden_tag = item
+        .get("tags")
+        .and_then(Value::as_array)
+        .is_some_and(|tags| {
+            tags.iter().filter_map(Value::as_str).any(|tag| {
+                matches!(tag.to_ascii_lowercase().as_str(), "hidden" | "confidential")
+            })
+        });
+    item.get("enabled").and_then(Value::as_bool) != Some(false)
+        && item.get("hidden").and_then(Value::as_bool) != Some(true)
+        && item.get("is_visible").and_then(Value::as_bool) != Some(false)
+        && item.get("show_in_picker").and_then(Value::as_bool) != Some(false)
+        && item.get("showInPicker").and_then(Value::as_bool) != Some(false)
+        && !hidden_tag
+}
+
+fn chatgpt_feature_slug(slug: &str) -> bool {
+    let normalized = slug
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    matches!(
+        normalized.as_str(),
+        "research"
+            | "deep-research"
+            | "deepresearch"
+            | "agent"
+            | "agent-mode"
+            | "canvas"
+            | "voice"
+            | "image-generation"
+            | "web-search"
+    )
+}
+
+fn chatgpt_category_labels(payload: &Value) -> std::collections::BTreeMap<String, String> {
+    let mut labels = std::collections::BTreeMap::new();
+    let Some(categories) = payload.get("categories").and_then(Value::as_array) else {
+        return labels;
+    };
+    for category in categories {
+        let label = category
+            .get("human_category_name")
+            .or_else(|| category.get("human_category_short_name"))
+            .or_else(|| category.get("title"))
+            .or_else(|| category.get("name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let Some(label) = label else {
+            continue;
+        };
+
+        if let Some(slug) = category
+            .get("default_model")
+            .or_else(|| category.get("model"))
+            .or_else(|| category.get("model_slug"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            labels.entry(slug.to_string()).or_insert_with(|| label.clone());
+        }
+        if let Some(supported) = category.get("supported_models").and_then(Value::as_array) {
+            for slug in supported.iter().filter_map(Value::as_str).map(str::trim) {
+                if !slug.is_empty() {
+                    labels.entry(slug.to_string()).or_insert_with(|| label.clone());
+                }
+            }
+        }
+    }
+    labels
+}
+
+fn chatgpt_model_capabilities(slug: &str, display_name: &str, description: &str) -> Vec<String> {
+    let haystack = format!("{slug} {display_name} {description}").to_ascii_lowercase();
+    let mut capabilities = vec!["chat".to_string(), "streaming".to_string()];
+    if haystack.contains("think")
+        || haystack.contains("reason")
+        || haystack.contains("pro")
+        || haystack.contains("gpt-5")
+    {
+        capabilities.push("reasoning".into());
+    }
+    if haystack.contains("code") || haystack.contains("codex") || haystack.contains("gpt-5") {
+        capabilities.push("coding".into());
+    }
+    capabilities
+}
+
+fn chatgpt_discovered_model(
+    slug: &str,
+    display_name: &str,
+    item: Option<&Value>,
+) -> BrowserDiscoveredModel {
+    let description = item
+        .and_then(|item| item.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let context_window = item
+        .and_then(|item| {
+            item.get("max_tokens")
+                .or_else(|| item.get("context_window"))
+                .or_else(|| item.get("contextWindow"))
+                .or_else(|| item.get("max_context_tokens"))
+        })
+        .and_then(Value::as_i64);
+    let external_id = if slug.eq_ignore_ascii_case(CHATGPT_WEB_MODEL) {
+        CHATGPT_DIRECT_MODEL.to_string()
+    } else {
+        slug.to_string()
+    };
+    BrowserDiscoveredModel {
+        external_id,
+        display_name: display_name.to_string(),
+        owned_by: "OpenAI".into(),
+        context_window,
+        capabilities: chatgpt_model_capabilities(slug, display_name, description),
+    }
+}
+
+fn chatgpt_version_slug(version: &Value) -> Option<&str> {
+    version
+        .get("slugs")
+        .and_then(Value::as_array)
+        .and_then(|slugs| {
+            slugs
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .find(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            version
+                .get("intelligence_presets")
+                .and_then(Value::as_array)
+                .and_then(|presets| {
+                    presets.iter().find_map(|preset| {
+                        if preset.get("preset_type").and_then(Value::as_str) == Some("unavailable") {
+                            return None;
+                        }
+                        preset
+                            .get("model_slug")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                    })
+                })
+        })
+}
+
+fn chatgpt_version_label(version: &Value) -> Option<&str> {
+    version
+        .get("display_text_for_intelligence")
+        .or_else(|| version.get("short_display_text_for_intelligence"))
+        .or_else(|| version.get("display_text_full"))
+        .or_else(|| version.get("display_text"))
+        .or_else(|| version.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
@@ -1544,140 +1681,119 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
         return Vec::new();
     };
 
-    // /backend-api/models contains both user-facing picker entries and backend
-    // routing variants. Categories are the closest server-side representation of
-    // the picker family names, so prefer them over per-row backend titles.
-    let picker_labels = chatgpt_picker_category_labels(payload);
-    let picker_has_gpt_5_6_family = picker_labels
-        .keys()
-        .any(|slug| is_gpt_5_6_family_slug(slug));
+    let rows_by_slug = items
+        .iter()
+        .filter(|item| chatgpt_model_row_selectable(item))
+        .filter_map(|item| chatgpt_model_slug(item).map(|slug| (slug.to_string(), item)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let category_labels = chatgpt_category_labels(payload);
 
-    let mut seen_external = std::collections::BTreeSet::new();
-    let mut candidates: Vec<(BrowserDiscoveredModel, bool)> = Vec::new();
-    for item in items {
-        let hidden_tag = item
-            .get("tags")
-            .and_then(Value::as_array)
-            .is_some_and(|tags| {
-                tags.iter().filter_map(Value::as_str).any(|tag| {
-                    matches!(tag.to_ascii_lowercase().as_str(), "hidden" | "confidential")
-                })
-            });
-        if item.get("enabled").and_then(Value::as_bool) == Some(false)
-            || item.get("hidden").and_then(Value::as_bool) == Some(true)
-            || item.get("is_visible").and_then(Value::as_bool) == Some(false)
-            || item.get("show_in_picker").and_then(Value::as_bool) == Some(false)
-            || item.get("showInPicker").and_then(Value::as_bool) == Some(false)
-            || hidden_tag
-        {
+    // model_picker_version=2 separates public "intelligence" versions (Sol,
+    // Terra, etc.) from execution lanes/categories (Instant, Thinking mini).
+    // Versions are therefore authoritative for public model identity. A single
+    // wire slug can otherwise look like Luna in models[] and Instant in
+    // categories[] while the picker actually presents GPT-5.6 Sol.
+    let mut candidates: Vec<(BrowserDiscoveredModel, u8)> = Vec::new();
+    let mut version_slugs = std::collections::BTreeSet::new();
+    if let Some(versions) = payload.get("versions").and_then(Value::as_array) {
+        for version in versions {
+            if version.get("enabled").and_then(Value::as_bool) == Some(false) {
+                continue;
+            }
+            let Some(slug) = chatgpt_version_slug(version) else {
+                continue;
+            };
+            if chatgpt_feature_slug(slug) {
+                continue;
+            }
+            let Some(label) = chatgpt_version_label(version) else {
+                continue;
+            };
+            version_slugs.insert(slug.to_string());
+            candidates.push((
+                chatgpt_discovered_model(slug, label, rows_by_slug.get(slug).copied()),
+                3,
+            ));
+        }
+    }
+
+    // Older/free-account responses may not expose an intelligence version for
+    // every selectable model. In that case keep category-backed model rows, but
+    // do not turn feature modes such as Deep Research into model routes.
+    for (slug, item) in &rows_by_slug {
+        if version_slugs.contains(slug) || chatgpt_feature_slug(slug) {
             continue;
         }
-        let slug = item
-            .get("slug")
-            .or_else(|| item.get("model_slug"))
-            .or_else(|| item.get("id"))
+        let category_label = category_labels.get(slug);
+        if !category_labels.is_empty() && category_label.is_none() && !slug.eq_ignore_ascii_case("auto") {
+            continue;
+        }
+
+        let row_label = item
+            .get("title")
+            .or_else(|| item.get("display_name"))
+            .or_else(|| item.get("displayName"))
+            .or_else(|| item.get("name"))
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let Some(slug) = slug else {
-            continue;
+
+        // Category labels such as "Thinking mini" are useful when there is no
+        // public intelligence version, but "Instant" is an execution lane and
+        // should not overwrite a concrete model title such as GPT-5.6 Luna.
+        let display_name = match (row_label, category_label) {
+            (Some(row), Some(category))
+                if !category.eq_ignore_ascii_case("instant")
+                    && !category.eq_ignore_ascii_case("auto") =>
+            {
+                category.as_str()
+            }
+            (Some(row), _) => row,
+            (None, Some(category)) => category.as_str(),
+            (None, None) => slug.as_str(),
         };
-
-        // Once the server publishes an explicit GPT-5.6 picker category, hide
-        // sibling gpt-5-6-* backend routing rows that are not category defaults.
-        // This prevents e.g. gpt-5-6, *-mini and *-t-mini from becoming four
-        // indistinguishable "GPT-5.6 Luna" rows in llmgateway.
-        if picker_has_gpt_5_6_family
-            && is_gpt_5_6_family_slug(slug)
-            && !picker_labels.contains_key(slug)
-        {
-            continue;
-        }
-
-        let external_id = if slug.eq_ignore_ascii_case(CHATGPT_WEB_MODEL) {
-            CHATGPT_DIRECT_MODEL.to_string()
-        } else {
-            slug.to_string()
-        };
-        if !seen_external.insert(external_id.clone()) {
-            continue;
-        }
-
-        let picker_label = picker_labels.get(slug);
-        let display_name = picker_label
-            .map(String::as_str)
-            .or_else(|| {
-                item.get("title")
-                    .or_else(|| item.get("display_name"))
-                    .or_else(|| item.get("displayName"))
-                    .or_else(|| item.get("name"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            })
-            .unwrap_or(slug)
-            .to_string();
-        let description = item
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let context_window = item
-            .get("max_tokens")
-            .or_else(|| item.get("context_window"))
-            .or_else(|| item.get("contextWindow"))
-            .or_else(|| item.get("max_context_tokens"))
-            .and_then(Value::as_i64);
-
-        let haystack = format!("{slug} {display_name} {description}").to_ascii_lowercase();
-        let mut capabilities = vec!["chat".to_string(), "streaming".to_string()];
-        if haystack.contains("think")
-            || haystack.contains("reason")
-            || haystack.contains("pro")
-            || haystack.contains("gpt-5")
-        {
-            capabilities.push("reasoning".into());
-        }
-        if haystack.contains("code") || haystack.contains("codex") || haystack.contains("gpt-5") {
-            capabilities.push("coding".into());
-        }
-
         candidates.push((
-            BrowserDiscoveredModel {
-                external_id,
-                display_name,
-                owned_by: "OpenAI".into(),
-                context_window,
-                capabilities,
-            },
-            picker_label.is_some(),
+            chatgpt_discovered_model(slug, display_name, Some(*item)),
+            if category_label.is_some() { 2 } else { 1 },
         ));
     }
 
-    // Even when categories are absent or incomplete, identical picker labels must
-    // never fan out into duplicate UI rows. Prefer category-backed candidates,
-    // then the shorter/stabler wire slug.
-    let mut models: Vec<(BrowserDiscoveredModel, bool)> = Vec::new();
+    let mut models: Vec<(BrowserDiscoveredModel, u8)> = Vec::new();
+    let mut external_index = std::collections::BTreeMap::<String, usize>::new();
     let mut display_index = std::collections::BTreeMap::<String, usize>::new();
-    for (model, picker_backed) in candidates {
-        let key = normalized_picker_label(&model.display_name);
-        if let Some(index) = display_index.get(&key).copied() {
-            let (current, current_picker_backed) = &models[index];
-            let replace = (picker_backed && !*current_picker_backed)
-                || (picker_backed == *current_picker_backed
-                    && model.external_id.len() < current.external_id.len());
-            if replace {
-                models[index] = (model, picker_backed);
+    for (model, authority) in candidates {
+        let display_key = normalized_picker_label(&model.display_name);
+        if let Some(index) = external_index.get(&model.external_id).copied() {
+            if authority > models[index].1 {
+                let old_key = normalized_picker_label(&models[index].0.display_name);
+                display_index.remove(&old_key);
+                models[index] = (model, authority);
+                display_index.insert(display_key, index);
             }
-        } else {
-            display_index.insert(key, models.len());
-            models.push((model, picker_backed));
+            continue;
         }
+        if let Some(index) = display_index.get(&display_key).copied() {
+            let current = &models[index];
+            let replace = authority > current.1
+                || (authority == current.1
+                    && model.external_id.len() < current.0.external_id.len());
+            if replace {
+                external_index.remove(&current.0.external_id);
+                models[index] = (model, authority);
+                external_index.insert(models[index].0.external_id.clone(), index);
+            }
+            continue;
+        }
+        let index = models.len();
+        external_index.insert(model.external_id.clone(), index);
+        display_index.insert(display_key, index);
+        models.push((model, authority));
     }
+
     let mut models = models
         .into_iter()
         .map(|(model, _)| model)
         .collect::<Vec<_>>();
-
     if !models
         .iter()
         .any(|model| model.external_id == CHATGPT_DIRECT_MODEL)
@@ -1686,7 +1802,7 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
             0,
             BrowserDiscoveredModel {
                 external_id: CHATGPT_DIRECT_MODEL.into(),
-                display_name: "ChatGPT Auto".into(),
+                display_name: "Auto".into(),
                 owned_by: "OpenAI".into(),
                 context_window: None,
                 capabilities: vec!["chat".into(), "streaming".into()],
