@@ -327,7 +327,11 @@
   };
 
   const submitComposer = async (context, composer) => {
-    const send = await waitFor(() => safeSendControl(queryVisible(context, "send")), 2500);
+    const submitTimeoutMs = Number(context?.submit_timeout_ms || 2500);
+    const send = await waitFor(
+      () => safeSendControl(queryVisible(context, "send")),
+      submitTimeoutMs
+    );
     if (send) {
       send.click();
       await sleep(0);
