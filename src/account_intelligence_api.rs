@@ -1,6 +1,8 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
-    browser_provider::{BrowserAdapterDiagnostics, BrowserProviderConfig},
+    browser_provider::{
+        BrowserAccountTransportState, BrowserAdapterDiagnostics, BrowserProviderConfig,
+    },
     browser_provider_runtime, browser_session_runtime,
     routing::AccountReadiness,
 };
@@ -40,6 +42,7 @@ struct AccountIntelligence {
     readiness: AccountReadiness,
     browser_session: Option<BrowserSessionIntelligence>,
     browser_adapter: Option<BrowserAdapterDiagnostics>,
+    browser_transport: Option<BrowserAccountTransportState>,
 }
 
 pub async fn account_intelligence(
@@ -97,6 +100,7 @@ pub async fn account_intelligence(
 
         let mut browser_session = None;
         let mut browser_adapter = None;
+        let mut browser_transport = None;
         if provider.is_browser() {
             if let Some(binding) = browser_config.bindings.get(&account.id) {
                 if let Some(store) = browser_session_runtime::get() {
@@ -118,6 +122,10 @@ pub async fn account_intelligence(
                         .adapter_diagnostics(&provider.kind, &account.id)
                         .await,
                 );
+                browser_transport = registry
+                    .account_transport_state(&provider.kind, &account.id)
+                    .await
+                    .ok();
             }
         }
 
@@ -137,6 +145,7 @@ pub async fn account_intelligence(
             readiness,
             browser_session,
             browser_adapter,
+            browser_transport,
         });
     }
 
