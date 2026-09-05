@@ -42,7 +42,7 @@ const CHATGPT_CONVERSATION_RESUME_URL: &str =
     "https://chatgpt.com/backend-api/f/conversation/resume";
 const CHATGPT_MODELS_URL: &str =
     "https://chatgpt.com/backend-api/models?iim=false&is_gizmo=false&supports_model_picker_upgrade_presets=true";
-const CHATGPT_ADAPTER_VERSION: &str = "experimental-2";
+const CHATGPT_ADAPTER_VERSION: &str = "experimental-3";
 const CHATGPT_DIRECT_MODEL: &str = "chatgpt-web-default";
 const CHATGPT_WEB_MODEL: &str = "auto";
 const POW_MAX_ATTEMPTS: u32 = 500_000;
@@ -1489,6 +1489,51 @@ fn chatgpt_wire_model(requested: &str) -> String {
     }
 }
 
+fn chatgpt_picker_category_labels(payload: &Value) -> std::collections::BTreeMap<String, String> {
+    let mut labels = std::collections::BTreeMap::new();
+    let Some(categories) = payload.get("categories").and_then(Value::as_array) else {
+        return labels;
+    };
+
+    for category in categories {
+        let Some(model) = category
+            .get("default_model")
+            .or_else(|| category.get("model"))
+            .or_else(|| category.get("model_slug"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(label) = category
+            .get("human_category_name")
+            .or_else(|| category.get("human_category_short_name"))
+            .or_else(|| category.get("title"))
+            .or_else(|| category.get("name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        labels.insert(model.to_string(), label.to_string());
+    }
+    labels
+}
+
+fn normalized_picker_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+fn is_gpt_5_6_family_slug(slug: &str) -> bool {
+    slug == "gpt-5-6" || slug.starts_with("gpt-5-6-")
+}
+
 fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
     let items = payload
         .get("models")
@@ -1499,8 +1544,16 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
         return Vec::new();
     };
 
-    let mut seen = std::collections::BTreeSet::new();
-    let mut models = Vec::new();
+    // /backend-api/models contains both user-facing picker entries and backend
+    // routing variants. Categories are the closest server-side representation of
+    // the picker family names, so prefer them over per-row backend titles.
+    let picker_labels = chatgpt_picker_category_labels(payload);
+    let picker_has_gpt_5_6_family = picker_labels
+        .keys()
+        .any(|slug| is_gpt_5_6_family_slug(slug));
+
+    let mut seen_external = std::collections::BTreeSet::new();
+    let mut candidates: Vec<(BrowserDiscoveredModel, bool)> = Vec::new();
     for item in items {
         let hidden_tag = item
             .get("tags")
@@ -1529,23 +1582,39 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
         let Some(slug) = slug else {
             continue;
         };
+
+        // Once the server publishes an explicit GPT-5.6 picker category, hide
+        // sibling gpt-5-6-* backend routing rows that are not category defaults.
+        // This prevents e.g. gpt-5-6, *-mini and *-t-mini from becoming four
+        // indistinguishable "GPT-5.6 Luna" rows in llmgateway.
+        if picker_has_gpt_5_6_family
+            && is_gpt_5_6_family_slug(slug)
+            && !picker_labels.contains_key(slug)
+        {
+            continue;
+        }
+
         let external_id = if slug.eq_ignore_ascii_case(CHATGPT_WEB_MODEL) {
             CHATGPT_DIRECT_MODEL.to_string()
         } else {
             slug.to_string()
         };
-        if !seen.insert(external_id.clone()) {
+        if !seen_external.insert(external_id.clone()) {
             continue;
         }
 
-        let display_name = item
-            .get("title")
-            .or_else(|| item.get("display_name"))
-            .or_else(|| item.get("displayName"))
-            .or_else(|| item.get("name"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        let picker_label = picker_labels.get(slug);
+        let display_name = picker_label
+            .map(String::as_str)
+            .or_else(|| {
+                item.get("title")
+                    .or_else(|| item.get("display_name"))
+                    .or_else(|| item.get("displayName"))
+                    .or_else(|| item.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
             .unwrap_or(slug)
             .to_string();
         let description = item
@@ -1572,16 +1641,47 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
             capabilities.push("coding".into());
         }
 
-        models.push(BrowserDiscoveredModel {
-            external_id,
-            display_name,
-            owned_by: "OpenAI".into(),
-            context_window,
-            capabilities,
-        });
+        candidates.push((
+            BrowserDiscoveredModel {
+                external_id,
+                display_name,
+                owned_by: "OpenAI".into(),
+                context_window,
+                capabilities,
+            },
+            picker_label.is_some(),
+        ));
     }
 
-    if !seen.contains(CHATGPT_DIRECT_MODEL) {
+    // Even when categories are absent or incomplete, identical picker labels must
+    // never fan out into duplicate UI rows. Prefer category-backed candidates,
+    // then the shorter/stabler wire slug.
+    let mut models: Vec<(BrowserDiscoveredModel, bool)> = Vec::new();
+    let mut display_index = std::collections::BTreeMap::<String, usize>::new();
+    for (model, picker_backed) in candidates {
+        let key = normalized_picker_label(&model.display_name);
+        if let Some(index) = display_index.get(&key).copied() {
+            let (current, current_picker_backed) = &models[index];
+            let replace = (picker_backed && !*current_picker_backed)
+                || (picker_backed == *current_picker_backed
+                    && model.external_id.len() < current.external_id.len());
+            if replace {
+                models[index] = (model, picker_backed);
+            }
+        } else {
+            display_index.insert(key, models.len());
+            models.push((model, picker_backed));
+        }
+    }
+    let mut models = models
+        .into_iter()
+        .map(|(model, _)| model)
+        .collect::<Vec<_>>();
+
+    if !models
+        .iter()
+        .any(|model| model.external_id == CHATGPT_DIRECT_MODEL)
+    {
         models.insert(
             0,
             BrowserDiscoveredModel {
@@ -2159,6 +2259,73 @@ mod tests {
         assert_eq!(thinking.context_window, Some(196000));
         assert!(thinking.capabilities.contains(&"reasoning".to_string()));
         assert!(thinking.capabilities.contains(&"coding".to_string()));
+    }
+
+    #[test]
+    fn model_catalog_uses_picker_category_and_hides_gpt_5_6_backend_variants() {
+        let models = parse_chatgpt_model_catalog(&json!({
+            "models": [
+                {"slug":"gpt-5-6","title":"GPT-5.6 Luna"},
+                {"slug":"gpt-5-6-mini","title":"GPT-5.6 Luna"},
+                {"slug":"gpt-5-6-t-mini","title":"GPT-5.6 Luna"},
+                {"slug":"gpt-5-6-t-mini-mini","title":"GPT-5.6 Luna"}
+            ],
+            "categories": [
+                {
+                    "default_model":"gpt-5-6",
+                    "human_category_name":"GPT-5.6 Sol"
+                }
+            ]
+        }));
+        let family = models
+            .iter()
+            .filter(|model| model.external_id.starts_with("gpt-5-6"))
+            .collect::<Vec<_>>();
+        assert_eq!(family.len(), 1);
+        assert_eq!(family[0].external_id, "gpt-5-6");
+        assert_eq!(family[0].display_name, "GPT-5.6 Sol");
+    }
+
+    #[test]
+    fn model_catalog_keeps_distinct_gpt_5_6_picker_tiers_when_surface_exposes_them() {
+        let models = parse_chatgpt_model_catalog(&json!({
+            "models": [
+                {"slug":"gpt-5-6-sol","title":"backend-a"},
+                {"slug":"gpt-5-6-terra","title":"backend-b"},
+                {"slug":"gpt-5-6-luna","title":"backend-c"}
+            ],
+            "categories": [
+                {"default_model":"gpt-5-6-sol","human_category_name":"GPT-5.6 Sol"},
+                {"default_model":"gpt-5-6-terra","human_category_name":"GPT-5.6 Terra"},
+                {"default_model":"gpt-5-6-luna","human_category_name":"GPT-5.6 Luna"}
+            ]
+        }));
+        for (id, label) in [
+            ("gpt-5-6-sol", "GPT-5.6 Sol"),
+            ("gpt-5-6-terra", "GPT-5.6 Terra"),
+            ("gpt-5-6-luna", "GPT-5.6 Luna"),
+        ] {
+            assert_eq!(
+                models.iter().find(|model| model.external_id == id).unwrap().display_name,
+                label
+            );
+        }
+    }
+
+    #[test]
+    fn model_catalog_deduplicates_identical_display_labels_without_categories() {
+        let models = parse_chatgpt_model_catalog(&json!({
+            "models": [
+                {"slug":"model-long-routing-variant","title":"Same Model"},
+                {"slug":"model-short","title":"Same Model"}
+            ]
+        }));
+        let same = models
+            .iter()
+            .filter(|model| model.display_name == "Same Model")
+            .collect::<Vec<_>>();
+        assert_eq!(same.len(), 1);
+        assert_eq!(same[0].external_id, "model-short");
     }
 
     #[test]
