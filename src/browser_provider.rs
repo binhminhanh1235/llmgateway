@@ -523,7 +523,7 @@ impl BrowserProviderRegistry {
             .insert(account_id.to_string());
     }
 
-    fn clear_model_catalog_refresh_required(&self, account_id: &str) {
+    pub fn clear_model_catalog_refresh_required(&self, account_id: &str) {
         self.model_catalog_refresh_required
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
