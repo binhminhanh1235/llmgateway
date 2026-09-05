@@ -127,10 +127,12 @@ printf '%s' "$THREAD_REPLY" | grep -q 'fake vision reply messages=1 image=yes'
 
 THREAD_DETAIL=$(curl -fsS "$BASE_URL/v1/threads/$THREAD_ID" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
-printf '%s' "$THREAD_DETAIL" | python3 - "$FILE_ID" <<'PY'
+printf '%s' "$THREAD_DETAIL" > "$TMP_DIR/thread-detail.json"
+python3 - "$FILE_ID" "$TMP_DIR/thread-detail.json" <<'PY'
 import json,sys
 file_id=sys.argv[1]
-x=json.load(sys.stdin)
+with open(sys.argv[2], encoding="utf-8") as f:
+    x=json.load(f)
 content=x["messages"][0]["message"]["content"]
 image=next(part for part in content if part.get("type")=="image_url")
 url=image["image_url"]["url"]
