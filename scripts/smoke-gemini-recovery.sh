@@ -95,27 +95,27 @@ for _ in {1..60}; do
   sleep 0.2
 done
 
-AUTH=(-H "Authorization: Bearer \${LLMGATEWAY_API_KEY}")
+AUTH=(-H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 JSON=(-H "Content-Type: application/json")
 
 curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-account-setup \
-  "\${AUTH[@]}" "\${JSON[@]}" \
+  "${AUTH[@]}" "${JSON[@]}" \
   -d '{"provider":"gemini","account_id":"gemini-recovery","label":"Gemini Recovery CI","priority":5}' \
   >/tmp/llmgateway-gemini-recovery-create.json
 
 LAUNCH=$(curl -fsS -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-recovery/driver/launch \
-  "\${AUTH[@]}")
+  "${AUTH[@]}")
 BROWSER_PID=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["pid"] or "")')
 PROFILE_DIR=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["profile_dir"])')
 export PROFILE_DIR
 
 curl -fsS -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-recovery/driver/verify \
-  "\${AUTH[@]}" >/tmp/llmgateway-gemini-recovery-verify.json
+  "${AUTH[@]}" >/tmp/llmgateway-gemini-recovery-verify.json
 
 THREAD_A=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads \
-  "\${AUTH[@]}" "\${JSON[@]}" \
+  "${AUTH[@]}" "${JSON[@]}" \
   -d '{"title":"Gemini recovery A","model":"llmgateway-auto"}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 export THREAD_A
@@ -123,25 +123,25 @@ export THREAD_A
 send_stream() {
   local prompt="$1"
   local label="$2"
-  curl -fsS -D "/tmp/gemini-recovery-\${label}.headers" \
-    -o "/tmp/gemini-recovery-\${label}.sse" \
+  curl -fsS -D "/tmp/gemini-recovery-${label}.headers" \
+    -o "/tmp/gemini-recovery-${label}.sse" \
     -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages" \
-    "\${AUTH[@]}" "\${JSON[@]}" \
+    "${AUTH[@]}" "${JSON[@]}" \
     -d "$(python3 - "$prompt" <<'PY'
 import json,sys
 print(json.dumps({"content":sys.argv[1],"stream":True}))
 PY
 )"
-  grep -qi '^x-llmgateway-route: gemini-recovery-route' "/tmp/gemini-recovery-\${label}.headers"
-  grep -Fq 'data: [DONE]' "/tmp/gemini-recovery-\${label}.sse"
-  grep -Eq '"finish_reason"[[:space:]]*:[[:space:]]*"[^"]+"' "/tmp/gemini-recovery-\${label}.sse"
+  grep -qi '^x-llmgateway-route: gemini-recovery-route' "/tmp/gemini-recovery-${label}.headers"
+  grep -Fq 'data: [DONE]' "/tmp/gemini-recovery-${label}.sse"
+  grep -Eq '"finish_reason"[[:space:]]*:[[:space:]]*"[^"]+"' "/tmp/gemini-recovery-${label}.sse"
 }
 
 affinity_json() {
   local output="$1"
   curl -fsS \
     "http://127.0.0.1:7331/_llmgateway/threads/$THREAD_A/browser-affinity/gemini-recovery" \
-    "\${AUTH[@]}" >"$output"
+    "${AUTH[@]}" >"$output"
 }
 
 request_target() {
@@ -174,7 +174,7 @@ TARGET_A1=$(request_target -1)
 echo "[gemini-recovery] Scenario 2: close mapped target and reopen native URL exactly once"
 CDP_PORT=$(head -n 1 "$PROFILE_DIR/DevToolsActivePort")
 OPEN_BEFORE_A2=$(opened_count)
-curl -fsS "http://127.0.0.1:\${CDP_PORT}/json/close/\${TARGET_A1}" >/dev/null
+curl -fsS "http://127.0.0.1:${CDP_PORT}/json/close/${TARGET_A1}" >/dev/null
 
 python3 - "$CDP_PORT" "$TARGET_A1" <<'PY'
 import json,sys,urllib.request
@@ -226,7 +226,7 @@ assert recent[-1]["messages"] == [{"role":"user","content":"recovery-a3"}], rece
 PY
 
 echo "[gemini-recovery] Scenario 4: cancelled persistent stream clears target and native mapping"
-curl -fsS "http://127.0.0.1:7331/v1/threads/$THREAD_A" "\${AUTH[@]}" >/tmp/gemini-recovery-thread-before-cancel.json
+curl -fsS "http://127.0.0.1:7331/v1/threads/$THREAD_A" "${AUTH[@]}" >/tmp/gemini-recovery-thread-before-cancel.json
 ASSISTANTS_BEFORE=$(python3 -c 'import json; x=json.load(open("/tmp/gemini-recovery-thread-before-cancel.json")); print(sum(1 for m in x["messages"] if m["role"]=="assistant"))')
 
 python3 <<'PY'
@@ -305,7 +305,7 @@ targets=json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list"))
 assert all(item.get("id") != target for item in targets), targets
 PY
 
-curl -fsS "http://127.0.0.1:7331/v1/threads/$THREAD_A" "\${AUTH[@]}" >/tmp/gemini-recovery-thread-after-cancel.json
+curl -fsS "http://127.0.0.1:7331/v1/threads/$THREAD_A" "${AUTH[@]}" >/tmp/gemini-recovery-thread-after-cancel.json
 python3 - "$ASSISTANTS_BEFORE" <<'PY'
 import json,sys
 thread=json.load(open("/tmp/gemini-recovery-thread-after-cancel.json",encoding="utf-8"))
@@ -336,7 +336,7 @@ PY
 
 curl -fsS -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-recovery/driver/stop \
-  "\${AUTH[@]}" >/dev/null
+  "${AUTH[@]}" >/dev/null
 BROWSER_PID=""
 
 echo "Gemini close-tab + cancelled-stream recovery E2E smoke passed"
