@@ -4232,6 +4232,24 @@ mod tests {
 mod browser_transport_policy_tests {
     use super::*;
 
+    fn transport_binding(session: &str, mode: BrowserTransportMode) -> BrowserAccountBinding {
+        BrowserAccountBinding {
+            session: session.into(),
+            transport_mode: mode,
+            target_url_prefix: None,
+            adapter_script: None,
+            adapter_contract_version: None,
+            models: Vec::new(),
+            model_labels: BTreeMap::new(),
+            selector_overrides: BTreeMap::new(),
+            ephemeral_chat: None,
+            probe_timeout_ms: None,
+            response_timeout_ms: None,
+            first_byte_timeout_ms: None,
+            idle_stream_timeout_ms: None,
+        }
+    }
+
     #[test]
     fn built_in_direct_adapters_publish_provider_neutral_capabilities() {
         let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
@@ -4340,6 +4358,37 @@ mod browser_transport_policy_tests {
             registry.config_snapshot().bindings["account-a"].transport_mode,
             BrowserTransportMode::HttpPreferred
         );
+    }
+
+    #[tokio::test]
+    async fn account_transport_policy_is_isolated_per_account() {
+        let mut config = BrowserProviderConfig::default();
+        config.bindings.insert(
+            "account-a".into(),
+            transport_binding("session-a", BrowserTransportMode::HttpPreferred),
+        );
+        config.bindings.insert(
+            "account-b".into(),
+            transport_binding("session-b", BrowserTransportMode::BrowserOnly),
+        );
+        let registry = BrowserProviderRegistry::new(config).unwrap();
+
+        let a = registry
+            .account_transport_state("browser-qwen", "account-a")
+            .await
+            .unwrap();
+        let b = registry
+            .account_transport_state("browser-qwen", "account-b")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            a.desired_policy,
+            BrowserTransportPolicy::BrowserlessPreferred
+        );
+        assert_eq!(a.configured_mode, BrowserTransportMode::HttpPreferred);
+        assert_eq!(b.desired_policy, BrowserTransportPolicy::BrowserOnly);
+        assert_eq!(b.configured_mode, BrowserTransportMode::BrowserOnly);
     }
 
     #[test]
