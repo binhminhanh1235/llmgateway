@@ -53,6 +53,7 @@ mod semantic_retrieval;
 mod structured_memory;
 mod ui;
 mod usage_api;
+mod vision;
 
 use account_intelligence_api::account_intelligence;
 use admin_api::set_account_model;
