@@ -9,10 +9,14 @@ class FakeElement {
     this.value = "";
     this.parentElement = null;
     this.hidden = false;
+    this.disabled = false;
   }
   focus() {}
   click() { if (typeof this.onClick === "function") this.onClick(); }
-  dispatchEvent() { return true; }
+  dispatchEvent(event) {
+    if (typeof this.onDispatch === "function") return this.onDispatch(event);
+    return true;
+  }
   getAttribute() { return null; }
   closest() { return this; }
 }
@@ -192,6 +196,87 @@ async function testQwen() {
   assert.equal(probe.code, "login_required");
 }
 
+
+async function testQwenReactComposerSubmit() {
+  const input = new FakeTextAreaElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  let trackerResetTo = null;
+  let reactAcceptedValue = false;
+  let sendClicks = 0;
+  let enterKeydowns = 0;
+
+  input._valueTracker = {
+    setValue(value) { trackerResetTo = value; }
+  };
+  input.onDispatch = (event) => {
+    if (event.type === "input") {
+      reactAcceptedValue = trackerResetTo === "" && input.value.includes("React controlled Qwen");
+    }
+    if (event.type === "keydown" && event.key === "Enter") enterKeydowns += 1;
+    return true;
+  };
+  send.onClick = () => {
+    sendClicks += 1;
+    if (reactAcceptedValue) {
+      response.innerText = "react-submit-ok";
+      response.textContent = response.innerText;
+    }
+  };
+
+  installPage({
+    host: "chat.qwen.ai",
+    nodes: {
+      "textarea.message-input-textarea": input,
+      "button.send-button": send,
+      "div.response-message-content.phase-answer": response
+    }
+  });
+  const adapter = loadAdapter("adapters/qwen-web.js");
+  const result = await adapter.chat({
+    model: "qwen-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "React controlled Qwen" }]
+  }, { response_timeout_ms: 2500 });
+
+  assert.equal(trackerResetTo, "");
+  assert.equal(reactAcceptedValue, true);
+  assert.equal(sendClicks, 1, "usable send control must be clicked exactly once");
+  assert.equal(enterKeydowns, 0, "Enter fallback must not run after send click");
+  assert.equal(result.body.choices[0].message.content, "react-submit-ok");
+}
+
+async function testQwenEnterFallbackWithoutSendControl() {
+  const input = new FakeTextAreaElement();
+  const response = new FakeElement("");
+  let enterKeydowns = 0;
+
+  input.onDispatch = (event) => {
+    if (event.type === "keydown" && event.key === "Enter") {
+      enterKeydowns += 1;
+      response.innerText = "enter-submit-ok";
+      response.textContent = response.innerText;
+    }
+    return true;
+  };
+
+  installPage({
+    host: "chat.qwen.ai",
+    nodes: {
+      "textarea.message-input-textarea": input,
+      "div.response-message-content.phase-answer": response
+    }
+  });
+  const adapter = loadAdapter("adapters/qwen-web.js");
+  const result = await adapter.chat({
+    model: "qwen-web-test",
+    stream: false,
+    messages: [{ role: "user", content: "Submit with Enter fallback" }]
+  }, { response_timeout_ms: 2500 });
+
+  assert.equal(enterKeydowns, 1, "Enter fallback must submit exactly once");
+  assert.equal(result.body.choices[0].message.content, "enter-submit-ok");
+}
 
 async function testGeminiToolBridge() {
   const input = new FakeElement();
@@ -1025,6 +1110,8 @@ async function testMidRequestLoginExpiry() {
 await testGemini();
 await testChatGPT();
 await testQwen();
+await testQwenReactComposerSubmit();
+await testQwenEnterFallbackWithoutSendControl();
 await testGeminiToolBridge();
 await testChatGPTToolBridge();
 await testChatGPTModelPickerFlow();
