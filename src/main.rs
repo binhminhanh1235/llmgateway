@@ -1,5 +1,6 @@
 mod account_intelligence_api;
 mod admin;
+mod artifact_store;
 mod admin_api;
 mod api;
 mod browser_account_setup;
@@ -31,6 +32,7 @@ mod embedding_retrieval;
 mod embedding_runtime;
 mod execution_trace;
 mod execution_trace_api;
+mod files_api;
 mod gateway;
 mod gemini_web_transport;
 mod qwen_web_transport;
@@ -54,6 +56,7 @@ mod usage_api;
 
 use account_intelligence_api::account_intelligence;
 use admin_api::set_account_model;
+use artifact_store::ArtifactStore;
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
     anthropic_messages, capabilities, health, models, openai_chat, openai_responses, AppState,
@@ -93,6 +96,7 @@ use conversation_api::{
 use embedding_retrieval::EmbeddingRetriever;
 use execution_trace::ExecutionTraceStore;
 use execution_trace_api::{get_execution, list_executions};
+use files_api::{delete_file, get_file, get_file_content, upload_file};
 use gateway::Gateway;
 use live_config::LiveConfig;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
@@ -144,6 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let catalog = Arc::new(ModelCatalog::connect(live_config.clone()).await?);
     catalog.seed_from_config().await?;
     let conversations = Arc::new(ConversationStore::connect(config.clone()).await?);
+    let artifacts = Arc::new(ArtifactStore::connect(config.clone()).await?);
     conversation_runtime::install(conversations.clone())
         .map_err(|_| "conversation store was already initialized")?;
     let execution_traces = Arc::new(ExecutionTraceStore::connect(config.clone()).await?);
@@ -272,6 +277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gateway,
         catalog,
         conversations,
+        artifacts,
         gateway_api_key,
         client_policies,
     };
@@ -293,6 +299,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/models", get(models))
         .route("/v1/capabilities", get(capabilities))
+        .route("/v1/files", post(upload_file))
+        .route("/v1/files/{file_id}", get(get_file).delete(delete_file))
+        .route("/v1/files/{file_id}/content", get(get_file_content))
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/{thread_id}", get(get_thread).delete(delete_thread))
         .route("/v1/threads/{thread_id}/messages", post(send_thread_message))
