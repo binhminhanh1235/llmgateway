@@ -3626,6 +3626,26 @@ fn contract_error_to_provider_error(
 }
 
 
+fn chatgpt_pre_submit_browser_recovery_code(code: &str) -> bool {
+    matches!(
+        code,
+        "login_required"
+            | "browser_challenge_required"
+            | "session_bootstrap_failed"
+            | "session_bootstrap_invalid"
+            | "upstream_waf_rejected"
+            | "upstream_rejected"
+            | "sentinel_prepare_failed"
+            | "sentinel_prepare_invalid"
+            | "sentinel_pow_invalid"
+            | "sentinel_pow_failed"
+            | "sentinel_finalize_failed"
+            | "sentinel_finalize_invalid"
+            | "conversation_prepare_failed"
+            | "conversation_prepare_invalid"
+    )
+}
+
 fn direct_failure_can_open_browser(
     provider_kind: &str,
     mode: BrowserTransportMode,
@@ -3639,7 +3659,7 @@ fn direct_failure_can_open_browser(
         BrowserTransportMode::HttpPreferred => matches!(
             error,
             BrowserProviderError::AdapterIncompatible { code, .. }
-                if matches!(code.as_str(), "browser_challenge_required" | "login_required")
+                if chatgpt_pre_submit_browser_recovery_code(code)
         ),
         BrowserTransportMode::BrowserOnly => false,
     }
@@ -3647,7 +3667,7 @@ fn direct_failure_can_open_browser(
 
 fn direct_error_allows_browser_fallback(
     error: &BrowserProviderError,
-    dynamic_model: bool,
+    _dynamic_model: bool,
     browser_adapter_is_cdp: bool,
 ) -> bool {
     if !browser_adapter_is_cdp {
@@ -3656,28 +3676,7 @@ fn direct_error_allows_browser_fallback(
     let BrowserProviderError::AdapterIncompatible { code, .. } = error else {
         return false;
     };
-    if dynamic_model
-        && !matches!(
-            code.as_str(),
-            "login_required" | "browser_challenge_required"
-        )
-    {
-        return false;
-    }
-    matches!(
-        code.as_str(),
-        "login_required"
-            | "browser_challenge_required"
-            | "adapter_incompatible"
-            | "upstream_waf_rejected"
-            | "upstream_rejected"
-            | "sentinel_prepare_invalid"
-            | "sentinel_pow_invalid"
-            | "sentinel_pow_failed"
-            | "sentinel_finalize_invalid"
-            | "conversation_prepare_failed"
-            | "conversation_prepare_invalid"
-    )
+    chatgpt_pre_submit_browser_recovery_code(code)
 }
 
 fn cdp_session_status_probeable(status: &str) -> bool {
@@ -3940,7 +3939,10 @@ mod tests {
             message: "prepare".into(),
         };
         assert!(direct_error_allows_browser_fallback(&challenge, true, true));
-        assert!(!direct_error_allows_browser_fallback(&generic, true, true));
+        assert!(
+            direct_error_allows_browser_fallback(&generic, true, true),
+            "discovered models retain their public picker labels, so pre-submit prepare failures may safely recover through CDP"
+        );
     }
 
     #[test]
