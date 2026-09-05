@@ -518,10 +518,21 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     };
     let mut data: BTreeMap<String, Value> = BTreeMap::new();
 
-    for id in config.virtual_models.keys() {
+    for (id, virtual_model) in &config.virtual_models {
         if access.policy().is_some_and(|policy| !policy.model_allowed(id, id)) {
             continue;
         }
+        let mut capability_tags = BTreeSet::new();
+        for route_id in &virtual_model.routes {
+            let Some(route) = config.route(route_id).filter(|route| route.enabled) else {
+                continue;
+            };
+            if access.policy().is_some_and(|policy| !policy.route_allowed(&route.id)) {
+                continue;
+            }
+            capability_tags.extend(route.capabilities.iter().cloned());
+        }
+        let capability_tags = capability_tags.into_iter().collect::<Vec<_>>();
         data.insert(
             id.clone(),
             json!({
@@ -530,7 +541,8 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 "owned_by":"llmgateway",
                 "llmgateway":{
                     "kind":"virtual",
-                    "multimodal_capabilities":ModelCapabilities::foundation_text_execution()
+                    "capabilities":capability_tags,
+                    "multimodal_capabilities":ModelCapabilities::from_legacy_tags(&capability_tags)
                 }
             }),
         );
