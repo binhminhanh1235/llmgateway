@@ -44,13 +44,111 @@ pub struct BrowserProviderConfig {
     pub bindings: BTreeMap<String, BrowserAccountBinding>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum BrowserTransportMode {
     #[default]
     Auto,
     BrowserOnly,
     HttpPreferred,
+}
+
+impl BrowserTransportMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::BrowserOnly => "browser-only",
+            Self::HttpPreferred => "http-preferred",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BrowserTransportPolicy {
+    BrowserOnly,
+    BrowserlessPreferred,
+}
+
+impl BrowserTransportPolicy {
+    pub fn parse(value: &str) -> Result<Self, BrowserProviderError> {
+        match value {
+            "browser-only" => Ok(Self::BrowserOnly),
+            "browserless-preferred" => Ok(Self::BrowserlessPreferred),
+            other => Err(BrowserProviderError::InvalidTransportPolicy(other.to_string())),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BrowserOnly => "browser-only",
+            Self::BrowserlessPreferred => "browserless-preferred",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct BrowserlessCapabilities {
+    pub supported: bool,
+    pub modes: Vec<BrowserTransportMode>,
+    pub recommended_mode: Option<BrowserTransportMode>,
+    pub requires_auth_snapshot: bool,
+    pub supports_browser_fallback: bool,
+    pub supports_direct_model_discovery: bool,
+    pub supports_native_conversation: bool,
+}
+
+impl BrowserlessCapabilities {
+    pub fn unsupported() -> Self {
+        Self {
+            supported: false,
+            modes: vec![BrowserTransportMode::BrowserOnly],
+            recommended_mode: None,
+            requires_auth_snapshot: false,
+            supports_browser_fallback: false,
+            supports_direct_model_discovery: false,
+            supports_native_conversation: false,
+        }
+    }
+
+    pub fn preferred(
+        recommended_mode: BrowserTransportMode,
+        supports_auto: bool,
+        supports_direct_model_discovery: bool,
+        supports_native_conversation: bool,
+    ) -> Self {
+        let mut modes = vec![
+            BrowserTransportMode::BrowserOnly,
+            BrowserTransportMode::HttpPreferred,
+        ];
+        if supports_auto {
+            modes.push(BrowserTransportMode::Auto);
+        }
+        Self {
+            supported: true,
+            modes,
+            recommended_mode: Some(recommended_mode),
+            requires_auth_snapshot: true,
+            supports_browser_fallback: true,
+            supports_direct_model_discovery,
+            supports_native_conversation,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BrowserAccountTransportState {
+    pub account_id: String,
+    pub provider_kind: String,
+    pub desired_policy: BrowserTransportPolicy,
+    pub configured_mode: BrowserTransportMode,
+    pub browserless: BrowserlessCapabilities,
+    pub effective_transport: String,
+    pub effective_adapter_id: Option<String>,
+    pub browser_fallback: bool,
+    pub effective_recorded_at: Option<String>,
+    pub effective_reason: String,
+    pub auth_state: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -178,6 +276,10 @@ pub enum BrowserProviderError {
     InvalidConfig(String),
     #[error("browser provider adapter '{0}' is not registered")]
     UnsupportedAdapter(String),
+    #[error("browserless transport is not supported for provider '{0}'")]
+    UnsupportedBrowserless(String),
+    #[error("invalid browser transport policy '{0}'")]
+    InvalidTransportPolicy(String),
     #[error("browser account '{0}' has no [browser.bindings] entry")]
     MissingBinding(String),
     #[error("browser session '{session_id}' for account '{account_id}' is not ready")]
@@ -222,6 +324,10 @@ pub trait BrowserProviderAdapter: Send + Sync {
 
     fn supports_model_discovery(&self) -> bool {
         false
+    }
+
+    fn browserless_capabilities(&self) -> BrowserlessCapabilities {
+        BrowserlessCapabilities::unsupported()
     }
 
     async fn discover_models(
@@ -457,6 +563,110 @@ impl BrowserProviderRegistry {
         kind.starts_with("browser-")
     }
 
+    pub fn transport_capabilities(&self, provider_kind: &str) -> BrowserlessCapabilities {
+        self.direct_adapters
+            .get(provider_kind)
+            .map(|adapter| adapter.browserless_capabilities())
+            .unwrap_or_else(BrowserlessCapabilities::unsupported)
+    }
+
+    pub fn resolve_transport_policy(
+        &self,
+        provider_kind: &str,
+        policy: BrowserTransportPolicy,
+    ) -> Result<BrowserTransportMode, BrowserProviderError> {
+        match policy {
+            BrowserTransportPolicy::BrowserOnly => Ok(BrowserTransportMode::BrowserOnly),
+            BrowserTransportPolicy::BrowserlessPreferred => self
+                .transport_capabilities(provider_kind)
+                .recommended_mode
+                .ok_or_else(|| BrowserProviderError::UnsupportedBrowserless(provider_kind.into())),
+        }
+    }
+
+    pub async fn account_transport_state(
+        &self,
+        provider_kind: &str,
+        account_id: &str,
+    ) -> Result<BrowserAccountTransportState, BrowserProviderError> {
+        let binding = self
+            .config_snapshot()
+            .bindings
+            .get(account_id)
+            .cloned()
+            .ok_or_else(|| BrowserProviderError::MissingBinding(account_id.to_string()))?;
+        let browserless = self.transport_capabilities(provider_kind);
+        let desired_policy = if binding.transport_mode == BrowserTransportMode::BrowserOnly {
+            BrowserTransportPolicy::BrowserOnly
+        } else {
+            BrowserTransportPolicy::BrowserlessPreferred
+        };
+        let auth_state = if browserless.requires_auth_snapshot
+            && self.auth_material_available(&binding.session)
+        {
+            "captured"
+        } else {
+            "unavailable"
+        }
+        .to_string();
+        let last = self.last_transport_execution(account_id).await;
+        let (effective_transport, effective_adapter_id, browser_fallback, effective_recorded_at, effective_reason) =
+            match last {
+                Some(execution) if execution.browser_fallback => (
+                    "browser-fallback".to_string(),
+                    Some(execution.adapter_id),
+                    true,
+                    Some(execution.recorded_at),
+                    "last request used browser fallback".to_string(),
+                ),
+                Some(execution) if execution.transport == "direct-http" => (
+                    "direct-http".to_string(),
+                    Some(execution.adapter_id),
+                    false,
+                    Some(execution.recorded_at),
+                    "last request used direct transport".to_string(),
+                ),
+                Some(execution) if matches!(execution.transport.as_str(), "browser-cdp" | "browser-http") => (
+                    "browser".to_string(),
+                    Some(execution.adapter_id),
+                    false,
+                    Some(execution.recorded_at),
+                    "last request used browser transport".to_string(),
+                ),
+                Some(execution) => (
+                    execution.transport,
+                    Some(execution.adapter_id),
+                    execution.browser_fallback,
+                    Some(execution.recorded_at),
+                    "last request transport was recorded by the adapter".to_string(),
+                ),
+                None => (
+                    "unavailable".to_string(),
+                    None,
+                    false,
+                    None,
+                    "no transport execution recorded since startup or policy change".to_string(),
+                ),
+            };
+        Ok(BrowserAccountTransportState {
+            account_id: account_id.to_string(),
+            provider_kind: provider_kind.to_string(),
+            desired_policy,
+            configured_mode: binding.transport_mode,
+            browserless,
+            effective_transport,
+            effective_adapter_id,
+            browser_fallback,
+            effective_recorded_at,
+            effective_reason,
+            auth_state,
+        })
+    }
+
+    pub async fn clear_last_transport_execution(&self, account_id: &str) {
+        self.last_transport.write().await.remove(account_id);
+    }
+
     pub fn supports(&self, kind: &str) -> bool {
         self.adapters.contains_key(kind)
     }
@@ -589,16 +799,16 @@ impl BrowserProviderRegistry {
         provider_kind: &str,
         binding: &BrowserAccountBinding,
     ) -> Option<&Arc<dyn BrowserProviderAdapter>> {
+        let adapter = self.direct_adapters.get(provider_kind)?;
+        let capabilities = adapter.browserless_capabilities();
         let enabled = match binding.transport_mode {
-            BrowserTransportMode::HttpPreferred => true,
+            BrowserTransportMode::HttpPreferred => capabilities.supported,
             BrowserTransportMode::Auto => {
-                matches!(provider_kind, "browser-gemini" | "browser-chatgpt")
-            },
+                capabilities.supported && capabilities.modes.contains(&BrowserTransportMode::Auto)
+            }
             BrowserTransportMode::BrowserOnly => false,
         };
-        enabled
-            .then(|| self.direct_adapters.get(provider_kind))
-            .flatten()
+        enabled.then_some(adapter)
     }
 
     pub async fn adapter_diagnostics(
@@ -4011,5 +4221,98 @@ mod tests {
             response.headers().get(CONTENT_TYPE).unwrap(),
             "application/json"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod browser_transport_policy_tests {
+    use super::*;
+
+    #[test]
+    fn built_in_direct_adapters_publish_provider_neutral_capabilities() {
+        let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
+
+        let gemini = registry.transport_capabilities("browser-gemini");
+        assert!(gemini.supported);
+        assert_eq!(gemini.recommended_mode, Some(BrowserTransportMode::Auto));
+        assert!(gemini.modes.contains(&BrowserTransportMode::HttpPreferred));
+        assert!(gemini.supports_direct_model_discovery);
+        assert!(gemini.supports_native_conversation);
+
+        let chatgpt = registry.transport_capabilities("browser-chatgpt");
+        assert!(chatgpt.supported);
+        assert_eq!(chatgpt.recommended_mode, Some(BrowserTransportMode::Auto));
+        assert!(!chatgpt.supports_direct_model_discovery);
+        assert!(chatgpt.supports_native_conversation);
+
+        let qwen = registry.transport_capabilities("browser-qwen");
+        assert!(qwen.supported);
+        assert_eq!(
+            qwen.recommended_mode,
+            Some(BrowserTransportMode::HttpPreferred)
+        );
+        assert!(!qwen.modes.contains(&BrowserTransportMode::Auto));
+        assert!(qwen.supports_direct_model_discovery);
+        assert!(qwen.supports_native_conversation);
+
+        let unsupported = registry.transport_capabilities("browser-custom");
+        assert!(!unsupported.supported);
+        assert_eq!(unsupported.recommended_mode, None);
+    }
+
+    #[test]
+    fn logical_policy_resolves_without_provider_specific_ui_knowledge() {
+        let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
+        assert_eq!(
+            registry
+                .resolve_transport_policy(
+                    "browser-gemini",
+                    BrowserTransportPolicy::BrowserlessPreferred,
+                )
+                .unwrap(),
+            BrowserTransportMode::Auto
+        );
+        assert_eq!(
+            registry
+                .resolve_transport_policy(
+                    "browser-qwen",
+                    BrowserTransportPolicy::BrowserlessPreferred,
+                )
+                .unwrap(),
+            BrowserTransportMode::HttpPreferred
+        );
+        assert_eq!(
+            registry
+                .resolve_transport_policy(
+                    "browser-custom",
+                    BrowserTransportPolicy::BrowserOnly,
+                )
+                .unwrap(),
+            BrowserTransportMode::BrowserOnly
+        );
+        assert!(matches!(
+            registry.resolve_transport_policy(
+                "browser-custom",
+                BrowserTransportPolicy::BrowserlessPreferred,
+            ),
+            Err(BrowserProviderError::UnsupportedBrowserless(_))
+        ));
+    }
+
+    #[test]
+    fn transport_policy_parser_is_semantic_and_strict() {
+        assert_eq!(
+            BrowserTransportPolicy::parse("browser-only").unwrap(),
+            BrowserTransportPolicy::BrowserOnly
+        );
+        assert_eq!(
+            BrowserTransportPolicy::parse("browserless-preferred").unwrap(),
+            BrowserTransportPolicy::BrowserlessPreferred
+        );
+        assert!(matches!(
+            BrowserTransportPolicy::parse("http-preferred"),
+            Err(BrowserProviderError::InvalidTransportPolicy(_))
+        ));
     }
 }
