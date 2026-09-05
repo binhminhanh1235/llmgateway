@@ -306,6 +306,8 @@ curl -fsS -X DELETE "http://127.0.0.1:7331/v1/files/${FILE_B_ID}" \
   -H "Authorization: Bearer ${LLMGATEWAY_FILE_CLIENT_A_KEY}" | grep -q '"deleted":true'
 test "$(find data/artifacts/blobs -type f | wc -l | tr -d ' ')" = "0"
 
+bash scripts/smoke-vision-api.sh
+
 curl -fsS -X POST http://127.0.0.1:7331/v1/chat/completions \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
