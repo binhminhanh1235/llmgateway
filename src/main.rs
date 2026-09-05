@@ -25,6 +25,8 @@ mod context_runtime;
 mod conversation;
 mod conversation_api;
 mod conversation_runtime;
+mod deepseek_pow;
+mod deepseek_web_transport;
 mod embedding_retrieval;
 mod embedding_runtime;
 mod execution_trace;
