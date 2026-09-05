@@ -692,12 +692,12 @@ pub fn apply_browser_account_setup(
     {
         let virtual_models = ensure_table(doc.as_table_mut(), "virtual_models")?;
         let default_model = ensure_table(virtual_models, &current.api.default_model)?;
-        append_unique_string(default_model, "routes", &route_id)?;
+        append_route_to_virtual_model(default_model, &route_id)?;
 
         for virtual_model_id in preset.extra_virtual_models {
             if virtual_models.contains_key(*virtual_model_id) {
                 let virtual_model = ensure_table(virtual_models, virtual_model_id)?;
-                append_unique_string(virtual_model, "routes", &route_id)?;
+                append_route_to_virtual_model(virtual_model, &route_id)?;
             }
         }
     }
@@ -880,6 +880,46 @@ fn append_new_by_id<'a>(
     tables.get_mut(index).ok_or_else(|| {
         BrowserAccountSetupError::Invalid(format!("could not create table '{id}'"))
     })
+}
+
+fn append_route_to_virtual_model(
+    table: &mut Table,
+    route_id: &str,
+) -> Result<(), BrowserAccountSetupError> {
+    if table.contains_key("tiers") {
+        let tiers = table
+            .get_mut("tiers")
+            .and_then(Item::as_array_of_tables_mut)
+            .ok_or_else(|| {
+                BrowserAccountSetupError::Invalid(
+                    "virtual model tiers must be an array of TOML tables".into(),
+                )
+            })?;
+        if tiers.is_empty() {
+            let mut tier = Table::new();
+            tier["priority"] = value(10);
+            tier["routes"] = Item::Value(Value::Array(string_array([route_id])));
+            tiers.push(tier);
+            return Ok(());
+        }
+
+        let fallback_index = tiers
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, tier)| {
+                tier.get("priority")
+                    .and_then(Item::as_integer)
+                    .unwrap_or(0)
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        let fallback = tiers.get_mut(fallback_index).ok_or_else(|| {
+            BrowserAccountSetupError::Invalid("could not update fallback tier".into())
+        })?;
+        return append_unique_string(fallback, "routes", route_id);
+    }
+
+    append_unique_string(table, "routes", route_id)
 }
 
 fn append_unique_string(
