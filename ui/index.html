@@ -58,11 +58,14 @@
 
         <div class="composer-wrap">
           <div id="routeNotice" class="route-notice hidden"></div>
-          <div class="composer">
+          <div id="attachmentPreview" class="attachment-preview hidden" aria-live="polite"></div>
+          <div id="composerDropZone" class="composer">
+            <input id="imageFileInput" class="hidden" type="file" accept="image/*" multiple />
+            <button id="attachImageButton" class="attach-button" type="button" title="Attach image" aria-label="Attach image">＋</button>
             <textarea id="composerInput" rows="1" placeholder="Ask anything…" aria-label="Message"></textarea>
             <button id="sendButton" class="send-button" type="button" title="Send">↑</button>
           </div>
-          <div class="composer-help">Enter to send · Shift+Enter for a new line</div>
+          <div id="composerHelp" class="composer-help">Enter to send · Shift+Enter for a new line · Paste or drop images</div>
         </div>
       </section>
 
