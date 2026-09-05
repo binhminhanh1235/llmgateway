@@ -1,4 +1,8 @@
-use crate::{config::AccountConfig, live_config::LiveConfig};
+use crate::{
+    browser_provider_runtime,
+    config::AccountConfig,
+    live_config::LiveConfig,
+};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION},
     Client, StatusCode,
@@ -223,44 +227,85 @@ impl ModelCatalog {
         let account = config
             .account(account_id)
             .ok_or_else(|| CatalogError::InvalidConfig(format!("unknown account '{account_id}'")))?;
-        if !account.discover_models {
-            return Err(CatalogError::InvalidConfig(format!(
-                "model discovery is disabled for account '{account_id}'"
-            )));
-        }
         let provider = config.provider(&account.provider).ok_or_else(|| {
             CatalogError::InvalidConfig(format!("unknown provider '{}'", account.provider))
         })?;
-        if provider.models_path.trim().is_empty() {
-            return Err(CatalogError::InvalidConfig(format!(
-                "provider '{}' has no models_path",
-                provider.id
-            )));
-        }
 
-        let key = env::var(&account.api_key_env)
-            .map_err(|_| CatalogError::MissingCredential(account.api_key_env.clone()))?;
-        let url = discovery_url(&provider.base_url, &provider.models_path);
-        let mut headers = HeaderMap::new();
-        apply_auth(&mut headers, account, &key)?;
-        let response = self
-            .client
-            .get(url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|error| CatalogError::Transport(error.to_string()))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(CatalogError::Upstream { status, body });
-        }
-        let payload = response
-            .json::<Value>()
-            .await
-            .map_err(|error| CatalogError::InvalidResponse(error.to_string()))?;
-        let discovered = parse_discovered_models(&payload, &provider.id)?;
+        let browser_discovery = if provider.is_browser() {
+            browser_provider_runtime::get()
+                .filter(|registry| registry.supports_model_discovery(&provider.kind))
+        } else {
+            None
+        };
 
+        let discovered = if let Some(registry) = browser_discovery {
+            registry
+                .discover_models(&provider.kind, account_id, true)
+                .await
+                .map_err(|error| CatalogError::Transport(error.to_string()))?
+                .into_iter()
+                .map(|model| DiscoveredModel {
+                    external_id: model.external_id,
+                    display_name: model.display_name,
+                    owned_by: model.owned_by,
+                    context_window: model.context_window,
+                    capabilities: model.capabilities,
+                    metadata_json: "{}".into(),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            if !account.discover_models {
+                return Err(CatalogError::InvalidConfig(format!(
+                    "model discovery is disabled for account '{account_id}'"
+                )));
+            }
+            if provider.models_path.trim().is_empty() {
+                return Err(CatalogError::InvalidConfig(format!(
+                    "provider '{}' has no models_path",
+                    provider.id
+                )));
+            }
+
+            let key = env::var(&account.api_key_env)
+                .map_err(|_| CatalogError::MissingCredential(account.api_key_env.clone()))?;
+            let url = discovery_url(&provider.base_url, &provider.models_path);
+            let mut headers = HeaderMap::new();
+            apply_auth(&mut headers, account, &key)?;
+            let response = self
+                .client
+                .get(url)
+                .headers(headers)
+                .send()
+                .await
+                .map_err(|error| CatalogError::Transport(error.to_string()))?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(CatalogError::Upstream { status, body });
+            }
+            let payload = response
+                .json::<Value>()
+                .await
+                .map_err(|error| CatalogError::InvalidResponse(error.to_string()))?;
+            parse_discovered_models(&payload, &provider.id)?
+        };
+
+        self.persist_discovered_models(account_id, &provider.id, &discovered)
+            .await?;
+
+        Ok(RefreshResult {
+            account_id: account_id.to_string(),
+            provider: provider.id.clone(),
+            discovered_models: discovered.len(),
+        })
+    }
+
+    async fn persist_discovered_models(
+        &self,
+        account_id: &str,
+        provider_id: &str,
+        discovered: &[DiscoveredModel],
+    ) -> Result<(), CatalogError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "UPDATE account_models SET
@@ -273,9 +318,9 @@ impl ModelCatalog {
         .await?;
         tx.commit().await?;
 
-        for model in &discovered {
-            self.upsert_discovered_model(&provider.id, model).await?;
-            let canonical_id = canonical_model_id(&provider.id, &model.external_id);
+        for model in discovered {
+            self.upsert_discovered_model(provider_id, model).await?;
+            let canonical_id = canonical_model_id(provider_id, &model.external_id);
             sqlx::query(
                 "INSERT INTO account_models
                  (account_id, canonical_model_id, availability, enabled, configured, discovered,
@@ -293,12 +338,7 @@ impl ModelCatalog {
             .execute(&self.pool)
             .await?;
         }
-
-        Ok(RefreshResult {
-            account_id: account_id.to_string(),
-            provider: provider.id.clone(),
-            discovered_models: discovered.len(),
-        })
+        Ok(())
     }
 
     pub async fn accounts(&self) -> Result<Vec<AccountView>, CatalogError> {
@@ -315,11 +355,19 @@ impl ModelCatalog {
             .bind(&account.id)
             .fetch_one(&self.pool)
             .await?;
+            let browser_discovery = config
+                .provider(&account.provider)
+                .filter(|provider| provider.is_browser())
+                .and_then(|provider| {
+                    browser_provider_runtime::get()
+                        .map(|registry| registry.supports_model_discovery(&provider.kind))
+                })
+                .unwrap_or(false);
             result.push(AccountView {
                 id: account.id.clone(),
                 provider: account.provider.clone(),
                 enabled: account.enabled,
-                discover_models: account.discover_models,
+                discover_models: account.discover_models || browser_discovery,
                 model_count: row.try_get("model_count")?,
                 available_model_count: row.try_get("available_model_count")?,
             });
