@@ -2378,6 +2378,87 @@ mod tests {
     }
 
     #[test]
+    fn model_catalog_v2_prefers_public_intelligence_versions_over_execution_categories() {
+        let models = parse_chatgpt_model_catalog(&json!({
+            "model_picker_version": 2,
+            "models": [
+                {"slug":"gpt-5-6","title":"GPT-5.6 Luna","max_tokens":128000},
+                {"slug":"gpt-5-6-mini","title":"GPT-5.6 Luna"},
+                {"slug":"gpt-5-6-t-mini","title":"GPT-5.6 Luna"},
+                {"slug":"gpt-5-6-terra","title":"GPT-5.6 Terra"},
+                {"slug":"research","title":"Deep Research"},
+                {"slug":"auto","title":"Auto"}
+            ],
+            "versions": [
+                {
+                    "id":"5.6",
+                    "display_text_for_intelligence":"GPT-5.6 Sol",
+                    "slugs":["gpt-5-6"],
+                    "enabled":true,
+                    "intelligence_presets":[
+                        {"title":"Instant","model_slug":"gpt-5-6","lane":"instant","preset_type":"available"}
+                    ]
+                },
+                {
+                    "id":"5.6 Terra",
+                    "display_text_for_intelligence":"GPT-5.6 Terra",
+                    "slugs":["gpt-5-6-terra"],
+                    "enabled":true,
+                    "intelligence_presets":[
+                        {"title":"Medium","model_slug":"gpt-5-6-terra","thinking_effort":"standard","preset_type":"available"}
+                    ]
+                },
+                {
+                    "id":"auto",
+                    "display_text_for_intelligence":"Auto",
+                    "slugs":["auto"],
+                    "enabled":true
+                }
+            ],
+            "categories": [
+                {"human_category_name":"Instant","human_category_short_name":"5.6 Luna","default_model":"gpt-5-6","supported_models":["gpt-5-6"]},
+                {"human_category_name":"Thinking mini","default_model":"gpt-5-6-t-mini","supported_models":["gpt-5-6-t-mini"]},
+                {"human_category_name":"Deep Research","default_model":"research","supported_models":["research"]},
+                {"human_category_name":"Auto","default_model":"auto","supported_models":[]}
+            ]
+        }));
+
+        assert_eq!(
+            models.iter().find(|model| model.external_id == "gpt-5-6").unwrap().display_name,
+            "GPT-5.6 Sol"
+        );
+        assert_eq!(
+            models.iter().find(|model| model.external_id == "gpt-5-6-terra").unwrap().display_name,
+            "GPT-5.6 Terra"
+        );
+        assert!(models.iter().any(|model| model.display_name == "Thinking mini"));
+        assert!(!models.iter().any(|model| model.display_name == "Instant"));
+        assert!(!models.iter().any(|model| model.external_id == "gpt-5-6-mini"));
+        assert!(!models.iter().any(|model| model.external_id == "research"));
+    }
+
+    #[test]
+    fn model_catalog_free_surface_falls_back_to_luna_when_no_sol_version_is_enabled() {
+        let models = parse_chatgpt_model_catalog(&json!({
+            "models": [
+                {"slug":"gpt-5-6","title":"GPT-5.6 Luna"},
+                {"slug":"auto","title":"Auto"}
+            ],
+            "versions": [
+                {"id":"auto","display_text_for_intelligence":"Auto","slugs":["auto"],"enabled":true}
+            ],
+            "categories": [
+                {"human_category_name":"Instant","human_category_short_name":"5.6 Luna","default_model":"gpt-5-6","supported_models":["gpt-5-6"]},
+                {"human_category_name":"Auto","default_model":"auto","supported_models":[]}
+            ]
+        }));
+        assert_eq!(
+            models.iter().find(|model| model.external_id == "gpt-5-6").unwrap().display_name,
+            "GPT-5.6 Luna"
+        );
+    }
+
+    #[test]
     fn model_catalog_uses_picker_category_and_hides_gpt_5_6_backend_variants() {
         let models = parse_chatgpt_model_catalog(&json!({
             "models": [
