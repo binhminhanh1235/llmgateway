@@ -79,7 +79,7 @@ capabilities = ["chat"]
 id = "primary-route"
 account = "trace-primary"
 model = "fake-model"
-priority = 10
+priority = 100
 enabled = true
 capabilities = ["chat"]
 
@@ -87,12 +87,21 @@ capabilities = ["chat"]
 id = "secondary-route"
 account = "trace-secondary"
 model = "fake-model"
-priority = 20
+priority = 1
 enabled = true
 capabilities = ["chat"]
 
-[virtual_models.llmgateway-auto]
-routes = ["missing-route", "primary-route", "secondary-route"]
+[[virtual_models.llmgateway-auto.tiers]]
+priority = 5
+routes = ["missing-route"]
+
+[[virtual_models.llmgateway-auto.tiers]]
+priority = 10
+routes = ["primary-route"]
+
+[[virtual_models.llmgateway-auto.tiers]]
+priority = 20
+routes = ["secondary-route"]
 EOF
 
 python3 scripts/fake-openai.py >/tmp/llmgateway-routing-trace-fake.log 2>&1 &
@@ -130,11 +139,16 @@ secondary=c["secondary-route"]
 assert missing["eligible"] is False, missing
 assert "credential_missing" in missing["exclusion_reasons"], missing
 assert missing["rank"] is None, missing
+assert missing["group_tier_priority"] == 5, missing
 assert primary["eligible"] is True and primary["selected"] is True, primary
-assert primary["rank"] == 1 and primary["final_score"] == 10, primary
+assert primary["group_tier_priority"] == 10, primary
+assert primary["rank"] == 1 and primary["final_score"] == 100, primary
 assert primary["quota_penalty"] == 0, primary
 assert secondary["eligible"] is True and secondary["rank"] == 2, secondary
-assert secondary["final_score"] == 20, secondary
+assert secondary["group_tier_priority"] == 20, secondary
+assert secondary["final_score"] == 1, secondary
+# Hard tier boundary: the lower-scored fallback cannot jump ahead of tier 10.
+assert primary["final_score"] > secondary["final_score"], (primary, secondary)
 '
 
 curl -fsS -D /tmp/routing-trace-chat.headers -o /tmp/routing-trace-chat.json \
@@ -163,6 +177,7 @@ assert "quota_blocked" in primary["exclusion_reasons"], primary
 assert primary["route_health"]["consecutive_failures"] >= 1, primary
 assert primary["route_health"]["cooldown_until"], primary
 assert secondary["eligible"] is True and secondary["selected"] is True, secondary
+assert secondary["group_tier_priority"] == 20, secondary
 assert secondary["rank"] == 1, secondary
 '
 

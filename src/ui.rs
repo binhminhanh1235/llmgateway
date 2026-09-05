@@ -13,6 +13,8 @@ const ACCOUNT_INTELLIGENCE_CSS: &str = include_str!("../ui/account-intelligence.
 const ACCOUNT_INTELLIGENCE_JS: &str = include_str!("../ui/account-intelligence.js");
 const BROWSER_CONTROL_CSS: &str = include_str!("../ui/browser-control.css");
 const BROWSER_CONTROL_JS: &str = include_str!("../ui/browser-control.js");
+const MODEL_GROUPS_CSS: &str = include_str!("../ui/model-groups.css");
+const MODEL_GROUPS_JS: &str = include_str!("../ui/model-groups.js");
 const TRACE_CONSOLE_CSS: &str = include_str!("../ui/trace-console.css");
 const TRACE_CONSOLE_JS: &str = include_str!("../ui/trace-console.js");
 
@@ -50,6 +52,14 @@ pub async fn browser_control_css() -> Response<Body> {
 
 pub async fn browser_control_js() -> Response<Body> {
     asset_response("text/javascript; charset=utf-8", BROWSER_CONTROL_JS)
+}
+
+pub async fn model_groups_css() -> Response<Body> {
+    asset_response("text/css; charset=utf-8", MODEL_GROUPS_CSS)
+}
+
+pub async fn model_groups_js() -> Response<Body> {
+    asset_response("text/javascript; charset=utf-8", MODEL_GROUPS_JS)
 }
 
 pub async fn trace_console_css() -> Response<Body> {
