@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.05.1";
+  const ADAPTER_VERSION = "2026.09.05.2";
 
   const defaults = {
     input: [
@@ -336,10 +336,86 @@
   const responseSnapshotKey = (leaves) =>
     leaves.map((node, index) => index + ":" + text(node)).join("\u241e");
 
+  const responseIdentity = (node) => {
+    try {
+      const turn = node?.closest?.("[data-testid^='conversation-turn-']");
+      const turnId = turn?.getAttribute?.("data-testid");
+      if (turnId) return "turn:" + turnId;
+    } catch (_) {}
+    try {
+      const message = node?.closest?.("[data-message-id]");
+      const messageId = message?.getAttribute?.("data-message-id");
+      if (messageId) return "message:" + messageId;
+    } catch (_) {}
+    try {
+      const ownMessageId = node?.getAttribute?.("data-message-id");
+      if (ownMessageId) return "message:" + ownMessageId;
+    } catch (_) {}
+    return "";
+  };
+
+  const compactBaselineTexts = (leaves) =>
+    leaves
+      .slice(-8)
+      .map((node) => text(node))
+      .filter(Boolean)
+      .map((value) => value.slice(0, 4096));
+
+  const compactBaselineKeys = (leaves) =>
+    leaves
+      .slice(-16)
+      .map((node) => responseIdentity(node))
+      .filter(Boolean);
+
+  const baselineResult = (leaves) => ({
+    count: leaves.length,
+    nodes: new Set(leaves),
+    texts: compactBaselineTexts(leaves),
+    keys: compactBaselineKeys(leaves)
+  });
+
+  const matchesBaselineText = (value, baselineTexts) => {
+    const candidate = String(value || "");
+    if (!candidate) return false;
+    return (baselineTexts || []).some((baseline) => {
+      const prior = String(baseline || "");
+      if (!prior) return false;
+      return candidate === prior || candidate.startsWith(prior) || prior.startsWith(candidate);
+    });
+  };
+
+  const recoveredResponseText = (state, leaves) => {
+    if (!leaves.length) return "";
+    const baselineKeys = new Set(Array.isArray(state?.baselineKeys) ? state.baselineKeys : []);
+    const baselineTexts = Array.isArray(state?.baselineTexts) ? state.baselineTexts : [];
+    const baselineCount = Number(state?.baselineCount || 0);
+
+    for (let index = leaves.length - 1; index >= 0; index -= 1) {
+      const node = leaves[index];
+      const value = text(node);
+      if (!value) continue;
+
+      const identity = responseIdentity(node);
+      if (identity && !baselineKeys.has(identity)) return value;
+
+      // Normal non-virtualized DOM: a new assistant node appears after the
+      // pre-submit baseline.
+      if (index >= baselineCount) return value;
+
+      // ChatGPT may replace the document and hydrate only a window of the
+      // conversation. In that case the new response can be the sole visible
+      // assistant node, so absolute node count is no longer meaningful.
+      // Compare against a compact pre-submit text snapshot instead.
+      if (!matchesBaselineText(value, baselineTexts)) return value;
+    }
+
+    return "";
+  };
+
   const captureResponseBaseline = async (context) => {
     if (!context?.reuse_native_conversation) {
       const leaves = responseLeaves(context);
-      return { count: leaves.length, nodes: new Set(leaves) };
+      return baselineResult(leaves);
     }
 
     const timeoutMs = Number(context?.history_hydration_timeout_ms || 12000);
@@ -354,7 +430,7 @@
       const key = responseSnapshotKey(leaves);
       if (leaves.length && key === lastKey) {
         if (stableSince && Date.now() - stableSince >= stableMs) {
-          return { count: leaves.length, nodes: new Set(leaves) };
+          return baselineResult(leaves);
         }
       } else {
         lastKey = key;
@@ -429,6 +505,9 @@
       completionId: state.completionId,
       model: state.model,
       baselineCount: Number(state.baselineCount || 0),
+      baselineTexts: Array.isArray(state.baselineTexts) ? state.baselineTexts : [],
+      baselineKeys: Array.isArray(state.baselineKeys) ? state.baselineKeys : [],
+      selectors: context.selectors && typeof context.selectors === "object" ? context.selectors : null,
       delivered: String(state.delivered || ""),
       roleEmitted: Boolean(state.roleEmitted),
       progressSeq: Number(state.progressSeq || 0),
@@ -471,7 +550,8 @@
       },
       context: {
         response_timeout_ms: responseTimeoutMs,
-        response_stable_ms: Number(payload.responseStableMs || 900)
+        response_stable_ms: Number(payload.responseStableMs || 900),
+        selectors: payload.selectors && typeof payload.selectors === "object" ? payload.selectors : undefined
       },
       answer: "",
       delivered: String(payload.delivered || ""),
@@ -487,6 +567,8 @@
       startedAt,
       stableSince: Number(payload.stableSince || 0),
       baselineCount: Number(payload.baselineCount || 0),
+      baselineTexts: Array.isArray(payload.baselineTexts) ? payload.baselineTexts : [],
+      baselineKeys: Array.isArray(payload.baselineKeys) ? payload.baselineKeys : [],
       recoveryArmed: true,
       recovered: true
     };
@@ -557,6 +639,8 @@
       startedAt: Date.now(),
       stableSince: 0,
       baselineCount: 0,
+      baselineTexts: [],
+      baselineKeys: [],
       recoveryArmed: false,
       recovered: false
     };
@@ -574,6 +658,8 @@
 
       before = await captureResponseBaseline(context);
       state.baselineCount = Number(before?.count || 0);
+      state.baselineTexts = Array.isArray(before?.texts) ? before.texts : [];
+      state.baselineKeys = Array.isArray(before?.keys) ? before.keys : [];
       markStreamProgress(state, "history-ready");
       const prompt = formatMessages(request);
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
@@ -674,9 +760,7 @@
 
       const now = Date.now();
       const responses = responseLeaves(state.context);
-      const candidate = responses.length > state.baselineCount
-        ? text(responses[responses.length - 1])
-        : "";
+      const candidate = recoveredResponseText(state, responses);
       const generating = Boolean(queryVisible(state.context, "completion"));
       const submittedAndWaiting = generating || !queryVisible(state.context, "send");
       if (submittedAndWaiting) {
