@@ -107,6 +107,7 @@ struct CachedAdapterDiagnostics {
 pub struct BrowserTransportExecution {
     pub transport: String,
     pub adapter_id: String,
+    pub model: String,
     pub browser_fallback: bool,
     pub recorded_at: String,
 }
@@ -191,6 +192,8 @@ pub enum BrowserProviderError {
     },
     #[error("browser model '{model}' is not available for account '{account_id}'")]
     ModelUnavailable { account_id: String, model: String },
+    #[error("model_recipe_stale: browser model recipe for '{model}' is stale for account '{account_id}'")]
+    ModelRecipeStale { account_id: String, model: String },
     #[error("browser provider transport error: {0}")]
     Transport(String),
     #[error("browser provider config read error: {0}")]
@@ -252,6 +255,7 @@ pub struct BrowserProviderRegistry {
     adapter_health: Arc<RwLock<BTreeMap<String, CachedAdapterDiagnostics>>>,
     last_transport: Arc<RwLock<BTreeMap<String, BrowserTransportExecution>>>,
     discovered_models: Arc<StdRwLock<BTreeMap<String, BTreeSet<String>>>>,
+    model_catalog_refresh_required: Arc<StdRwLock<BTreeSet<String>>>,
 }
 
 impl BrowserProviderConfig {
@@ -382,6 +386,7 @@ impl BrowserProviderRegistry {
             adapter_health: Arc::new(RwLock::new(BTreeMap::new())),
             last_transport: Arc::new(RwLock::new(BTreeMap::new())),
             discovered_models: Arc::new(StdRwLock::new(BTreeMap::new())),
+            model_catalog_refresh_required: Arc::new(StdRwLock::new(BTreeSet::new())),
         })
     }
 
@@ -412,6 +417,7 @@ impl BrowserProviderRegistry {
     async fn record_transport_execution(
         &self,
         account_id: &str,
+        model: &str,
         adapter: &dyn BrowserProviderAdapter,
         browser_fallback: bool,
     ) {
@@ -430,6 +436,7 @@ impl BrowserProviderRegistry {
             BrowserTransportExecution {
                 transport: transport.into(),
                 adapter_id: adapter.adapter_id().into(),
+                model: model.to_string(),
                 browser_fallback,
                 recorded_at: chrono::Utc::now().to_rfc3339(),
             },
@@ -498,7 +505,29 @@ impl BrowserProviderRegistry {
         }
         let models = adapter.discover_models(account_id, &binding, force).await?;
         self.remember_discovered_models(account_id, &models);
+        self.clear_model_catalog_refresh_required(account_id);
         Ok(models)
+    }
+
+    pub fn model_catalog_refresh_required(&self, account_id: &str) -> bool {
+        self.model_catalog_refresh_required
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(account_id)
+    }
+
+    pub fn mark_model_catalog_refresh_required(&self, account_id: &str) {
+        self.model_catalog_refresh_required
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(account_id.to_string());
+    }
+
+    fn clear_model_catalog_refresh_required(&self, account_id: &str) {
+        self.model_catalog_refresh_required
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(account_id);
     }
 
     fn remember_discovered_models(
@@ -1108,6 +1137,7 @@ impl BrowserProviderRegistry {
             Ok(_) => {
                 self.record_transport_execution(
                     &account.id,
+                    &route.model,
                     used_adapter.as_ref(),
                     browser_fallback_used,
                 )
