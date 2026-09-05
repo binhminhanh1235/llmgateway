@@ -912,10 +912,10 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
                 "ChatGPT direct HTTP preflight is ready; Chromium can stay closed until a browser-only challenge appears",
             ),
             Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
-                let status = if code == "login_required" {
-                    "login_required"
-                } else {
-                    "adapter_incompatible"
+                let status = match code.as_str() {
+                    "login_required" => "login_required",
+                    "browser_challenge_required" => "browser_fallback_required",
+                    _ => "adapter_incompatible",
                 };
                 diagnostics(account_id, binding, status, &message)
             }
