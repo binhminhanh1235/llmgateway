@@ -468,12 +468,21 @@ impl ChromiumDriver {
                 self.sessions.mark_ready(session_id).await?;
             }
 
-            match self.capture_auth_material(session_id, &status).await {
-                Ok(material) => match self.auth_vault.store(&material) {
+            match timeout(
+                Duration::from_secs(3),
+                self.capture_auth_material(session_id, &status),
+            )
+            .await
+            {
+                Ok(Ok(material)) => match self.auth_vault.store(&material) {
                     Ok(()) => auth_material_captured = true,
                     Err(error) => auth_material_error = Some(error.to_string()),
                 },
-                Err(error) => auth_material_error = Some(error.to_string()),
+                Ok(Err(error)) => auth_material_error = Some(error.to_string()),
+                Err(_) => {
+                    auth_material_error =
+                        Some("browser auth material capture timed out after 3 seconds".into())
+                }
             }
         } else if status.running {
             if matches!(
