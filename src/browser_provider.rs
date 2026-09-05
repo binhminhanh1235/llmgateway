@@ -612,6 +612,21 @@ impl BrowserProviderRegistry {
             "unavailable"
         }
         .to_string();
+        let direct_diagnostics = if desired_policy == BrowserTransportPolicy::BrowserlessPreferred
+            && auth_state == "captured"
+            && self.direct_adapter(provider_kind, &binding).is_some()
+        {
+            Some(self.adapter_diagnostics(provider_kind, account_id).await)
+        } else {
+            None
+        };
+        let direct_ready_adapter_id = direct_diagnostics.as_ref().and_then(|diagnostics| {
+            (diagnostics.status == "ready")
+                .then(|| diagnostics.adapter_id.as_deref())
+                .flatten()
+                .filter(|adapter_id| self.is_direct_http_adapter_id(adapter_id))
+                .map(str::to_string)
+        });
         let last = self.last_transport_execution(account_id).await;
         let (effective_transport, effective_adapter_id, browser_fallback, effective_recorded_at, effective_reason) =
             match last {
@@ -642,6 +657,14 @@ impl BrowserProviderRegistry {
                     execution.browser_fallback,
                     Some(execution.recorded_at),
                     "last request transport was recorded by the adapter".to_string(),
+                ),
+                None if direct_ready_adapter_id.is_some() => (
+                    "direct-http".to_string(),
+                    direct_ready_adapter_id,
+                    false,
+                    None,
+                    "direct adapter is ready; no request has executed since startup or policy change"
+                        .to_string(),
                 ),
                 None => (
                     "unavailable".to_string(),
@@ -3435,9 +3458,26 @@ fn direct_error_allows_browser_fallback(
     dynamic_model: bool,
     browser_adapter_is_cdp: bool,
 ) -> bool {
-    !dynamic_model
-        && browser_adapter_is_cdp
-        && matches!(error, BrowserProviderError::AdapterIncompatible { .. })
+    if dynamic_model || !browser_adapter_is_cdp {
+        return false;
+    }
+    let BrowserProviderError::AdapterIncompatible { code, .. } = error else {
+        return false;
+    };
+    matches!(
+        code.as_str(),
+        "login_required"
+            | "browser_challenge_required"
+            | "adapter_incompatible"
+            | "upstream_waf_rejected"
+            | "upstream_rejected"
+            | "sentinel_prepare_invalid"
+            | "sentinel_pow_invalid"
+            | "sentinel_pow_failed"
+            | "sentinel_finalize_invalid"
+            | "conversation_prepare_failed"
+            | "conversation_prepare_invalid"
+    )
 }
 
 fn cdp_session_status_probeable(status: &str) -> bool {
@@ -3604,11 +3644,21 @@ mod tests {
     }
 
     #[test]
-    fn only_pre_submit_compatible_errors_allow_browser_fallback() {
-        let incompatible = BrowserProviderError::AdapterIncompatible {
+    fn only_explicit_browser_recovery_errors_allow_browser_fallback() {
+        let challenge = BrowserProviderError::AdapterIncompatible {
             account_id: "account-a".into(),
-            code: "challenge".into(),
+            code: "browser_challenge_required".into(),
             message: "browser challenge".into(),
+        };
+        let login = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "login_required".into(),
+            message: "login expired".into(),
+        };
+        let unsynced = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "direct_state_unsynced".into(),
+            message: "thread is bound to browser state".into(),
         };
         let unavailable = BrowserProviderError::ModelUnavailable {
             account_id: "account-a".into(),
@@ -3616,11 +3666,13 @@ mod tests {
         };
         let transport = BrowserProviderError::Transport("post-submit stream failed".into());
 
-        assert!(direct_error_allows_browser_fallback(&incompatible, false, true));
+        assert!(direct_error_allows_browser_fallback(&challenge, false, true));
+        assert!(direct_error_allows_browser_fallback(&login, false, true));
+        assert!(!direct_error_allows_browser_fallback(&unsynced, false, true));
         assert!(!direct_error_allows_browser_fallback(&unavailable, false, true));
         assert!(!direct_error_allows_browser_fallback(&transport, false, true));
-        assert!(!direct_error_allows_browser_fallback(&incompatible, true, true));
-        assert!(!direct_error_allows_browser_fallback(&incompatible, false, false));
+        assert!(!direct_error_allows_browser_fallback(&challenge, true, true));
+        assert!(!direct_error_allows_browser_fallback(&challenge, false, false));
     }
 
     #[test]
