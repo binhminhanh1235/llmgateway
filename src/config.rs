@@ -38,6 +38,8 @@ pub struct ApiConfig {
     pub key_env: String,
     #[serde(default = "default_model")]
     pub default_model: String,
+    #[serde(default)]
+    pub strict_openai_compatibility: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -703,6 +705,23 @@ enabled = true
 routes = ["route"]
 "#
         )
+    }
+
+    #[test]
+    fn strict_openai_compatibility_defaults_off() {
+        let raw = minimal_config(
+            r#"[[providers]]
+id = "api"
+kind = "openai-compatible"
+base_url = "https://example.test/v1""#,
+            r#"[[accounts]]
+id = "account"
+provider = "api"
+api_key_env = "EXAMPLE_API_KEY"
+enabled = true"#,
+        );
+        let config: AppConfig = toml::from_str(&raw).unwrap();
+        assert!(!config.api.strict_openai_compatibility);
     }
 
     #[test]

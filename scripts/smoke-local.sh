@@ -156,6 +156,12 @@ curl -fsS http://127.0.0.1:7331/ui/app.js | grep -q "llmgateway.threads.v1"
 curl -fsS http://127.0.0.1:7331/v1/models \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" | grep -q "llmgateway-auto"
 
+curl -fsS -X POST http://127.0.0.1:7331/v1/chat/completions \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"legacy default model compatibility"}]}' \
+  | grep -q 'fake reply messages=1'
+
 THREAD_JSON=$(curl -fsS -X POST \
   http://127.0.0.1:7331/v1/threads \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \

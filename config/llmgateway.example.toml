@@ -5,6 +5,9 @@ port = 7331
 [api]
 key_env = "LLMGATEWAY_API_KEY"
 default_model = "llmgateway-auto"
+# Off by default to preserve llmgateway auto-routing for clients that omit model.
+# Enable to make POST /v1/chat/completions require a non-empty string model.
+strict_openai_compatibility = false
 
 [storage]
 database_url = "sqlite://data/llmgateway.db"
