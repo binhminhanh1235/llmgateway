@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.05.2";
+  const ADAPTER_VERSION = "2026.09.05.3";
 
   const defaults = {
     input: [
@@ -264,29 +264,94 @@
     };
   };
 
-  const setComposer = (node, value) => {
+  const setComposer = async (node, value) => {
     node.focus();
     if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) {
       const proto = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      const previous = String(node.value || "");
       if (setter) setter.call(node, value);
       else node.value = value;
+      try { node._valueTracker?.setValue?.(previous); } catch (_) {}
       node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
       node.dispatchEvent(new Event("change", { bubbles: true }));
-    } else {
-      let inserted = false;
-      try {
-        if (typeof document !== "undefined" && typeof document.execCommand === "function") {
-          document.execCommand("selectAll", false, null);
-          inserted = document.execCommand("insertText", false, value);
-        }
-      } catch (_) {}
-      if (!inserted || !node.textContent || !node.textContent.includes(value)) {
-        node.textContent = value;
-        node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-        node.dispatchEvent(new Event("change", { bubbles: true }));
-      }
+      await sleep(0);
+      return;
     }
+
+    // ChatGPT's current composer is a ProseMirror contenteditable. Scope the
+    // browser-native insertion to the editor itself so ProseMirror observes a
+    // real DOM edit instead of mutating the hidden fallback textarea/form.
+    let inserted = false;
+    try {
+      const selection = globalThis.getSelection?.() || document.getSelection?.();
+      const range = document.createRange?.();
+      if (selection && range) {
+        range.selectNodeContents(node);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      if (typeof document.execCommand === "function") {
+        inserted = Boolean(document.execCommand("insertText", false, value));
+      }
+    } catch (_) {}
+
+    if (!inserted || !String(node.textContent || node.innerText || "").includes(value)) {
+      // Last-resort DOM mutation for fixture/forward-compatibility. Emit the
+      // same input signal ProseMirror/React listen for, then yield so their
+      // state can reconcile before submit is attempted.
+      node.textContent = value;
+      try { node.innerText = value; } catch (_) {}
+      node.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        composed: true,
+        inputType: "insertText",
+        data: value
+      }));
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await sleep(0);
+    await sleep(0);
+  };
+
+  const safeSendControl = (node) => {
+    if (!node || !isVisible(node) || node.disabled) return null;
+    const label = normalize([
+      text(node),
+      node.getAttribute?.("aria-label") || "",
+      node.getAttribute?.("data-testid") || "",
+      node.id || ""
+    ].join(" "));
+    if (/start voice|voice mode|dictat|microphone/.test(label)) return null;
+    return /send|submit|composer-submit-button/.test(label) ? node : null;
+  };
+
+  const submitComposer = async (context, composer) => {
+    const send = await waitFor(() => safeSendControl(queryVisible(context, "send")), 2500);
+    if (send) {
+      send.click();
+      await sleep(0);
+      return "button";
+    }
+    if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: ChatGPT session expired");
+
+    // New ChatGPT builds can delay or omit the send button until ProseMirror
+    // state catches up. Enter is handled by the editor's React/ProseMirror
+    // key path and avoids falling through to the hidden GET fallback form.
+    composer.focus();
+    for (const type of ["keydown", "keypress", "keyup"]) {
+      composer.dispatchEvent(new KeyboardEvent(type, {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true,
+        cancelable: true
+      }));
+    }
+    await sleep(120);
+    if (String(globalThis.location?.search || "").includes("prompt-textarea=")) {
+      throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT composer fell through to the hidden GET fallback form");
+    }
+    return "enter";
   };
 
   const selectModel = async (context) => {
@@ -674,17 +739,12 @@
       markStreamProgress(state, "history-ready");
       const prompt = formatMessages(request);
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
-      setComposer(composer, prompt);
+      await setComposer(composer, prompt);
       markStreamProgress(state, "prompt-ready");
 
-      const send = await waitFor(() => queryVisible(context, "send"), 5000);
-      if (!send) {
-        if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: ChatGPT session expired");
-        throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT send control was not found");
-      }
       state.recoveryArmed = true;
       saveStreamRecovery(state);
-      send.click();
+      await submitComposer(context, composer);
       markStreamProgress(state, "submitted");
     } catch (error) {
       state.error = classifyStreamError(error);
@@ -947,14 +1007,8 @@
       const before = await captureResponseBaseline(context);
       const prompt = formatMessages(request);
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
-      setComposer(composer, prompt);
-
-      const send = await waitFor(() => queryVisible(context, "send"), 5000);
-      if (!send) {
-        if (loginIndicator(context)) throw new Error("LOGIN_REQUIRED: ChatGPT session expired");
-        throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT send control was not found");
-      }
-      send.click();
+      await setComposer(composer, prompt);
+      await submitComposer(context, composer);
 
       const startedAt = Date.now();
       let last = "";
