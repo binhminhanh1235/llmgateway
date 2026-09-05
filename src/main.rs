@@ -161,16 +161,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         browser_auth_vault,
     )?);
     let chromium_driver_enabled = chromium_driver.enabled();
-    let startup_browser_reconcile = chromium_driver.reconcile_all().await;
+    browser_session_runtime::install(browser_sessions.clone())
+        .map_err(|_| "browser session store was already initialized")?;
     chromium_driver_runtime::install(chromium_driver.clone())
         .map_err(|_| "Chromium driver was already initialized")?;
-    browser_session_runtime::install(browser_sessions)
-        .map_err(|_| "browser session store was already initialized")?;
 
     let browser_providers = Arc::new(BrowserProviderRegistry::new(browser_provider_config)?);
     let browser_provider_bindings = browser_providers.binding_count();
-    browser_provider_runtime::install(browser_providers)
+    browser_provider_runtime::install(browser_providers.clone())
         .map_err(|_| "browser provider registry was already initialized")?;
+
+    let startup_browserless_idle =
+        browser_providers.browserless_idle_session_ids(config.as_ref());
+    let startup_browser_reconcile = chromium_driver
+        .reconcile_all_excluding(&startup_browserless_idle)
+        .await;
 
     if browser_session_count > 0 {
         info!(browser_session_count, "browser session registry enabled");
@@ -185,13 +190,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         let reconcile_driver = chromium_driver.clone();
+        let reconcile_providers = browser_providers.clone();
+        let reconcile_live_config = live_config.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(
                     reconcile_driver.reconcile_interval_seconds(),
                 ))
                 .await;
-                let summary = reconcile_driver.reconcile_all().await;
+                let config = reconcile_live_config.snapshot();
+                let browserless_idle =
+                    reconcile_providers.browserless_idle_session_ids(config.as_ref());
+                let summary = reconcile_driver
+                    .reconcile_all_excluding(&browserless_idle)
+                    .await;
                 if summary.recovered > 0 {
                     info!(
                         recovered = summary.recovered,
