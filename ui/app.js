@@ -592,6 +592,18 @@
     elements.saveKeyButton.addEventListener("click", saveApiKey);
     elements.apiKeyInput.addEventListener("keydown", (event) => { if (event.key === "Enter") saveApiKey(); });
     elements.changeKeyButton.addEventListener("click", changeApiKey);
+    window.addEventListener("llmgateway:models-changed", async () => {
+      state.models = [];
+      state.catalog = [];
+      state.accounts = [];
+      try {
+        await loadModels();
+        if (state.currentView === "accounts") await loadAccounts(true);
+        if (state.currentView === "models") await loadCatalog(true);
+      } catch (error) {
+        toast(`Could not refresh model catalog: ${error.message || String(error)}`);
+      }
+    });
     document.querySelectorAll(".nav-button").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
     document.querySelectorAll("[data-close-modal]").forEach((button) => button.addEventListener("click", () => el(button.dataset.closeModal).classList.add("hidden")));
     elements.modelModal.addEventListener("click", (event) => { if (event.target === elements.modelModal) elements.modelModal.classList.add("hidden"); });
