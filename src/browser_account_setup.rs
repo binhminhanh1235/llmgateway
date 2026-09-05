@@ -690,7 +690,14 @@ pub fn apply_browser_account_setup(
     }
 
     {
-        let virtual_models = ensure_table(doc.as_table_mut(), "virtual_models")?;
+        let virtual_model_root = if doc.as_table().contains_key("virtual_models") {
+            "virtual_models"
+        } else if doc.as_table().contains_key("model_groups") {
+            "model_groups"
+        } else {
+            "virtual_models"
+        };
+        let virtual_models = ensure_table(doc.as_table_mut(), virtual_model_root)?;
         let default_model = ensure_table(virtual_models, &current.api.default_model)?;
         append_route_to_virtual_model(default_model, &route_id)?;
 
@@ -1206,6 +1213,38 @@ routes = ["api"]
             .routes
             .contains(&"qwen-a-route".to_string()));
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn appends_route_to_last_fallback_tier() {
+        let mut group = Table::new();
+        let mut tiers = ArrayOfTables::new();
+
+        let mut primary = Table::new();
+        primary["priority"] = value(10);
+        primary["routes"] = Item::Value(Value::Array(string_array(["primary"])));
+        tiers.push(primary);
+
+        let mut fallback = Table::new();
+        fallback["priority"] = value(30);
+        fallback["routes"] = Item::Value(Value::Array(string_array(["fallback"])));
+        tiers.push(fallback);
+
+        group["tiers"] = Item::ArrayOfTables(tiers);
+        append_route_to_virtual_model(&mut group, "new-route").unwrap();
+
+        assert!(!group.contains_key("routes"));
+        let tiers = group["tiers"].as_array_of_tables().unwrap();
+        assert!(!tiers[0]["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("new-route")));
+        assert!(tiers[1]["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("new-route")));
     }
 
     #[test]
