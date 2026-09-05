@@ -902,6 +902,13 @@ fn append_route_to_virtual_model(
                     "virtual model tiers must be an array of TOML tables".into(),
                 )
             })?;
+        if tiers.iter().any(|tier| tier.contains_key("models")) {
+            // Model-backed groups resolve eligible account routes dynamically from
+            // the catalog. Adding a browser account must not inject a route member
+            // or create an invalid mixed route/model tier.
+            return Ok(());
+        }
+
         if tiers.is_empty() {
             let mut tier = Table::new();
             tier["priority"] = value(10);
@@ -1249,6 +1256,29 @@ routes = ["api"]
             .unwrap()
             .iter()
             .any(|value| value.as_str() == Some("new-route")));
+    }
+
+    #[test]
+    fn does_not_inject_route_into_model_backed_group() {
+        let mut group = Table::new();
+        let mut tiers = ArrayOfTables::new();
+
+        let mut tier = Table::new();
+        tier["priority"] = value(10);
+        tier["models"] =
+            Item::Value(Value::Array(string_array(["gemini-web/gemini-3.1-pro"])));
+        tiers.push(tier);
+        group["tiers"] = Item::ArrayOfTables(tiers);
+
+        append_route_to_virtual_model(&mut group, "new-browser-route").unwrap();
+
+        let tiers = group["tiers"].as_array_of_tables().unwrap();
+        let tier = tiers.get(0).unwrap();
+        assert!(tier.get("routes").is_none());
+        assert_eq!(
+            tier["models"].as_array().unwrap().get(0).and_then(Value::as_str),
+            Some("gemini-web/gemini-3.1-pro")
+        );
     }
 
     #[test]
