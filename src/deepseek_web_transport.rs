@@ -68,10 +68,18 @@ struct DeepSeekFrameUpdate {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct DeepSeekFragmentState {
+    channel: DeepSeekChannel,
+    content: String,
+}
+
 #[derive(Debug, Default)]
 struct DeepSeekSseDecoder {
     buffer: Vec<u8>,
     channel: DeepSeekChannel,
+    fragments: Vec<DeepSeekFragmentState>,
+    last_fragment_index: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -195,11 +203,12 @@ impl DeepSeekSseDecoder {
                 .and_then(value_to_u32);
         }
 
-        if let Some(response) = value.pointer("/data/v/response") {
+        if let Some(response) = value
+            .pointer("/data/v/response")
+            .or_else(|| value.pointer("/v/response"))
+        {
             if let Some(fragments) = response.get("fragments").and_then(Value::as_array) {
-                for fragment in fragments {
-                    self.append_fragment(fragment, &mut update);
-                }
+                self.apply_fragment_snapshot(fragments, &mut update)?;
             }
         }
 
@@ -214,64 +223,263 @@ impl DeepSeekSseDecoder {
             .unwrap_or("");
         let patch_value = value.pointer("/data/v").or_else(|| value.get("v"));
 
-        match path {
-            Some("response/fragments") => {
+        self.apply_patch(path, operation, patch_value, &mut update)?;
+        Ok(Some(update))
+    }
+
+    fn apply_patch(
+        &mut self,
+        path: Option<&str>,
+        operation: &str,
+        patch_value: Option<&Value>,
+        update: &mut DeepSeekFrameUpdate,
+    ) -> Result<(), String> {
+        let normalized_path = path.map(|value| value.trim_start_matches('/'));
+        let operation = operation.to_ascii_uppercase();
+
+        if operation == "BATCH" {
+            if let Some(items) = patch_value.and_then(Value::as_array) {
+                let parent = normalized_path.unwrap_or("");
+                for patch in items {
+                    let child_path = patch.get("p").and_then(Value::as_str);
+                    let child_operation = patch.get("o").and_then(Value::as_str).unwrap_or("");
+                    let child_value = patch.get("v");
+                    let expanded = child_path.map(|child| {
+                        let child = child.trim_start_matches('/');
+                        if child.starts_with("response/") || parent.is_empty() {
+                            child.to_string()
+                        } else if parent == "response" {
+                            format!("response/{child}")
+                        } else {
+                            format!("{parent}/{child}")
+                        }
+                    });
+                    self.apply_patch(
+                        expanded.as_deref(),
+                        child_operation,
+                        child_value,
+                        update,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+
+        match normalized_path {
+            Some("response/fragments") | Some("fragments") => {
                 if let Some(items) = patch_value.and_then(Value::as_array) {
-                    for fragment in items {
-                        self.append_fragment(fragment, &mut update);
+                    if matches!(operation.as_str(), "APPEND" | "ADD") {
+                        for fragment in items {
+                            self.append_fragment(fragment, update);
+                        }
+                    } else {
+                        self.apply_fragment_snapshot(items, update)?;
                     }
                 } else if let Some(fragment) = patch_value {
-                    self.append_fragment(fragment, &mut update);
+                    self.append_fragment(fragment, update);
                 }
             }
-            Some("response/fragments/-1/content") if operation == "APPEND" => {
-                if let Some(text) = patch_value.and_then(Value::as_str) {
-                    self.append_by_channel(text, &mut update);
-                }
-            }
-            Some("response/status") => {
+            Some("response/status")
+            | Some("response/quasi_status")
+            | Some("status")
+            | Some("quasi_status") => {
                 if patch_value.and_then(Value::as_str) == Some("FINISHED") {
                     update.completed = true;
                 }
             }
-            None if operation == "APPEND" => {
-                if let Some(text) = patch_value.and_then(Value::as_str) {
-                    self.append_by_channel(text, &mut update);
+            Some(path) => {
+                if let Some(raw_index) = fragment_content_index(path) {
+                    if let Some(text) = patch_value.and_then(Value::as_str) {
+                        self.apply_fragment_content_patch(
+                            raw_index,
+                            &operation,
+                            text,
+                            update,
+                        )?;
+                    }
                 }
             }
-            None if operation.is_empty() => {
+            None => {
                 if let Some(text) = patch_value.and_then(Value::as_str) {
-                    self.append_by_channel(text, &mut update);
+                    if matches!(operation.as_str(), "" | "APPEND" | "ADD") {
+                        self.append_to_last_fragment(text, update);
+                    }
                 }
             }
-            _ => {}
         }
 
-        Ok(Some(update))
+        Ok(())
+    }
+
+    fn apply_fragment_snapshot(
+        &mut self,
+        fragments: &[Value],
+        update: &mut DeepSeekFrameUpdate,
+    ) -> Result<(), String> {
+        for (index, fragment) in fragments.iter().enumerate() {
+            let previous = self.fragments.get(index).cloned();
+            let channel = fragment_channel(fragment)
+                .or_else(|| previous.as_ref().map(|state| state.channel))
+                .unwrap_or(self.channel);
+            let content = fragment
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let delta = if let Some(previous) = previous.as_ref() {
+                monotonic_fragment_delta(&previous.content, content, index)?
+            } else {
+                content.to_string()
+            };
+
+            if index < self.fragments.len() {
+                let state = &mut self.fragments[index];
+                state.channel = channel;
+                if content.len() >= state.content.len() && content.starts_with(&state.content) {
+                    state.content = content.to_string();
+                }
+            } else {
+                self.fragments.push(DeepSeekFragmentState {
+                    channel,
+                    content: content.to_string(),
+                });
+            }
+
+            self.channel = channel;
+            self.last_fragment_index = Some(index);
+            self.append_by_channel(channel, &delta, update);
+        }
+        Ok(())
     }
 
     fn append_fragment(&mut self, fragment: &Value, update: &mut DeepSeekFrameUpdate) {
-        let kind = fragment
-            .get("type")
+        let channel = fragment_channel(fragment).unwrap_or(self.channel);
+        let content = fragment
+            .get("content")
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_ascii_uppercase();
-        match kind.as_str() {
-            "THINK" => self.channel = DeepSeekChannel::Reasoning,
-            "RESPONSE" | "ANSWER" => self.channel = DeepSeekChannel::Output,
-            _ => {}
-        }
-        if let Some(content) = fragment.get("content").and_then(Value::as_str) {
-            self.append_by_channel(content, update);
-        }
+            .unwrap_or("");
+        let index = self.fragments.len();
+        self.fragments.push(DeepSeekFragmentState {
+            channel,
+            content: content.to_string(),
+        });
+        self.channel = channel;
+        self.last_fragment_index = Some(index);
+        self.append_by_channel(channel, content, update);
     }
 
-    fn append_by_channel(&self, text: &str, update: &mut DeepSeekFrameUpdate) {
-        match self.channel {
+    fn apply_fragment_content_patch(
+        &mut self,
+        raw_index: i64,
+        operation: &str,
+        text: &str,
+        update: &mut DeepSeekFrameUpdate,
+    ) -> Result<(), String> {
+        let index = if raw_index == -1 {
+            self.fragments.len().checked_sub(1).unwrap_or(0)
+        } else {
+            usize::try_from(raw_index).map_err(|_| {
+                format!("DeepSeek fragment index is invalid: {raw_index}")
+            })?
+        };
+
+        while self.fragments.len() <= index {
+            self.fragments.push(DeepSeekFragmentState {
+                channel: self.channel,
+                content: String::new(),
+            });
+        }
+
+        let channel = self.fragments[index].channel;
+        let previous = self.fragments[index].content.clone();
+        let delta = match operation {
+            "SET" | "REPLACE" => {
+                let delta = monotonic_fragment_delta(&previous, text, index)?;
+                if text.len() >= previous.len() && text.starts_with(&previous) {
+                    self.fragments[index].content = text.to_string();
+                }
+                delta
+            }
+            "" | "APPEND" | "ADD" => {
+                self.fragments[index].content.push_str(text);
+                text.to_string()
+            }
+            _ => String::new(),
+        };
+
+        self.channel = channel;
+        self.last_fragment_index = Some(index);
+        self.append_by_channel(channel, &delta, update);
+        Ok(())
+    }
+
+    fn append_to_last_fragment(&mut self, text: &str, update: &mut DeepSeekFrameUpdate) {
+        let index = self.last_fragment_index.unwrap_or_else(|| {
+            self.fragments.push(DeepSeekFragmentState {
+                channel: self.channel,
+                content: String::new(),
+            });
+            0
+        });
+        self.fragments[index].content.push_str(text);
+        let channel = self.fragments[index].channel;
+        self.channel = channel;
+        self.last_fragment_index = Some(index);
+        self.append_by_channel(channel, text, update);
+    }
+
+    fn append_by_channel(
+        &self,
+        channel: DeepSeekChannel,
+        text: &str,
+        update: &mut DeepSeekFrameUpdate,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        match channel {
             DeepSeekChannel::Output => update.output.push_str(text),
             DeepSeekChannel::Reasoning => update.reasoning.push_str(text),
         }
     }
+}
+
+fn fragment_channel(fragment: &Value) -> Option<DeepSeekChannel> {
+    match fragment
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "THINK" | "SEARCH" | "SEARCH_REF" => Some(DeepSeekChannel::Reasoning),
+        "RESPONSE" | "ANSWER" => Some(DeepSeekChannel::Output),
+        _ => None,
+    }
+}
+
+fn fragment_content_index(path: &str) -> Option<i64> {
+    let path = path.trim_start_matches('/');
+    let rest = path
+        .strip_prefix("response/fragments/")
+        .or_else(|| path.strip_prefix("fragments/"))?;
+    let index = rest.strip_suffix("/content")?;
+    index.parse::<i64>().ok()
+}
+
+fn monotonic_fragment_delta(
+    previous: &str,
+    next: &str,
+    index: usize,
+) -> Result<String, String> {
+    if next == previous || previous.starts_with(next) {
+        return Ok(String::new());
+    }
+    if let Some(delta) = next.strip_prefix(previous) {
+        return Ok(delta.to_string());
+    }
+    Err(format!(
+        "stream_rewrite_detected: DeepSeek replaced fragment {index} after text was already emitted"
+    ))
 }
 
 fn find_sse_separator(bytes: &[u8]) -> Option<(usize, usize)> {
