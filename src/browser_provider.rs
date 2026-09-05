@@ -990,6 +990,15 @@ impl BrowserProviderRegistry {
             .cloned()
             .ok_or_else(|| BrowserProviderError::MissingBinding(account.id.clone()))?;
 
+        if !self.model_allowed(&account.id, &route.model)
+            && self.account_supports_model_discovery(&provider.kind, &account.id)
+        {
+            // The SQLite catalog survives process restarts while the registry's fast
+            // discovered-model allow-list is intentionally in-memory. Rehydrate that
+            // allow-list through the direct, non-generating discovery RPC before
+            // rejecting a physical model selected from the persisted catalog.
+            self.discover_models(&provider.kind, &account.id, false).await?;
+        }
         if !self.model_allowed(&account.id, &route.model) {
             return Err(BrowserProviderError::ModelUnavailable {
                 account_id: account.id.clone(),
@@ -3318,6 +3327,29 @@ mod tests {
         assert!(registry.model_allowed("account", "model-b"));
         assert!(!registry.model_allowed("account", "model-c"));
         assert!(registry.model_allowed("unbound-account", "model-c"));
+    }
+
+    #[test]
+    fn discovered_models_extend_the_binding_allowlist() {
+        let mut binding = test_binding();
+        binding.models = vec!["gemini-web-default".into()];
+        let mut config = BrowserProviderConfig::default();
+        config.bindings.insert("account".into(), binding);
+        let registry = BrowserProviderRegistry::new(config).unwrap();
+
+        assert!(!registry.model_allowed("account", "gemini-web-pro"));
+        registry.remember_discovered_models(
+            "account",
+            &[BrowserDiscoveredModel {
+                external_id: "gemini-web-pro".into(),
+                display_name: "Gemini Pro".into(),
+                owned_by: "Google".into(),
+                context_window: None,
+                capabilities: vec!["chat".into(), "reasoning".into()],
+            }],
+        );
+        assert!(registry.model_allowed("account", "gemini-web-pro"));
+        assert!(!registry.model_allowed("account", "gemini-web-flash"));
     }
 
     #[test]
