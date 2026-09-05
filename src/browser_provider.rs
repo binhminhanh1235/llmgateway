@@ -1086,13 +1086,13 @@ impl BrowserProviderRegistry {
                 .get(&account.id)
                 .is_some_and(|models| models.contains(&route.model))
                 && !binding.models.iter().any(|model| model == &route.model);
-            let safe_fallback_candidate = !dynamic_model
-                && matches!(
-                    &direct_result,
-                    Err(BrowserProviderError::AdapterIncompatible { .. })
-                        | Err(BrowserProviderError::ModelUnavailable { .. })
+            let safe_fallback_candidate = direct_result.as_ref().err().is_some_and(|error| {
+                direct_error_allows_browser_fallback(
+                    error,
+                    dynamic_model,
+                    browser_adapter.is_cdp(),
                 )
-                && browser_adapter.is_cdp();
+            });
             let browser_was_live = safe_fallback_candidate
                 && self.cdp_session_live(&binding.session).await;
             let safe_browser_fallback = if safe_fallback_candidate {
@@ -3149,6 +3149,20 @@ fn contract_error_to_provider_error(
 }
 
 
+fn direct_error_allows_browser_fallback(
+    error: &BrowserProviderError,
+    dynamic_model: bool,
+    browser_adapter_is_cdp: bool,
+) -> bool {
+    !dynamic_model
+        && browser_adapter_is_cdp
+        && matches!(
+            error,
+            BrowserProviderError::AdapterIncompatible { .. }
+                | BrowserProviderError::ModelUnavailable { .. }
+        )
+}
+
 fn cdp_session_status_probeable(status: &str) -> bool {
     matches!(
         status,
@@ -3302,6 +3316,35 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
     use uuid::Uuid;
+
+    #[test]
+    fn stale_model_recipe_never_allows_browser_fallback() {
+        let stale = BrowserProviderError::ModelRecipeStale {
+            account_id: "account-a".into(),
+            model: "gemini-web-pro".into(),
+        };
+        assert!(!direct_error_allows_browser_fallback(&stale, false, true));
+    }
+
+    #[test]
+    fn only_pre_submit_compatible_errors_allow_browser_fallback() {
+        let incompatible = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "challenge".into(),
+            message: "browser challenge".into(),
+        };
+        let unavailable = BrowserProviderError::ModelUnavailable {
+            account_id: "account-a".into(),
+            model: "configured-model".into(),
+        };
+        let transport = BrowserProviderError::Transport("post-submit stream failed".into());
+
+        assert!(direct_error_allows_browser_fallback(&incompatible, false, true));
+        assert!(direct_error_allows_browser_fallback(&unavailable, false, true));
+        assert!(!direct_error_allows_browser_fallback(&transport, false, true));
+        assert!(!direct_error_allows_browser_fallback(&incompatible, true, true));
+        assert!(!direct_error_allows_browser_fallback(&incompatible, false, false));
+    }
 
     #[test]
     fn cdp_session_recovery_states_are_probeable() {
