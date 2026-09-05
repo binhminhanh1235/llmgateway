@@ -260,6 +260,77 @@ for marker in ("stream-cancelled", "target-closed"):
     except FileNotFoundError:
         pass
 
+# Some OpenAI-compatible clients stop reading as soon as finish_reason is set.
+# That is a logical completion, not a downstream cancellation.
+conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
+terminal_body = json.dumps({
+    "model": "llmgateway-auto",
+    "stream": True,
+    "messages": [{"role": "user", "content": "close after terminal finish reason"}],
+})
+conn.request(
+    "POST",
+    "/v1/chat/completions",
+    body=terminal_body,
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "Content-Length": str(len(terminal_body.encode())),
+    },
+)
+terminal_response = conn.getresponse()
+assert terminal_response.status == 200
+terminal_request_id = terminal_response.getheader("x-llmgateway-request-id")
+assert terminal_request_id, dict(terminal_response.getheaders())
+saw_finish_reason = False
+while True:
+    line = terminal_response.readline()
+    if not line:
+        break
+    if not line.startswith(b"data: "):
+        continue
+    data = line[6:].strip()
+    if data == b"[DONE]":
+        break
+    if not data:
+        continue
+    event = json.loads(data)
+    finish_reason = (event.get("choices") or [{}])[0].get("finish_reason")
+    if finish_reason is not None:
+        saw_finish_reason = True
+        break
+assert saw_finish_reason
+conn.close()
+
+terminal_trace = None
+for _ in range(50):
+    trace_conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
+    trace_conn.request(
+        "GET",
+        f"/_llmgateway/executions/{terminal_request_id}",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+    )
+    trace_response = trace_conn.getresponse()
+    terminal_trace = json.loads(trace_response.read().decode())
+    trace_conn.close()
+    if terminal_trace.get("status") == "success":
+        break
+    time.sleep(0.05)
+
+assert terminal_trace is not None, terminal_trace
+assert terminal_trace["status"] == "success", terminal_trace
+assert terminal_trace["stream"]["outcome"] == "completed", terminal_trace
+assert terminal_trace["stream"]["partial_response"] is False, terminal_trace
+time.sleep(0.2)
+assert not os.path.exists(os.path.join(profile, "stream-cancelled")), "terminal client close incorrectly cancelled provider"
+assert os.path.exists(os.path.join(profile, "target-closed")), "completed ephemeral target was not closed"
+
+for marker in ("stream-cancelled", "target-closed"):
+    try:
+        os.remove(os.path.join(profile, marker))
+    except FileNotFoundError:
+        pass
+
 conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
 payload = json.dumps({
     "model": "llmgateway-auto",
