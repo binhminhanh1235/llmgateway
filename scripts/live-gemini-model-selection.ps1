@@ -238,7 +238,8 @@ try {
     Write-Host "Account: $AccountId"
     Write-Host "Model A: $($selectedA.id) -> discovered:${AccountId}:$($selectedA.external_id)"
     Write-Host "Model B: $($selectedB.id) -> discovered:${AccountId}:$($selectedB.external_id)"
-    Write-Host "Catalog mode: $($(if ($SkipRefresh) { 'persisted-after-restart' } else { 'live-refresh' }))"
+    $catalogMode = if ($SkipRefresh) { "persisted-after-restart" } else { "live-refresh" }
+    Write-Host "Catalog mode: $catalogMode"
     Write-Host "Chromium running: false"
 } finally {
     Cleanup
