@@ -5,6 +5,7 @@ use crate::{
     deepseek_web_transport::DeepSeekWebHttpAdapter,
     gemini_web_transport::GeminiWebHttpAdapter,
     qwen_web_transport::QwenWebHttpAdapter,
+    vision,
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
@@ -318,6 +319,10 @@ pub trait BrowserProviderAdapter: Send + Sync {
     }
 
     fn supports_model_discovery(&self) -> bool {
+        false
+    }
+
+    fn supports_image_input(&self) -> bool {
         false
     }
 
@@ -726,6 +731,16 @@ impl BrowserProviderRegistry {
 
     pub fn supports(&self, kind: &str) -> bool {
         self.adapters.contains_key(kind)
+    }
+
+    pub fn supports_image_input(&self, provider_kind: &str) -> bool {
+        self.adapters
+            .get(provider_kind)
+            .is_some_and(|adapter| adapter.supports_image_input())
+            || self
+                .direct_adapters
+                .get(provider_kind)
+                .is_some_and(|adapter| adapter.supports_image_input())
     }
 
     pub fn supports_native_conversation_affinity(&self, provider_kind: &str) -> bool {
@@ -1324,22 +1339,42 @@ impl BrowserProviderRegistry {
             });
         }
 
+        let requires_image = vision::request_has_image(body);
+        if requires_image && !browser_adapter.supports_image_input() {
+            return Err(BrowserProviderError::UnsupportedAdapter(format!(
+                "{} image input",
+                browser_adapter.adapter_id()
+            )));
+        }
+
         let Some(store) = browser_session_runtime::get() else {
             return Err(BrowserProviderError::SessionUnavailable {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
             });
         };
-        let session = store
+        let mut session = store
             .session(&binding.session)
             .await
             .map_err(|_| BrowserProviderError::SessionUnavailable {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
             })?;
+        if requires_image && session.enabled && session.status != "ready" {
+            let _ = self.ensure_cdp_session_ready(&binding.session).await;
+            session = store
+                .session(&binding.session)
+                .await
+                .map_err(|_| BrowserProviderError::SessionUnavailable {
+                    account_id: account.id.clone(),
+                    session_id: binding.session.clone(),
+                })?;
+        }
 
         let direct_adapter = self.direct_adapter(&provider.kind, &binding).cloned();
-        let direct_snapshot_ready = direct_adapter.is_some()
+        let direct_snapshot_ready = direct_adapter
+            .as_ref()
+            .is_some_and(|adapter| !requires_image || adapter.supports_image_input())
             && self.auth_material_available(&binding.session);
         let auth_snapshot_ready = (provider.kind == "browser-http"
             && self.auth_material_available(&binding.session))
@@ -2681,6 +2716,10 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
 
     fn is_cdp(&self) -> bool {
         true
+    }
+
+    fn supports_image_input(&self) -> bool {
+        matches!(self.spec.kind, "browser-chatgpt" | "browser-gemini")
     }
 
     fn supports_native_conversation_affinity(&self) -> bool {
