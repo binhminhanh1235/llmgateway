@@ -295,6 +295,27 @@ impl GeminiWebHttpAdapter {
             .provider_conversation_state(thread_id, &request.provider.id, &request.account.id)
             .await
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        let needs_resync = state
+            .as_ref()
+            .and_then(|value| value.get("needs_resync"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let browser_conversation_exists = if state.is_none() {
+            store
+                .provider_conversation(thread_id, &request.provider.id, &request.account.id)
+                .await
+                .map_err(|error| BrowserProviderError::Transport(error.to_string()))?
+                .is_some()
+        } else {
+            false
+        };
+        if needs_resync || browser_conversation_exists {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "direct_state_unsynced".into(),
+                message: "Gemini native conversation state was advanced by the browser adapter; keep this thread on CDP to preserve exact conversation affinity".into(),
+            });
+        }
         Ok(state
             .and_then(|value| value.get("metadata").cloned())
             .unwrap_or_else(default_metadata))
