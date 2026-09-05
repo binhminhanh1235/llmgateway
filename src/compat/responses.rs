@@ -495,9 +495,13 @@ fn translate_message_content(content: &Value) -> Value {
                 "type":"text",
                 "text":part.get("text").and_then(Value::as_str).unwrap_or("")
             })),
-            Some("input_image") => part
+            Some("input_image") | Some("image_url") => part
                 .get("image_url")
-                .and_then(Value::as_str)
+                .and_then(|image_url| {
+                    image_url
+                        .as_str()
+                        .or_else(|| image_url.get("url").and_then(Value::as_str))
+                })
                 .map(|url| json!({"type":"image_url","image_url":{"url":url}})),
             _ => None,
         })
