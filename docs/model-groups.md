@@ -58,7 +58,7 @@ llmgateway rejects:
 
 ## Observability
 
-`POST /_llmgateway/routing/explain` includes `group_tier_priority` for every candidate in a tiered group. This makes fallback order visible without exposing provider-private model metadata.
+`POST /_llmgateway/routes/explain` includes `group_tier_priority` for every candidate in a tiered group. This makes fallback order visible without exposing provider-private model metadata.
 
 ## Future extensions
 
