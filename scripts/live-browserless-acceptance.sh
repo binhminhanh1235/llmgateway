@@ -93,7 +93,7 @@ path, expr = sys.argv[1], sys.argv[2]
 with open(path, encoding="utf-8") as f:
     value = json.load(f)
 safe = {"bool": bool, "int": int, "str": str, "any": any, "len": len}
-result = eval(expr, {"__builtins__": {}}, {"x": value, **safe})
+result = eval(expr, {"__builtins__": safe}, {"x": value})
 if isinstance(result, bool):
     print("true" if result else "false")
 elif result is None:
@@ -113,7 +113,7 @@ path, expr, message = sys.argv[1:4]
 with open(path, encoding="utf-8") as f:
     x = json.load(f)
 safe = {"bool": bool, "int": int, "str": str, "any": any, "len": len}
-if not eval(expr, {"__builtins__": {}}, {"x": x, **safe}):
+if not eval(expr, {"__builtins__": safe}, {"x": x}):
     raise SystemExit("ACCEPTANCE FAILED: " + message + "\n" + json.dumps(x, indent=2))
 PY
 }
@@ -286,7 +286,7 @@ if [[ "$SKIP_STREAM" -eq 0 ]]; then
   assert_python "$TMP_DIR/affinity-after-stream.json" "x.get('mapping',{}).get('conversation_url') == '$URL_A'" "streaming turn changed native conversation"
   assert_python "$TMP_DIR/affinity-after-stream.json" "int(x.get('mapping',{}).get('last_synced_ordinal',0)) > $ORD_STREAM" "streaming sync ordinal did not advance"
   api GET "/v1/threads/$THREAD_A" "$TMP_DIR/thread-after-stream.json"
-  assert_python "$TMP_DIR/thread-after-stream.json" "not any(m.get('role') == 'assistant' and not str(m.get('content') or '').strip() for m in x.get('messages',[]))" "streaming persisted an empty/stale assistant message"
+  assert_python "$TMP_DIR/thread-after-stream.json" "not any(m.get('role') == 'assistant' and not str(m.get('content') or (m.get('message') or {}).get('content') or '').strip() for m in x.get('messages',[]))" "streaming persisted an empty/stale assistant message"
 fi
 
 if [[ "$TEST_CANCELLATION" -eq 1 ]]; then
