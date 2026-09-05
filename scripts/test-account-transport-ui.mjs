@@ -12,6 +12,9 @@ requireText('"direct-http": "Direct HTTP"', "UI must distinguish Direct HTTP eff
 requireText('"browser-fallback": "Browser fallback"', "UI must distinguish browser fallback");
 requireText('"unavailable": "Unavailable"', "UI must expose unavailable effective transport");
 requireText("capability.supported === true", "UI must disable unsupported browserless controls");
+requireText('class="account-transport-effective ${effectiveTone}"', "UI must render effective transport as a dedicated status panel");
+requireText("Effective transport", "UI must label the effective transport explicitly");
+requireText("account-transport-status-icon", "UI must expose a compact effective transport status indicator");
 requireText("checkbox.checked = !desired", "UI must restore toggle state after update failure");
 requireText("/_llmgateway/accounts/", "UI must use the provider-neutral account transport endpoint");
 
