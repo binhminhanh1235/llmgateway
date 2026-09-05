@@ -149,8 +149,32 @@ def envelope_for(expression, target_id):
 
     if 'const __operation = "chat_stream_start"' in expression:
         request = expression_request(expression)
+        current_url = target_url_for(target_id)
+        parsed_current = urlparse(current_url)
+        if (
+            provider == "gemini"
+            and parsed_current.hostname == "gemini.google.com"
+            and parsed_current.path.startswith("/app/ci-thread-")
+        ):
+            baseline_marker = "const before = await captureResponseBaseline(context);"
+            submit_marker = "send.click();"
+            baseline_at = expression.find(baseline_marker)
+            submit_at = expression.find(submit_marker)
+            if baseline_at < 0 or submit_at < 0 or baseline_at > submit_at:
+                return {
+                    "meta": meta,
+                    "probe": probe,
+                    "error": {
+                        "code": "adapter_incompatible",
+                        "message": "Gemini reopened native target lost history-before-submit ordering",
+                    },
+                }
+            append_marker(
+                "recovery-history-order.log",
+                f"target={target_id} url={current_url} baseline_at={baseline_at} submit_at={submit_at}",
+            )
         append_marker("browser-requests.jsonl", json.dumps({"target_id": target_id, "messages": request.get("messages", [])}, ensure_ascii=False))
-        append_marker("stream-debug.log", f"start provider={provider} target={target_id} url={target_url_for(target_id)}")
+        append_marker("stream-debug.log", f"start provider={provider} target={target_id} url={current_url}")
         prompt_text = json.dumps(request.get("messages", []), ensure_ascii=False)
         if "force-browser-stream-fallback" in prompt_text:
             write_marker("stream-start-failed", "forced")
