@@ -1235,12 +1235,16 @@ routes = ["api"]
 
         assert!(!group.contains_key("routes"));
         let tiers = group["tiers"].as_array_of_tables().unwrap();
-        assert!(!tiers[0]["routes"]
+        assert!(!tiers
+            .get(0)
+            .unwrap()["routes"]
             .as_array()
             .unwrap()
             .iter()
             .any(|value| value.as_str() == Some("new-route")));
-        assert!(tiers[1]["routes"]
+        assert!(tiers
+            .get(1)
+            .unwrap()["routes"]
             .as_array()
             .unwrap()
             .iter()
