@@ -108,7 +108,7 @@ use tracing_subscriber::EnvFilter;
 use ui::{
     account_control_css, account_control_js, account_intelligence_css, account_intelligence_js,
     app_css, app_js, browser_control_css, browser_control_js, index as ui_index,
-    trace_console_css, trace_console_js,
+    model_groups_css, model_groups_js, trace_console_css, trace_console_js,
 };
 use usage_api::{get_account_usage, get_usage, reset_account_quota};
 
@@ -286,6 +286,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui/account-intelligence.js", get(account_intelligence_js))
         .route("/ui/browser-control.css", get(browser_control_css))
         .route("/ui/browser-control.js", get(browser_control_js))
+        .route("/ui/model-groups.css", get(model_groups_css))
+        .route("/ui/model-groups.js", get(model_groups_js))
         .route("/ui/trace-console.css", get(trace_console_css))
         .route("/ui/trace-console.js", get(trace_console_js))
         .route("/v1/chat/completions", post(openai_chat))
