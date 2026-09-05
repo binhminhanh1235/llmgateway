@@ -87,7 +87,7 @@ async fn refresh_session_browser_models(state: &AppState, session_id: &str) {
         let Some(provider) = config.provider(&account.provider) else {
             continue;
         };
-        if !registry.supports_model_discovery(&provider.kind) {
+        if !registry.account_supports_model_discovery(&provider.kind, &account.id) {
             continue;
         }
         if let Err(error) = state.catalog.refresh_account(&account.id).await {

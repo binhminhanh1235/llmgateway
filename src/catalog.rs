@@ -233,7 +233,12 @@ impl ModelCatalog {
 
         let browser_discovery = if provider.is_browser() {
             browser_provider_runtime::get()
-                .filter(|registry| registry.supports_model_discovery(&provider.kind))
+                .filter(|registry| {
+                    registry.account_supports_model_discovery(
+                        &provider.kind,
+                        account_id,
+                    )
+                })
         } else {
             None
         };
@@ -360,7 +365,12 @@ impl ModelCatalog {
                 .filter(|provider| provider.is_browser())
                 .and_then(|provider| {
                     browser_provider_runtime::get()
-                        .map(|registry| registry.supports_model_discovery(&provider.kind))
+                        .map(|registry| {
+                            registry.account_supports_model_discovery(
+                                &provider.kind,
+                                &account.id,
+                            )
+                        })
                 })
                 .unwrap_or(false);
             result.push(AccountView {
