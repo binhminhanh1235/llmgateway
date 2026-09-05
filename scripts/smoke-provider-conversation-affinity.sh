@@ -107,6 +107,20 @@ export PROFILE_DIR
 
 curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-affinity/driver/verify   "${AUTH[@]}" >/tmp/llmgateway-provider-conversation-verify.json
 
+curl -fsS \
+  http://127.0.0.1:7331/_llmgateway/browser-accounts/gemini-affinity/runtime \
+  "${AUTH[@]}" >/tmp/llmgateway-provider-runtime.json
+
+python3 <<'PY'
+import json
+with open("/tmp/llmgateway-provider-runtime.json", encoding="utf-8") as f:
+    runtime = json.load(f)
+assert runtime["account_id"] == "gemini-affinity", runtime
+assert runtime["browser_running"] is True, runtime
+assert runtime["effective_transport"] == "browser-cdp", runtime
+assert runtime["auth_snapshot_available"] is False, runtime
+PY
+
 THREAD_A=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${JSON[@]}"   -d '{"title":"Affinity A","model":"llmgateway-auto"}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
 curl -fsS -D /tmp/affinity-a1.headers -o /tmp/affinity-a1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-one","stream":true}'
@@ -120,12 +134,29 @@ THREAD_B=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${
 curl -fsS -D /tmp/affinity-b1.headers -o /tmp/affinity-b1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_B/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"beta-one","stream":true}'
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-b1.headers
 
+curl -fsS \
+  "http://127.0.0.1:7331/_llmgateway/threads/$THREAD_A/browser-affinity/gemini-affinity" \
+  "${AUTH[@]}" >/tmp/llmgateway-affinity-a.json
+curl -fsS \
+  "http://127.0.0.1:7331/_llmgateway/threads/$THREAD_B/browser-affinity/gemini-affinity" \
+  "${AUTH[@]}" >/tmp/llmgateway-affinity-b.json
+
 python3 <<'PY'
 import json
 import os
 import sqlite3
 
 profile = os.environ["PROFILE_DIR"]
+
+with open("/tmp/llmgateway-affinity-a.json", encoding="utf-8") as f:
+    affinity_a = json.load(f)
+with open("/tmp/llmgateway-affinity-b.json", encoding="utf-8") as f:
+    affinity_b = json.load(f)
+assert affinity_a["mapping"]["conversation_url"] == "https://gemini.google.com/app/ci-thread-1", affinity_a
+assert affinity_b["mapping"]["conversation_url"] == "https://gemini.google.com/app/ci-thread-2", affinity_b
+assert affinity_a["state"]["present"] is False, affinity_a
+assert "conduit_token" not in affinity_a["state"], affinity_a
+assert "metadata" not in affinity_a["state"], affinity_a
 
 with open(os.path.join(profile, "opened-targets.log"), encoding="utf-8") as f:
     opened = [line.strip() for line in f if line.strip()]
