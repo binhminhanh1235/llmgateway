@@ -1735,18 +1735,20 @@ impl CdpBrowserAdapter {
                     last_progress = Instant::now();
                 }
 
+                let poll_done = poll.done;
+                let mut encoded_events = Vec::with_capacity(poll.events.len());
                 if !poll.events.is_empty() {
                     saw_event = true;
                     last_progress = Instant::now();
-                    for event in poll.events {
-                        let has_assistant_output = browser_stream_event_has_assistant_output(&event);
+                    for event in &poll.events {
+                        let has_assistant_output = browser_stream_event_has_assistant_output(event);
                         if !has_assistant_output {
                             warn!(event = %event, "browser stream event has no assistant output");
                         }
                         saw_assistant_output |= has_assistant_output;
-                        match serde_json::to_string(&event) {
+                        match serde_json::to_string(event) {
                             Ok(data) => {
-                                yield Ok(Bytes::from(format!("data: {data}\n\n")));
+                                encoded_events.push(Bytes::from(format!("data: {data}\n\n")));
                             }
                             Err(error) => {
                                 warn!(%error, "browser stream event could not be serialized");
@@ -1757,7 +1759,7 @@ impl CdpBrowserAdapter {
                     }
                 }
 
-                if poll.done {
+                if poll_done {
                     if !saw_assistant_output {
                         warn!("browser stream completed without assistant output");
                         yield Err(std::io::Error::other(
@@ -1781,9 +1783,26 @@ impl CdpBrowserAdapter {
                             );
                         }
                     }
+
+                    // Once the provider reports done, finish browser-side cleanup before exposing
+                    // the logical terminal event. Some OpenAI-compatible clients stop reading as
+                    // soon as finish_reason becomes non-null. Emitting the final event and [DONE]
+                    // in one body chunk prevents that normal behavior from looking like a
+                    // downstream cancellation and avoids cancelling an already-finished provider.
                     cleanup.complete().await;
-                    yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
+                    let terminal_len = encoded_events.iter().map(|bytes| bytes.len()).sum::<usize>()
+                        + b"data: [DONE]\n\n".len();
+                    let mut terminal = Vec::with_capacity(terminal_len);
+                    for bytes in encoded_events {
+                        terminal.extend_from_slice(&bytes);
+                    }
+                    terminal.extend_from_slice(b"data: [DONE]\n\n");
+                    yield Ok(Bytes::from(terminal));
                     break;
+                }
+
+                for bytes in encoded_events {
+                    yield Ok(bytes);
                 }
 
                 sleep(Duration::from_millis(80)).await;
