@@ -15,7 +15,7 @@ use reqwest::{
     header::{
         ACCEPT, ACCEPT_LANGUAGE, AUTHORIZATION, CONTENT_TYPE, COOKIE, ORIGIN, REFERER, USER_AGENT,
     },
-    Client, Response,
+    Client, Response, Url,
 };
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
@@ -392,6 +392,7 @@ impl ChatGptWebHttpAdapter {
     async fn native_conversation(
         &self,
         request: &BrowserAdapterRequest,
+        session: &ChatGptSession,
     ) -> Result<NativeConversation, BrowserProviderError> {
         let Some(thread_id) = request.thread_id.as_deref() else {
             return Ok(NativeConversation::default());
@@ -399,26 +400,108 @@ impl ChatGptWebHttpAdapter {
         let Some(store) = conversation_runtime::get() else {
             return Ok(NativeConversation::default());
         };
+
         let state = store
             .provider_conversation_state(thread_id, &request.provider.id, &request.account.id)
             .await
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-        let Some(state) = state else {
-            return Ok(NativeConversation::default());
-        };
-        Ok(NativeConversation {
-            conversation_id: state
+        let needs_resync = state
+            .as_ref()
+            .and_then(|value| value.get("needs_resync"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        if let Some(state) = state.as_ref() {
+            let conversation_id = state
                 .get("conversation_id")
                 .and_then(Value::as_str)
-                .map(str::to_string),
-            parent_message_id: state
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let parent_message_id = state
                 .get("parent_message_id")
                 .and_then(Value::as_str)
-                .map(str::to_string),
-            conduit_token: state
-                .get("conduit_token")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            if !needs_resync && conversation_id.is_some() && parent_message_id.is_some() {
+                return Ok(NativeConversation {
+                    conversation_id,
+                    parent_message_id,
+                    conduit_token: state
+                        .get("conduit_token")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                });
+            }
+        }
+
+        let provider_conversation = store
+            .provider_conversation(thread_id, &request.provider.id, &request.account.id)
+            .await
+            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        let Some(provider_conversation) = provider_conversation else {
+            return Ok(NativeConversation::default());
+        };
+        let conversation_id = chatgpt_conversation_id(&provider_conversation.conversation_url)
+            .ok_or_else(|| BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "direct_state_unsynced".into(),
+                message: "Stored ChatGPT conversation URL cannot be resynchronized by the direct transport".into(),
+            })?;
+
+        let target_path = format!("/backend-api/conversation/{conversation_id}");
+        let response = self
+            .base_request(
+                session,
+                reqwest::Method::GET,
+                &format!("{CHATGPT_BASE}{target_path}"),
+                &target_path,
+            )
+            .header(ACCEPT, "application/json")
+            .header(REFERER, format!("{CHATGPT_BASE}/c/{conversation_id}"))
+            .timeout(Duration::from_millis(
+                request.binding.probe_timeout_ms.unwrap_or(8_000).max(3_000),
+            ))
+            .send()
+            .await
+            .map_err(|error| {
+                preflight_error(&request.account.id, "direct_state_unsynced", error)
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: if matches!(status.as_u16(), 401 | 403) {
+                    "login_required".into()
+                } else {
+                    "direct_state_unsynced".into()
+                },
+                message: format!(
+                    "ChatGPT conversation state resync returned HTTP {status}"
+                ),
+            });
+        }
+        let detail: Value = response
+            .json()
+            .await
+            .map_err(|error| {
+                preflight_error(&request.account.id, "direct_state_unsynced", error)
+            })?;
+        let parent_message_id = detail
+            .get("current_node")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "direct_state_unsynced".into(),
+                message: "ChatGPT conversation detail returned no current_node for direct continuation".into(),
+            })?
+            .to_string();
+
+        Ok(NativeConversation {
+            conversation_id: Some(conversation_id),
+            parent_message_id: Some(parent_message_id),
+            conduit_token: None,
         })
     }
 
@@ -1055,7 +1138,7 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
                 Duration::from_millis(request.binding.probe_timeout_ms.unwrap_or(8_000).max(3_000)),
             )
             .await?;
-        let native = self.native_conversation(&request).await?;
+        let native = self.native_conversation(&request, &session).await?;
         let prompt = serialize_prompt(&request.body, native.conversation_id.is_some())?;
         let user_message = chatgpt_user_message(&prompt);
         let partial_query = partial_query(&user_message);
@@ -1129,6 +1212,22 @@ fn diagnostics(
         target_url_prefix: Some(format!("{CHATGPT_BASE}/")),
         configured_models: binding.models.clone(),
     }
+}
+
+fn chatgpt_conversation_id(raw: &str) -> Option<String> {
+    let url = Url::parse(raw).ok()?;
+    if url.host_str() != Some(CHATGPT_HOST) {
+        return None;
+    }
+    let segments = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let index = segments.iter().position(|segment| *segment == "c")?;
+    segments
+        .get(index + 1)
+        .filter(|value| !value.is_empty())
+        .map(|value| (*value).to_string())
 }
 
 fn preflight_error(
