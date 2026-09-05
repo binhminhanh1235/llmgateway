@@ -62,11 +62,11 @@ pub async fn verify_chromium_login(
         Ok(mut verification) => {
             if verification.authenticated && verification.auth_material_captured {
                 refresh_session_browser_models(&state, &session_id).await;
-                if session_can_release_browser(&state, &session_id).await {
-                    if let Ok(status) = driver.stop(&session_id).await {
-                        verification.browser_closed_after_capture = true;
-                        verification.status = status;
-                    }
+                if let Some(status) =
+                    release_session_browser_if_direct_ready(&state, &session_id).await
+                {
+                    verification.browser_closed_after_capture = true;
+                    verification.status = status;
                 }
             }
             json_response(StatusCode::OK, json!(verification), None)
@@ -99,6 +99,17 @@ async fn refresh_session_browser_models(state: &AppState, session_id: &str) {
             );
         }
     }
+}
+
+pub(crate) async fn release_session_browser_if_direct_ready(
+    state: &AppState,
+    session_id: &str,
+) -> Option<crate::chromium_driver::ChromiumSessionStatus> {
+    if !session_can_release_browser(state, session_id).await {
+        return None;
+    }
+    let driver = driver()?;
+    driver.stop(session_id).await.ok()
 }
 
 async fn session_can_release_browser(state: &AppState, session_id: &str) -> bool {
