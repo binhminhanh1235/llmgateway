@@ -1298,13 +1298,16 @@ impl BrowserProviderRegistry {
                 .get(&account.id)
                 .is_some_and(|models| models.contains(&route.model))
                 && !binding.models.iter().any(|model| model == &route.model);
-            let safe_fallback_candidate = direct_result.as_ref().err().is_some_and(|error| {
-                direct_error_allows_browser_fallback(
-                    error,
-                    dynamic_model,
-                    browser_adapter.is_cdp(),
-                )
-            });
+            let direct_failure_can_open_browser = provider.kind != "browser-chatgpt"
+                || matches!(binding.transport_mode, BrowserTransportMode::Auto);
+            let safe_fallback_candidate = direct_failure_can_open_browser
+                && direct_result.as_ref().err().is_some_and(|error| {
+                    direct_error_allows_browser_fallback(
+                        error,
+                        dynamic_model,
+                        browser_adapter.is_cdp(),
+                    )
+                });
             let browser_was_live = safe_fallback_candidate
                 && self.cdp_session_live(&binding.session).await;
             let safe_browser_fallback = if safe_fallback_candidate {
@@ -4256,8 +4259,11 @@ mod browser_transport_policy_tests {
 
         let chatgpt = registry.transport_capabilities("browser-chatgpt");
         assert!(chatgpt.supported);
-        assert_eq!(chatgpt.recommended_mode, Some(BrowserTransportMode::Auto));
-        assert!(!chatgpt.supports_direct_model_discovery);
+        assert_eq!(
+            chatgpt.recommended_mode,
+            Some(BrowserTransportMode::HttpPreferred)
+        );
+        assert!(chatgpt.supports_direct_model_discovery);
         assert!(chatgpt.supports_native_conversation);
 
         let qwen = registry.transport_capabilities("browser-qwen");
