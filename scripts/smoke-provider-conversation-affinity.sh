@@ -135,6 +135,19 @@ curl -fsS -D /tmp/affinity-b1.headers -o /tmp/affinity-b1.json   -X POST "http:/
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-b1.headers
 
 curl -fsS \
+  http://127.0.0.1:7331/_llmgateway/browser-accounts/gemini-affinity/runtime \
+  "${AUTH[@]}" >/tmp/llmgateway-provider-runtime-after-chat.json
+python3 <<'PY'
+import json
+with open("/tmp/llmgateway-provider-runtime-after-chat.json", encoding="utf-8") as f:
+    runtime = json.load(f)
+last = runtime.get("last_execution")
+assert last is not None, runtime
+assert last["transport"] == "browser-cdp", runtime
+assert last["browser_fallback"] is False, runtime
+PY
+
+curl -fsS \
   "http://127.0.0.1:7331/_llmgateway/threads/$THREAD_A/browser-affinity/gemini-affinity" \
   "${AUTH[@]}" >/tmp/llmgateway-affinity-a.json
 curl -fsS \

@@ -71,6 +71,7 @@ pub async fn browser_account_runtime_diagnostics(
     let adapter = registry
         .adapter_diagnostics(&provider.kind, &account_id)
         .await;
+    let last_execution = registry.last_transport_execution(&account_id).await;
     let auth_snapshot_available = browser_auth_runtime::get()
         .is_some_and(|vault| vault.contains(&session_id));
     let browser = match chromium_driver_runtime::get() {
@@ -110,6 +111,7 @@ pub async fn browser_account_runtime_diagnostics(
             },
             "auth_snapshot_available": auth_snapshot_available,
             "adapter": adapter,
+            "last_execution": last_execution,
             "browser": browser,
             "effective_transport": effective_transport,
             "direct_ready": direct_ready,

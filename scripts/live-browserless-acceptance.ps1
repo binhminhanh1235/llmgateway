@@ -129,6 +129,15 @@ function Assert-DirectReady([object]$Runtime) {
     ) "unexpected direct adapter '$($Runtime.adapter.adapter_id)'"
 }
 
+function Assert-DirectExecution([object]$Runtime, [string]$Phase) {
+    Assert-True ($null -ne $Runtime.last_execution) "no execution transport telemetry after $Phase"
+    Assert-True ([string]$Runtime.last_execution.transport -eq "direct-http") "turn used '$($Runtime.last_execution.transport)' after $Phase instead of direct-http"
+    Assert-True (-not [bool]$Runtime.last_execution.browser_fallback) "turn used browser fallback after $Phase"
+    Assert-True (
+        [string]$Runtime.last_execution.adapter_id -in @("gemini-web-http", "chatgpt-web-http")
+    ) "turn used unexpected adapter '$($Runtime.last_execution.adapter_id)' after $Phase"
+}
+
 function Mapping-Url([object]$Affinity) {
     if ($null -eq $Affinity.mapping) {
         return ""
@@ -189,7 +198,8 @@ try {
     $jsonA1 = $responseA1.Content | ConvertFrom-Json
     $assistantA1 = [string]$jsonA1.choices[0].message.content
     Assert-True (-not [string]::IsNullOrWhiteSpace($assistantA1)) "fresh thread returned empty assistant content"
-    $null = Assert-BrowserClosed "fresh thread"
+    $runtimeA1 = Assert-BrowserClosed "fresh thread"
+    Assert-DirectExecution $runtimeA1 "fresh thread"
     $affinityA1 = Get-Affinity $threadA
     Assert-AffinityPresent $affinityA1 "fresh thread"
     $urlA = Mapping-Url $affinityA1
@@ -199,7 +209,8 @@ try {
     $responseA2 = Send-ThreadMessage -ThreadId $threadA -Content "Reply with exactly: browserless-a2"
     $jsonA2 = $responseA2.Content | ConvertFrom-Json
     Assert-True (-not [string]::IsNullOrWhiteSpace([string]$jsonA2.choices[0].message.content)) "second turn returned empty assistant content"
-    $null = Assert-BrowserClosed "same-thread second turn"
+    $runtimeA2 = Assert-BrowserClosed "same-thread second turn"
+    Assert-DirectExecution $runtimeA2 "same-thread second turn"
     $affinityA2 = Get-Affinity $threadA
     Assert-AffinityPresent $affinityA2 "same-thread second turn"
     Assert-True ((Mapping-Url $affinityA2) -eq $urlA) "same local thread switched native conversation: '$urlA' -> '$(Mapping-Url $affinityA2)'"
@@ -210,7 +221,8 @@ try {
     $responseB1 = Send-ThreadMessage -ThreadId $threadB -Content "Reply with exactly: browserless-b1"
     $jsonB1 = $responseB1.Content | ConvertFrom-Json
     Assert-True (-not [string]::IsNullOrWhiteSpace([string]$jsonB1.choices[0].message.content)) "second local thread returned empty assistant content"
-    $null = Assert-BrowserClosed "second local thread"
+    $runtimeB1 = Assert-BrowserClosed "second local thread"
+    Assert-DirectExecution $runtimeB1 "second local thread"
     $affinityB1 = Get-Affinity $threadB
     Assert-AffinityPresent $affinityB1 "second local thread"
     Assert-True ((Mapping-Url $affinityB1) -ne $urlA) "two local threads mapped to the same native conversation"
@@ -223,7 +235,8 @@ try {
         $sse = [string]$streamResponse.Content
         Assert-True ($sse.Contains("data: [DONE]")) "stream ended without OpenAI [DONE]"
         Assert-True ($sse.Contains('"content"')) "stream returned no assistant content delta"
-        $null = Assert-BrowserClosed "streaming turn"
+        $runtimeStream = Assert-BrowserClosed "streaming turn"
+        Assert-DirectExecution $runtimeStream "streaming turn"
         Start-Sleep -Milliseconds 300
         $afterStream = Get-Affinity $threadA
         Assert-AffinityPresent $afterStream "streaming turn"

@@ -137,6 +137,17 @@ assert_browser_closed() {
   assert_python "$output" "not bool(x.get('browser_running'))" "Chromium is still running after $phase"
 }
 
+assert_direct_execution() {
+  local phase="$1"
+  local output="$TMP_DIR/runtime-direct.json"
+  assert_browser_closed "$phase"
+  runtime_file "$output"
+  assert_python "$output" "x.get('last_execution') is not None" "no execution transport telemetry after $phase"
+  assert_python "$output" "x.get('last_execution',{}).get('transport') == 'direct-http'" "turn did not use direct-http after $phase"
+  assert_python "$output" "not bool(x.get('last_execution',{}).get('browser_fallback'))" "turn used browser fallback after $phase"
+  assert_python "$output" "x.get('last_execution',{}).get('adapter_id') in ['gemini-web-http','chatgpt-web-http']" "turn used an unexpected adapter after $phase"
+}
+
 create_thread() {
   local title="$1"
   local output="$TMP_DIR/thread-create.json"
@@ -231,7 +242,7 @@ create_thread "Browserless acceptance A"
 THREAD_A="$LAST_THREAD_ID"
 send_message "$THREAD_A" "Reply with exactly: browserless-a1" false "$TMP_DIR/a1.json" "$TMP_DIR/a1.headers"
 assert_python "$TMP_DIR/a1.json" "bool((x.get('choices') or [{}])[0].get('message',{}).get('content'))" "fresh thread returned empty assistant content"
-assert_browser_closed "fresh thread"
+assert_direct_execution "fresh thread"
 affinity_file "$THREAD_A" "$TMP_DIR/affinity-a1.json"
 assert_python "$TMP_DIR/affinity-a1.json" "x.get('mapping') is not None and bool(x['mapping'].get('conversation_url'))" "fresh thread has no native mapping"
 assert_python "$TMP_DIR/affinity-a1.json" "int(x['mapping'].get('last_synced_ordinal',0)) > 0" "fresh thread mapping was not synced"
@@ -241,7 +252,7 @@ ORD_A1="$(json_eval "$TMP_DIR/affinity-a1.json" "int(x['mapping']['last_synced_o
 step "Scenario 2/4: same local thread keeps the same native conversation"
 send_message "$THREAD_A" "Reply with exactly: browserless-a2" false "$TMP_DIR/a2.json" "$TMP_DIR/a2.headers"
 assert_python "$TMP_DIR/a2.json" "bool((x.get('choices') or [{}])[0].get('message',{}).get('content'))" "second turn returned empty assistant content"
-assert_browser_closed "same-thread second turn"
+assert_direct_execution "same-thread second turn"
 affinity_file "$THREAD_A" "$TMP_DIR/affinity-a2.json"
 assert_python "$TMP_DIR/affinity-a2.json" "x.get('mapping',{}).get('conversation_url') == '$URL_A'" "same thread switched native conversation"
 assert_python "$TMP_DIR/affinity-a2.json" "int(x.get('mapping',{}).get('last_synced_ordinal',0)) > $ORD_A1" "same-thread sync ordinal did not advance"
@@ -251,7 +262,7 @@ create_thread "Browserless acceptance B"
 THREAD_B="$LAST_THREAD_ID"
 send_message "$THREAD_B" "Reply with exactly: browserless-b1" false "$TMP_DIR/b1.json" "$TMP_DIR/b1.headers"
 assert_python "$TMP_DIR/b1.json" "bool((x.get('choices') or [{}])[0].get('message',{}).get('content'))" "second local thread returned empty assistant content"
-assert_browser_closed "second local thread"
+assert_direct_execution "second local thread"
 affinity_file "$THREAD_B" "$TMP_DIR/affinity-b1.json"
 URL_B="$(json_eval "$TMP_DIR/affinity-b1.json" "x.get('mapping',{}).get('conversation_url','')")"
 [[ -n "$URL_B" && "$URL_B" != "$URL_A" ]] || {
@@ -266,7 +277,7 @@ if [[ "$SKIP_STREAM" -eq 0 ]]; then
   send_message "$THREAD_A" "Reply with exactly: browserless-stream" true "$TMP_DIR/stream.sse" "$TMP_DIR/stream.headers"
   grep -Fq 'data: [DONE]' "$TMP_DIR/stream.sse" || { echo "ACCEPTANCE FAILED: stream ended without [DONE]" >&2; exit 1; }
   grep -Fq '"content"' "$TMP_DIR/stream.sse" || { echo "ACCEPTANCE FAILED: stream returned no assistant delta" >&2; exit 1; }
-  assert_browser_closed "streaming turn"
+  assert_direct_execution "streaming turn"
   sleep 0.3
   affinity_file "$THREAD_A" "$TMP_DIR/affinity-after-stream.json"
   assert_python "$TMP_DIR/affinity-after-stream.json" "x.get('mapping',{}).get('conversation_url') == '$URL_A'" "streaming turn changed native conversation"
