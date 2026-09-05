@@ -1226,6 +1226,7 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
                 let status = match code.as_str() {
                     "login_required" => "login_required",
                     "browser_challenge_required" => "requires_attention",
+                    code if chatgpt_pre_submit_recoverable_code(code) => "browser_fallback_required",
                     _ => "adapter_incompatible",
                 };
                 diagnostics(account_id, binding, status, &message)
@@ -1305,6 +1306,24 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
             synthetic_json_response(&request.route.model, &state.assistant_text)
         }
     }
+}
+
+fn chatgpt_pre_submit_recoverable_code(code: &str) -> bool {
+    matches!(
+        code,
+        "session_bootstrap_failed"
+            | "session_bootstrap_invalid"
+            | "upstream_waf_rejected"
+            | "upstream_rejected"
+            | "sentinel_prepare_failed"
+            | "sentinel_prepare_invalid"
+            | "sentinel_pow_invalid"
+            | "sentinel_pow_failed"
+            | "sentinel_finalize_failed"
+            | "sentinel_finalize_invalid"
+            | "conversation_prepare_failed"
+            | "conversation_prepare_invalid"
+    )
 }
 
 fn diagnostics(
@@ -2422,6 +2441,20 @@ mod tests {
         assert!(payload.get("conversation_id").is_none());
         assert!(payload.get("partial_query").is_none());
         assert_eq!(initial_conduit, None);
+    }
+
+    #[test]
+    fn pre_submit_decode_and_prepare_failures_are_browser_recoverable() {
+        for code in [
+            "session_bootstrap_invalid",
+            "sentinel_prepare_invalid",
+            "sentinel_finalize_invalid",
+            "conversation_prepare_failed",
+            "conversation_prepare_invalid",
+        ] {
+            assert!(chatgpt_pre_submit_recoverable_code(code), "{code}");
+        }
+        assert!(!chatgpt_pre_submit_recoverable_code("post_submit_stream_failed"));
     }
 
     #[test]
