@@ -570,6 +570,15 @@ impl BrowserProviderRegistry {
             .is_some_and(|models| models.contains(model))
     }
 
+    pub fn discovered_models_for_account(&self, account_id: &str) -> Vec<String> {
+        self.discovered_models
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(account_id)
+            .map(|models| models.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     fn auth_material_available(&self, session_id: &str) -> bool {
         browser_auth_runtime::get()
             .is_some_and(|vault| vault.contains(session_id))

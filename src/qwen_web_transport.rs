@@ -1,11 +1,12 @@
 use crate::{
     browser_auth::{BrowserAuthMaterial, BrowserAuthVault},
-    browser_auth_runtime, conversation_runtime,
+    browser_auth_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
         BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
         BROWSER_ADAPTER_CONTRACT_VERSION,
     },
+    browser_provider_runtime, conversation_runtime,
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
@@ -54,7 +55,7 @@ struct QwenFrameUpdate {
 
 #[derive(Debug, Default)]
 struct QwenSseDecoder {
-    buffer: String,
+    buffer: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -100,29 +101,47 @@ impl QwenStreamState {
 }
 
 impl QwenSseDecoder {
-    fn push(&mut self, bytes: &[u8]) -> Vec<QwenFrameUpdate> {
-        self.buffer.push_str(&String::from_utf8_lossy(bytes));
-        self.buffer = self.buffer.replace("\r\n", "\n");
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<QwenFrameUpdate>, String> {
+        self.buffer.extend_from_slice(bytes);
         let mut updates = Vec::new();
-        while let Some(index) = self.buffer.find("\n\n") {
-            let frame = self.buffer[..index].to_string();
-            self.buffer.drain(..index + 2);
-            if let Some(update) = parse_sse_frame(&frame) {
+        while let Some((index, separator_len)) = find_sse_separator(&self.buffer) {
+            let block = self
+                .buffer
+                .drain(..index + separator_len)
+                .collect::<Vec<_>>();
+            let payload = &block[..index];
+            if payload.is_empty() {
+                continue;
+            }
+            let text = std::str::from_utf8(payload)
+                .map_err(|error| format!("Qwen SSE returned invalid UTF-8: {error}"))?;
+            if let Some(update) = parse_sse_frame(text) {
                 updates.push(update);
             }
         }
-        updates
+        Ok(updates)
     }
 
-    fn finish(&mut self) -> Vec<QwenFrameUpdate> {
-        let frame = self.buffer.trim().to_string();
-        self.buffer.clear();
-        if frame.is_empty() {
-            Vec::new()
-        } else {
-            parse_sse_frame(&frame).into_iter().collect()
+    fn finish(&mut self) -> Result<Vec<QwenFrameUpdate>, String> {
+        if self.buffer.iter().all(|byte| byte.is_ascii_whitespace()) {
+            self.buffer.clear();
+            return Ok(Vec::new());
         }
+        let mut tail = self.buffer.clone();
+        tail.extend_from_slice(b"\n\n");
+        self.buffer.clear();
+        self.push(&tail)
     }
+}
+
+fn find_sse_separator(bytes: &[u8]) -> Option<(usize, usize)> {
+    if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+        return Some((index, 4));
+    }
+    bytes
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2))
 }
 
 impl QwenWebHttpAdapter {
@@ -225,6 +244,7 @@ impl QwenWebHttpAdapter {
         let material = self.auth_material(&binding.session, account_id)?;
         let mut attempts = Vec::new();
         let mut saw_waf = false;
+        let mut saw_empty_catalog = false;
 
         for url in [QWEN_MODELS_URL, QWEN_MODELS_V2_URL] {
             let response = self
@@ -264,6 +284,7 @@ impl QwenWebHttpAdapter {
                     if !models.is_empty() {
                         return Ok(models);
                     }
+                    saw_empty_catalog = true;
                 }
             }
 
@@ -287,6 +308,14 @@ impl QwenWebHttpAdapter {
                     "Qwen direct model discovery was rejected by upstream/WAF; compatibility probes exhausted: {detail}"
                 ),
             })
+        } else if saw_empty_catalog {
+            Err(BrowserProviderError::AdapterIncompatible {
+                account_id: account_id.to_string(),
+                code: "model_discovery_empty".into(),
+                message: format!(
+                    "Qwen direct model discovery returned no selectable models: {detail}"
+                ),
+            })
         } else {
             Err(BrowserProviderError::Transport(format!(
                 "Qwen direct model discovery returned no usable catalog: {detail}"
@@ -297,6 +326,7 @@ impl QwenWebHttpAdapter {
     async fn native_conversation(
         &self,
         request: &BrowserAdapterRequest,
+        model: &str,
     ) -> Result<Option<QwenNativeConversation>, BrowserProviderError> {
         let Some(thread_id) = request.thread_id.as_deref() else {
             return Ok(None);
@@ -323,7 +353,7 @@ impl QwenWebHttpAdapter {
             });
         }
 
-        validate_thread_model_affinity(state.as_ref(), &request.route.model).map_err(|message| {
+        validate_thread_model_affinity(state.as_ref(), model).map_err(|message| {
             // Keep this as Transport. Gateway model-binding conflict handling recognizes
             // the message and makes it non-retryable with no cooldown/fallback.
             BrowserProviderError::Transport(message)
@@ -378,10 +408,11 @@ impl QwenWebHttpAdapter {
         &self,
         request: &BrowserAdapterRequest,
         material: &BrowserAuthMaterial,
+        model: &str,
     ) -> Result<String, BrowserProviderError> {
         let body = json!({
             "title": "New Chat",
-            "models": [request.route.model],
+            "models": [model],
             "chat_mode": "normal",
             "chat_type": "t2t",
             "timestamp": Utc::now().timestamp_millis()
@@ -489,8 +520,9 @@ impl QwenWebHttpAdapter {
         chat_id: &str,
         parent_id: Option<&str>,
         prompt: &str,
+        model: &str,
     ) -> Result<Response, BrowserProviderError> {
-        let body = build_chat_payload(chat_id, &request.route.model, parent_id, prompt);
+        let body = build_chat_payload(chat_id, model, parent_id, prompt);
         let url = format!("{QWEN_COMPLETIONS_URL}?chat_id={chat_id}");
         let referer = format!("{QWEN_BASE_URL}/c/{chat_id}");
         let response = self
@@ -518,7 +550,10 @@ impl QwenWebHttpAdapter {
                 message: "Qwen completion returned HTTP 401; login with browser again".into(),
             });
         }
-        if !status.is_success() || !content_type.to_ascii_lowercase().contains("text/event-stream")
+        if !status.is_success()
+            || !content_type
+                .to_ascii_lowercase()
+                .contains("text/event-stream")
         {
             let bytes = response
                 .bytes()
@@ -551,6 +586,7 @@ impl QwenWebHttpAdapter {
         chat_id: &str,
         request_parent_id: Option<&str>,
         stream_state: &QwenStreamState,
+        model: &str,
     ) -> Result<(), BrowserProviderError> {
         let Some(thread_id) = request.thread_id.as_deref() else {
             return Ok(());
@@ -575,7 +611,7 @@ impl QwenWebHttpAdapter {
                 &request.account.id,
                 &json!({
                     "transport": "qwen-http",
-                    "model_external_id": request.route.model,
+                    "model_external_id": model,
                     "chat_id": chat_id,
                     "conversation_id": chat_id,
                     "parent_id": stream_state.parent_id,
@@ -594,22 +630,28 @@ impl QwenWebHttpAdapter {
         response: Response,
         chat_id: String,
         request_parent_id: Option<String>,
+        upstream_model: String,
     ) -> Result<Response, BrowserProviderError> {
         let mut decoder = QwenSseDecoder::default();
         let mut state = QwenStreamState::default();
         let mut upstream = response.bytes_stream();
         while let Some(chunk) = upstream.next().await {
-            let chunk = chunk.map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-            for update in decoder.push(&chunk) {
-                state
-                    .apply(update)
-                    .map_err(|error| BrowserProviderError::Transport(format!("Qwen SSE error: {error}")))?;
+            let chunk =
+                chunk.map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+            let updates = decoder
+                .push(&chunk)
+                .map_err(BrowserProviderError::Transport)?;
+            for update in updates {
+                state.apply(update).map_err(|error| {
+                    BrowserProviderError::Transport(format!("Qwen SSE error: {error}"))
+                })?;
             }
         }
-        for update in decoder.finish() {
-            state
-                .apply(update)
-                .map_err(|error| BrowserProviderError::Transport(format!("Qwen SSE error: {error}")))?;
+        let updates = decoder.finish().map_err(BrowserProviderError::Transport)?;
+        for update in updates {
+            state.apply(update).map_err(|error| {
+                BrowserProviderError::Transport(format!("Qwen SSE error: {error}"))
+            })?;
         }
         state
             .validate_completion()
@@ -619,6 +661,7 @@ impl QwenWebHttpAdapter {
             &chat_id,
             request_parent_id.as_deref(),
             &state,
+            &upstream_model,
         )
         .await?;
 
@@ -647,6 +690,7 @@ impl QwenWebHttpAdapter {
         response: Response,
         chat_id: String,
         request_parent_id: Option<String>,
+        upstream_model: String,
     ) -> Result<Response, BrowserProviderError> {
         let request = request.clone();
         let model = request.route.model.clone();
@@ -667,7 +711,14 @@ impl QwenWebHttpAdapter {
                         return;
                     }
                 };
-                for update in decoder.push(&chunk) {
+                let updates = match decoder.push(&chunk) {
+                    Ok(updates) => updates,
+                    Err(error) => {
+                        yield Err(std::io::Error::other(format!("Qwen SSE decode error: {error}")));
+                        return;
+                    }
+                };
+                for update in updates {
                     let delta = match state.apply(update) {
                         Ok(delta) => delta,
                         Err(error) => {
@@ -699,7 +750,14 @@ impl QwenWebHttpAdapter {
                 }
             }
 
-            for update in decoder.finish() {
+            let updates = match decoder.finish() {
+                Ok(updates) => updates,
+                Err(error) => {
+                    yield Err(std::io::Error::other(format!("Qwen SSE decode error: {error}")));
+                    return;
+                }
+            };
+            for update in updates {
                 let delta = match state.apply(update) {
                     Ok(delta) => delta,
                     Err(error) => {
@@ -739,7 +797,10 @@ impl QwenWebHttpAdapter {
                 &chat_id,
                 request_parent_id.as_deref(),
                 &state,
-            ).await {
+                &upstream_model,
+            )
+            .await
+            {
                 yield Err(std::io::Error::other(error.to_string()));
                 return;
             }
@@ -849,12 +910,13 @@ impl BrowserProviderAdapter for QwenWebHttpAdapter {
         request: BrowserAdapterRequest,
     ) -> Result<Response, BrowserProviderError> {
         let material = self.auth_material(&request.session_id, &request.account.id)?;
-        let native = self.native_conversation(&request).await?;
+        let model = resolve_qwen_model(&request.account.id, &request.route.model);
+        let native = self.native_conversation(&request, &model).await?;
         let prompt = serialize_prompt(&request.body, native.is_some())?;
         let (chat_id, request_parent_id) = if let Some(native) = native {
             (native.chat_id, Some(native.response_id))
         } else {
-            (self.create_chat(&request, &material).await?, None)
+            (self.create_chat(&request, &material, &model).await?, None)
         };
         let upstream = self
             .submit_completion(
@@ -863,6 +925,7 @@ impl BrowserProviderAdapter for QwenWebHttpAdapter {
                 &chat_id,
                 request_parent_id.as_deref(),
                 &prompt,
+                &model,
             )
             .await?;
 
@@ -872,12 +935,38 @@ impl BrowserProviderAdapter for QwenWebHttpAdapter {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            self.streaming_response(&request, upstream, chat_id, request_parent_id)
+            self.streaming_response(&request, upstream, chat_id, request_parent_id, model)
         } else {
-            self.buffered_response(&request, upstream, chat_id, request_parent_id)
+            self.buffered_response(&request, upstream, chat_id, request_parent_id, model)
                 .await
         }
     }
+}
+
+fn resolve_qwen_model(account_id: &str, requested: &str) -> String {
+    let trimmed = requested.trim();
+    if !trimmed.is_empty() && trimmed != "qwen-web-default" {
+        return trimmed.to_string();
+    }
+    if let Some(registry) = browser_provider_runtime::get() {
+        let discovered = registry.discovered_models_for_account(account_id);
+        for flagship in [
+            "qwen3.5-plus",
+            "qwen3.8-max",
+            "qwen3.7-max",
+            "qwen3.6-plus",
+            "qwen3.7-plus",
+            "qwen3.5-omni-plus",
+        ] {
+            if discovered.iter().any(|m| m == flagship) {
+                return flagship.to_string();
+            }
+        }
+        if let Some(first) = discovered.into_iter().next() {
+            return first;
+        }
+    }
+    "qwen3.5-plus".to_string()
 }
 
 fn storage_value(material: &BrowserAuthMaterial, keys: &[&str]) -> Option<String> {
@@ -1010,7 +1099,9 @@ fn serialize_prompt(body: &Value, native: bool) -> Result<String, BrowserProvide
     let messages = body
         .get("messages")
         .and_then(Value::as_array)
-        .ok_or_else(|| BrowserProviderError::InvalidConfig("Qwen request requires messages".into()))?;
+        .ok_or_else(|| {
+            BrowserProviderError::InvalidConfig("Qwen request requires messages".into())
+        })?;
     if native {
         for message in messages.iter().rev() {
             if message.get("role").and_then(Value::as_str) == Some("user") {
@@ -1079,12 +1170,7 @@ fn message_text(content: &Value) -> String {
     }
 }
 
-fn build_chat_payload(
-    chat_id: &str,
-    model: &str,
-    parent_id: Option<&str>,
-    prompt: &str,
-) -> Value {
+fn build_chat_payload(chat_id: &str, model: &str, parent_id: Option<&str>, prompt: &str) -> Value {
     let fid = Uuid::new_v4().to_string();
     let child_id = Uuid::new_v4().to_string();
     let timestamp = Utc::now().timestamp_millis();
@@ -1127,15 +1213,17 @@ fn build_chat_payload(
 }
 
 fn parse_sse_frame(frame: &str) -> Option<QwenFrameUpdate> {
-    let data = frame
-        .lines()
-        .filter_map(|line| line.trim_start().strip_prefix("data:"))
-        .map(str::trim_start)
-        .collect::<Vec<_>>()
-        .join("\n");
-    if data.trim().is_empty() {
+    let mut data_lines = Vec::new();
+    for line in frame.lines() {
+        let line = line.trim_end_matches('\r');
+        if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.strip_prefix(' ').unwrap_or(data));
+        }
+    }
+    if data_lines.is_empty() {
         return None;
     }
+    let data = data_lines.join("\n");
     if data.trim() == "[DONE]" {
         return Some(QwenFrameUpdate {
             done: true,
@@ -1206,7 +1294,10 @@ fn error_message(error: &Value) -> String {
         .to_string()
 }
 
-fn validate_thread_model_affinity(state: Option<&Value>, requested_model: &str) -> Result<(), String> {
+fn validate_thread_model_affinity(
+    state: Option<&Value>,
+    requested_model: &str,
+) -> Result<(), String> {
     let Some(existing_model) = state
         .and_then(|value| value.get("model_external_id"))
         .and_then(Value::as_str)
@@ -1326,13 +1417,20 @@ mod tests {
     #[test]
     fn continuation_payload_uses_previous_response_as_parent() {
         let payload = build_chat_payload("chat-a", "model-a", Some("response-a"), "next");
-        assert_eq!(payload.get("parent_id").and_then(Value::as_str), Some("response-a"));
         assert_eq!(
-            payload.pointer("/messages/0/parentId").and_then(Value::as_str),
+            payload.get("parent_id").and_then(Value::as_str),
             Some("response-a")
         );
         assert_eq!(
-            payload.pointer("/messages/0/parent_id").and_then(Value::as_str),
+            payload
+                .pointer("/messages/0/parentId")
+                .and_then(Value::as_str),
+            Some("response-a")
+        );
+        assert_eq!(
+            payload
+                .pointer("/messages/0/parent_id")
+                .and_then(Value::as_str),
             Some("response-a")
         );
     }
@@ -1369,5 +1467,81 @@ mod tests {
             Some("abc")
         );
         assert_eq!(normalize_token("Bearer xyz").as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn parses_supported_model_catalog_schema_variants() {
+        // QWEN-PROTO-01: {"data": [...]}
+        let m1 = parse_model_catalog(&json!({
+            "data": [{"id": "model-1", "name": "Model 1"}]
+        }));
+        assert_eq!(m1.len(), 1);
+        assert_eq!(m1[0].external_id, "model-1");
+        assert_eq!(m1[0].display_name, "Model 1");
+
+        // {"models": [...]}
+        let m2 = parse_model_catalog(&json!({
+            "models": [{"id": "model-2", "display_name": "Model 2"}]
+        }));
+        assert_eq!(m2.len(), 1);
+        assert_eq!(m2[0].external_id, "model-2");
+        assert_eq!(m2[0].display_name, "Model 2");
+
+        // {"data": {"models": [...]}}
+        let m3 = parse_model_catalog(&json!({
+            "data": {"models": [{"id": "model-3", "label": "Model 3"}]}
+        }));
+        assert_eq!(m3.len(), 1);
+        assert_eq!(m3[0].external_id, "model-3");
+        assert_eq!(m3[0].display_name, "Model 3");
+
+        // Unknown schema fails explicitly without guessing models
+        let unknown = parse_model_catalog(&json!({
+            "unknown_envelope": [{"unsupported": "test"}]
+        }));
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn sse_decoder_handles_fragmentation_utf8_and_multiline_data() {
+        // QWEN-PROTO-02 & QWEN-PROTO-03:
+        // Split UTF-8 Chinese character across chunk boundary and multiple data lines
+        let mut decoder = QwenSseDecoder::default();
+        let chunk_part1 = b"data: {\"choices\":[{\"delta\":{\"content\":\"\xe4\xbd"; // First 2 bytes of 你 (E4 BD A0)
+        let chunk_part2 = b"\xa0\xe5\xa5\xbd\"}}],\"response_id\":\"r1\"}\r\n\r\n"; // Last byte of 你 + 好 (E5 A5 BD)
+
+        let updates1 = decoder.push(chunk_part1).unwrap();
+        assert!(updates1.is_empty(), "Frame is incomplete, no update yet");
+
+        let updates2 = decoder.push(chunk_part2).unwrap();
+        assert_eq!(updates2.len(), 1);
+        assert_eq!(updates2[0].content, "你好");
+        assert_eq!(updates2[0].response_id.as_deref(), Some("r1"));
+
+        // Multiline data: in one event
+        let multiline_event = b"data: {\"choices\":[{\"delta\":{\"content\":\ndata: \"multiline\"}}],\"response_id\":\"r2\"}\n\n";
+        let updates3 = decoder.push(multiline_event).unwrap();
+        assert_eq!(updates3.len(), 1);
+        assert_eq!(updates3[0].content, "multiline");
+
+        // Multiple events in single chunk
+        let multi_event = b"data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\n";
+        let updates4 = decoder.push(multi_event).unwrap();
+        assert_eq!(updates4.len(), 2);
+        assert_eq!(updates4[0].content, "A");
+        assert_eq!(updates4[1].content, "B");
+    }
+
+    #[test]
+    fn resolves_qwen_model_safely() {
+        assert_eq!(
+            resolve_qwen_model("test-account", "qwen3.7-max"),
+            "qwen3.7-max"
+        );
+        assert_eq!(
+            resolve_qwen_model("test-account", "qwen-web-default"),
+            "qwen3.5-plus"
+        );
+        assert_eq!(resolve_qwen_model("test-account", ""), "qwen3.5-plus");
     }
 }
