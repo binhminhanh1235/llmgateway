@@ -325,15 +325,6 @@ impl GeminiWebHttpAdapter {
             .header(COOKIE, &session.cookie_header)
             .form(&[("at", session.access_token.clone()), ("f.req", f_req)])
             .timeout(timeout_duration);
-        if let Some(selected) = selection {
-            upstream = upstream
-                .header(
-                    GEMINI_MODEL_HEADER,
-                    model_header_value(&selected.recipe, &selected.wire_session_id)?,
-                )
-                .header(GEMINI_MODEL_AUX_HEADER_1, "[0]")
-                .header(GEMINI_MODEL_AUX_HEADER_2, "[0,0,0]");
-        }
         if !session.user_agent.trim().is_empty() {
             upstream = upstream.header(USER_AGENT, session.user_agent.trim());
         }
@@ -467,6 +458,15 @@ impl GeminiWebHttpAdapter {
             .timeout(Duration::from_millis(
                 request.binding.response_timeout_ms.unwrap_or(180_000),
             ));
+        if let Some(selected) = selection {
+            upstream = upstream
+                .header(
+                    GEMINI_MODEL_HEADER,
+                    model_header_value(&selected.recipe, &selected.wire_session_id)?,
+                )
+                .header(GEMINI_MODEL_AUX_HEADER_1, "[0]")
+                .header(GEMINI_MODEL_AUX_HEADER_2, "[0,0,0]");
+        }
         if !session.user_agent.trim().is_empty() {
             upstream = upstream.header(USER_AGENT, session.user_agent.trim());
         }
