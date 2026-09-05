@@ -4,7 +4,7 @@ use crate::{
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
         BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
-        BROWSER_ADAPTER_CONTRACT_VERSION,
+        BrowserlessCapabilities, BrowserTransportMode, BROWSER_ADAPTER_CONTRACT_VERSION,
     },
 };
 use async_trait::async_trait;
@@ -845,6 +845,10 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
 
     fn adapter_id(&self) -> &'static str {
         "gemini-web-http"
+    }
+
+    fn browserless_capabilities(&self) -> BrowserlessCapabilities {
+        BrowserlessCapabilities::preferred(BrowserTransportMode::Auto, true, true, true)
     }
 
     fn supports_model_discovery(&self) -> bool {
