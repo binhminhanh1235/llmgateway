@@ -43,7 +43,7 @@ const CHATGPT_CONVERSATION_RESUME_URL: &str =
     "https://chatgpt.com/backend-api/f/conversation/resume";
 const CHATGPT_MODELS_URL: &str =
     "https://chatgpt.com/backend-api/models?iim=false&is_gizmo=false&supports_model_picker_upgrade_presets=true";
-const CHATGPT_ADAPTER_VERSION: &str = "experimental-3";
+const CHATGPT_ADAPTER_VERSION: &str = "experimental-4";
 const CHATGPT_DIRECT_MODEL: &str = "chatgpt-web-default";
 const CHATGPT_WEB_MODEL: &str = "auto";
 const POW_MAX_ATTEMPTS: u32 = 500_000;
@@ -83,7 +83,6 @@ struct CachedPreflight {
 struct NativeConversation {
     conversation_id: Option<String>,
     parent_message_id: Option<String>,
-    conduit_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -559,11 +558,6 @@ impl ChatGptWebHttpAdapter {
                 return Ok(NativeConversation {
                     conversation_id,
                     parent_message_id,
-                    conduit_token: state
-                        .get("conduit_token")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_string),
                 });
             }
         }
@@ -634,8 +628,42 @@ impl ChatGptWebHttpAdapter {
         Ok(NativeConversation {
             conversation_id: Some(conversation_id),
             parent_message_id: Some(parent_message_id),
-            conduit_token: None,
         })
+    }
+
+    fn prepare_payload(
+        request: &BrowserAdapterRequest,
+        native: &NativeConversation,
+        partial_query: &Value,
+        model: &str,
+    ) -> (Value, Option<&'static str>) {
+        let existing_conversation = native.conversation_id.is_some();
+        let mut payload = json!({
+            "action": "next",
+            "fork_from_shared_post": false,
+            "parent_message_id": native.parent_message_id.as_deref().unwrap_or("client-created-root"),
+            "model": model,
+            "client_prepare_state": "none",
+            "client_prepare_dispatch": if existing_conversation { "immediate" } else { "debounced" },
+            "client_prepare_source": if existing_conversation { "context_change" } else { "window_focus" },
+            "timezone_offset_min": -420,
+            "timezone": "Asia/Bangkok",
+            "conversation_mode": {"kind": "primary_assistant"},
+            "system_hints": [],
+            "supports_buffering": true,
+            "supported_encodings": ["v1"],
+            "client_contextual_info": {"app_name": "chatgpt.com"},
+            "history_and_training_disabled": request.thread_id.is_none()
+        });
+        if let Some(conversation_id) = native.conversation_id.as_ref() {
+            payload["conversation_id"] = Value::String(conversation_id.clone());
+            payload["partial_query"] = partial_query.clone();
+        }
+
+        // Current ChatGPT Web uses x-conduit-token:no-token only when preparing
+        // an existing conversation. A new-chat prepare omits the header entirely.
+        let initial_conduit = existing_conversation.then_some("no-token");
+        (payload, initial_conduit)
     }
 
     async fn prepare_conversation(
@@ -648,99 +676,70 @@ impl ChatGptWebHttpAdapter {
         trace_id: &str,
         referer: &str,
     ) -> Result<String, BrowserProviderError> {
-        let mut conduit = native
-            .conduit_token
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "no-token".into());
+        let (payload, initial_conduit) =
+            Self::prepare_payload(request, native, partial_query, model);
 
-        for prepare_state in ["none", "sent", "success"] {
-            let mut payload = json!({
-                "action": "next",
-                "fork_from_shared_post": false,
-                "parent_message_id": native.parent_message_id.as_deref().unwrap_or("client-created-root"),
-                "model": model,
-                "client_prepare_state": prepare_state,
-                "timezone_offset_min": -420,
-                "timezone": "Asia/Bangkok",
-                "conversation_mode": {"kind": "primary_assistant"},
-                "system_hints": [],
-                "supports_buffering": true,
-                "supported_encodings": ["v1"],
-                "client_contextual_info": {"app_name": "chatgpt.com"},
-                "history_and_training_disabled": request.thread_id.is_none()
-            });
-            if let Some(conversation_id) = native.conversation_id.as_ref() {
-                payload["conversation_id"] = Value::String(conversation_id.clone());
-            }
-            if prepare_state != "none" {
-                payload["partial_query"] = partial_query.clone();
-            }
-
-            let response = self
-                .base_request(
-                    session,
-                    reqwest::Method::POST,
-                    CHATGPT_CONVERSATION_PREPARE_URL,
-                    "/backend-api/f/conversation/prepare",
-                )
-                .header(ACCEPT, "*/*")
-                .header(CONTENT_TYPE, "application/json")
-                .header(REFERER, referer)
-                .header("x-conduit-token", &conduit)
-                .header("x-oai-turn-trace-id", trace_id)
-                .timeout(Duration::from_millis(
-                    request.binding.probe_timeout_ms.unwrap_or(8_000).max(3_000),
-                ))
-                .json(&payload)
-                .send()
-                .await
-                .map_err(|error| {
-                    preflight_error(&request.account.id, "conversation_prepare_failed", error)
-                })?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(BrowserProviderError::AdapterIncompatible {
-                    account_id: request.account.id.clone(),
-                    code: "conversation_prepare_failed".into(),
-                    message: format!(
-                        "ChatGPT conversation prepare ({prepare_state}) returned HTTP {status}"
-                    ),
-                });
-            }
-            if let Some(value) = response
-                .headers()
-                .get("x-conduit-token")
-                .and_then(|value| value.to_str().ok())
-                .filter(|value| !value.is_empty())
-            {
-                conduit = value.to_string();
-            }
-            let body = parse_chatgpt_json_response(
-                response,
-                &request.account.id,
-                "conversation_prepare_invalid",
+        let mut builder = self
+            .base_request(
+                session,
+                reqwest::Method::POST,
+                CHATGPT_CONVERSATION_PREPARE_URL,
+                "/backend-api/f/conversation/prepare",
             )
-            .await?;
-            if let Some(value) = body
-                .get("conduit_token")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-            {
-                conduit = value.to_string();
-            }
-            if conduit == "no-token" {
-                return Err(BrowserProviderError::AdapterIncompatible {
-                    account_id: request.account.id.clone(),
-                    code: "conversation_prepare_invalid".into(),
-                    message: format!(
-                        "ChatGPT conversation prepare ({prepare_state}) returned no conduit token"
-                    ),
-                });
-            }
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json")
+            .header(REFERER, referer)
+            .header("x-oai-turn-trace-id", trace_id)
+            .timeout(Duration::from_millis(
+                request.binding.probe_timeout_ms.unwrap_or(8_000).max(3_000),
+            ));
+        if let Some(conduit) = initial_conduit {
+            builder = builder.header("x-conduit-token", conduit);
         }
 
-        Ok(conduit)
+        let response = builder
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| {
+                preflight_error(&request.account.id, "conversation_prepare_failed", error)
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: if matches!(status.as_u16(), 401 | 403) {
+                    "browser_challenge_required".into()
+                } else {
+                    "conversation_prepare_failed".into()
+                },
+                message: format!("ChatGPT conversation prepare returned HTTP {status}"),
+            });
+        }
+
+        let body = parse_chatgpt_json_response(
+            response,
+            &request.account.id,
+            "conversation_prepare_invalid",
+        )
+        .await?;
+        if body.get("status").and_then(Value::as_str) != Some("ok") {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "conversation_prepare_invalid".into(),
+                message: "ChatGPT conversation prepare did not return status=ok".into(),
+            });
+        }
+        body.get("conduit_token")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "conversation_prepare_invalid".into(),
+                message: "ChatGPT conversation prepare returned no conduit token".into(),
+            })
     }
 
     async fn submit_conversation(
@@ -876,7 +875,6 @@ impl ChatGptWebHttpAdapter {
     async fn persist_state(
         request: &BrowserAdapterRequest,
         state: &ChatGptStreamState,
-        conduit_token: &str,
     ) -> Result<(), BrowserProviderError> {
         let Some(thread_id) = request.thread_id.as_deref() else {
             return Ok(());
@@ -897,8 +895,7 @@ impl ChatGptWebHttpAdapter {
         let stored = json!({
             "transport": "chatgpt-http",
             "conversation_id": conversation_id,
-            "parent_message_id": parent_message_id,
-            "conduit_token": conduit_token
+            "parent_message_id": parent_message_id
         });
         store
             .upsert_provider_conversation_state(
@@ -926,7 +923,6 @@ impl ChatGptWebHttpAdapter {
         request: &BrowserAdapterRequest,
         session: &ChatGptSession,
         response: Response,
-        conduit: &str,
         referer: &str,
     ) -> Result<ChatGptStreamState, BrowserProviderError> {
         let mut state = ChatGptStreamState::default();
@@ -947,7 +943,7 @@ impl ChatGptWebHttpAdapter {
             consume_response_bytes(resumed, &mut state).await?;
         }
         validate_stream_success(&state)?;
-        Self::persist_state(request, &state, conduit).await?;
+        Self::persist_state(request, &state).await?;
         Ok(state)
     }
 
@@ -956,7 +952,6 @@ impl ChatGptWebHttpAdapter {
         request: &BrowserAdapterRequest,
         session: ChatGptSession,
         response: Response,
-        conduit: String,
         referer: String,
     ) -> Result<reqwest::Response, BrowserProviderError> {
         let adapter = self.clone();
@@ -1144,7 +1139,6 @@ impl ChatGptWebHttpAdapter {
             if let Err(error) = ChatGptWebHttpAdapter::persist_state(
                 &native_request,
                 &state,
-                &conduit,
             )
             .await
             {
@@ -1303,10 +1297,10 @@ impl BrowserProviderAdapter for ChatGptWebHttpAdapter {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            self.streaming_response(&request, session, response, conduit, referer)
+            self.streaming_response(&request, session, response, referer)
         } else {
             let state = self
-                .collect_response(&request, &session, response, &conduit, &referer)
+                .collect_response(&request, &session, response, &referer)
                 .await?;
             synthetic_json_response(&request.route.model, &state.assistant_text)
         }
@@ -2392,6 +2386,74 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    fn test_browser_request(thread_id: Option<&str>) -> BrowserAdapterRequest {
+        BrowserAdapterRequest {
+            provider: crate::config::ProviderConfig {
+                id: "chatgpt-web".into(),
+                kind: "browser-chatgpt".into(),
+                base_url: String::new(),
+            },
+            account: crate::config::AccountConfig {
+                id: "account-a".into(),
+                provider: "chatgpt-web".into(),
+                enabled: true,
+                api_key_env: String::new(),
+                auth: Default::default(),
+                discover_models: true,
+            },
+            route: crate::config::RouteConfig {
+                id: "route-a".into(),
+                model: "gpt-5-6".into(),
+                account: "account-a".into(),
+                enabled: true,
+                ..Default::default()
+            },
+            body: json!({"messages":[{"role":"user","content":"hello"}]}),
+            session_id: "session-a".into(),
+            profile_dir: "profile".into(),
+            binding: BrowserAccountBinding::default(),
+            thread_id: thread_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn existing_chat_prepare_uses_single_context_change_shape() {
+        let request = test_browser_request(Some("thread-a"));
+        let native = NativeConversation {
+            conversation_id: Some("conv-a".into()),
+            parent_message_id: Some("parent-a".into()),
+        };
+        let partial = json!({
+            "id":"user-a",
+            "author":{"role":"user"},
+            "content":{"content_type":"text","parts":["hello"]}
+        });
+        let (payload, initial_conduit) =
+            ChatGptWebHttpAdapter::prepare_payload(&request, &native, &partial, "gpt-5-6");
+        assert_eq!(payload["client_prepare_state"], "none");
+        assert_eq!(payload["client_prepare_dispatch"], "immediate");
+        assert_eq!(payload["client_prepare_source"], "context_change");
+        assert_eq!(payload["conversation_id"], "conv-a");
+        assert_eq!(payload["partial_query"], partial);
+        assert_eq!(initial_conduit, Some("no-token"));
+    }
+
+    #[test]
+    fn new_chat_prepare_uses_window_focus_shape_without_legacy_fields() {
+        let request = test_browser_request(Some("thread-a"));
+        let native = NativeConversation::default();
+        let partial = json!({"id":"user-a"});
+        let (payload, initial_conduit) =
+            ChatGptWebHttpAdapter::prepare_payload(&request, &native, &partial, "gpt-5-6");
+        assert_eq!(payload["parent_message_id"], "client-created-root");
+        assert_eq!(payload["client_prepare_state"], "none");
+        assert_eq!(payload["client_prepare_dispatch"], "debounced");
+        assert_eq!(payload["client_prepare_source"], "window_focus");
+        assert!(payload.get("conversation_id").is_none());
+        assert!(payload.get("partial_query").is_none());
+        assert_eq!(initial_conduit, None);
     }
 
     #[test]
