@@ -1746,6 +1746,79 @@ mod tests {
     }
 
     #[test]
+    fn sse_decoder_preserves_initial_root_snapshot_prefix_and_indexed_appends() {
+        let mut decoder = DeepSeekSseDecoder::default();
+        let stream = concat!(
+            "event: ready\ndata: {\"response_message_id\":9}\n\n",
+            "data: {\"v\":{\"response\":{\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"Hi \"}]}}}\n\n",
+            "data: {\"p\":\"response/fragments/0/content\",\"o\":\"APPEND\",\"v\":\"again! 😄\"}\n\n",
+            "event: close\ndata: {}\n\n"
+        );
+        let mut state = DeepSeekStreamState::default();
+        for update in decoder.push(stream.as_bytes()).unwrap() {
+            state.apply(update).unwrap();
+        }
+        assert_eq!(state.response_message_id, Some(9));
+        assert_eq!(state.output, "Hi again! 😄");
+        assert!(state.completed);
+        state.validate_completion().unwrap();
+    }
+
+    #[test]
+    fn sse_decoder_preserves_utf8_prefix_from_root_snapshot() {
+        let mut decoder = DeepSeekSseDecoder::default();
+        let stream = concat!(
+            "event: ready\ndata: {\"response_message_id\":10}\n\n",
+            "data: {\"v\":{\"response\":{\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"Ch\"}]}}}\n\n",
+            "data: {\"p\":\"response/fragments/0/content\",\"v\":\"ào bạn! Rất vui được giải thích cho bạn.\"}\n\n",
+            "event: close\ndata: {}\n\n"
+        );
+        let mut state = DeepSeekStreamState::default();
+        for update in decoder.push(stream.as_bytes()).unwrap() {
+            state.apply(update).unwrap();
+        }
+        assert_eq!(state.output, "Chào bạn! Rất vui được giải thích cho bạn.");
+        assert!(state.completed);
+        state.validate_completion().unwrap();
+    }
+
+    #[test]
+    fn sse_decoder_routes_indexed_reasoning_and_output_inside_batch() {
+        let mut decoder = DeepSeekSseDecoder::default();
+        let stream = concat!(
+            "event: ready\ndata: {\"response_message_id\":11}\n\n",
+            "data: {\"v\":{\"response\":{\"fragments\":[{\"type\":\"THINK\",\"content\":\"\"},{\"type\":\"RESPONSE\",\"content\":\"\"}]}}}\n\n",
+            "data: {\"p\":\"response\",\"o\":\"BATCH\",\"v\":[{\"p\":\"fragments/0/content\",\"o\":\"SET\",\"v\":\"reason\"},{\"p\":\"fragments/1/content\",\"o\":\"SET\",\"v\":\"Hello\"},{\"p\":\"fragments/1/content\",\"o\":\"ADD\",\"v\":\" world\"},{\"p\":\"quasi_status\",\"o\":\"SET\",\"v\":\"FINISHED\"}]}\n\n"
+        );
+        let mut state = DeepSeekStreamState::default();
+        for update in decoder.push(stream.as_bytes()).unwrap() {
+            state.apply(update).unwrap();
+        }
+        assert_eq!(state.reasoning, "reason");
+        assert_eq!(state.output, "Hello world");
+        assert!(state.completed);
+        state.validate_completion().unwrap();
+    }
+
+    #[test]
+    fn sse_decoder_deduplicates_monotonic_set_snapshots() {
+        let mut decoder = DeepSeekSseDecoder::default();
+        let stream = concat!(
+            "event: ready\ndata: {\"response_message_id\":12}\n\n",
+            "data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"RESPONSE\",\"content\":\"Hel\"}]}\n\n",
+            "data: {\"p\":\"response/fragments/0/content\",\"o\":\"SET\",\"v\":\"Hello\"}\n\n",
+            "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}\n\n"
+        );
+        let mut state = DeepSeekStreamState::default();
+        for update in decoder.push(stream.as_bytes()).unwrap() {
+            state.apply(update).unwrap();
+        }
+        assert_eq!(state.output, "Hello");
+        assert!(state.completed);
+        state.validate_completion().unwrap();
+    }
+
+    #[test]
     fn deepseek_parent_message_id_is_numeric_on_wire_and_legacy_strings_migrate() {
         assert_eq!(value_to_u32(&json!(2)), Some(2));
         assert_eq!(value_to_u32(&json!("2")), Some(2));
