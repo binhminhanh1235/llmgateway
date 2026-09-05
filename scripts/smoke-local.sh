@@ -199,7 +199,7 @@ physical=next(item for item in x["data"] if item["id"]=="fake/fake-model")
 legacy=physical["llmgateway"]["capabilities"]
 structured=physical["llmgateway"]["multimodal_capabilities"]
 assert "chat" in legacy, physical
-assert structured["input_modalities"] == ["text"], structured
+assert structured["input_modalities"] == ["text","image"], structured
 assert structured["output_modalities"] == ["text"], structured
 '
 
@@ -212,8 +212,9 @@ assert x["object"] == "llmgateway.capabilities", x
 assert x["schema_version"] == 1, x
 assert x["canonical_modalities"]["input"] == ["text","image","file","audio"], x
 assert x["canonical_modalities"]["output"] == ["text","image","audio","file"], x
-assert x["gateway_execution"]["input_modalities"] == ["text"], x
-assert x["live_attachments"] is False, x
+assert x["gateway_execution"]["input_modalities"] == ["text","image"], x
+assert x["gateway_execution"]["native_file_upload"] is True, x
+assert x["live_attachments"] is True, x
 assert x["artifact_store"]["enabled"] is True, x
 assert x["artifact_store"]["max_file_size_bytes"] == 1024, x
 assert x["artifact_store"]["max_request_size_bytes"] == 2048, x
