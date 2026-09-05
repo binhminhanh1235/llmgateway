@@ -62,3 +62,152 @@
   .usage-overview-metrics, .quota-windows { grid-template-columns: 1fr; }
   .quota-actions { align-items: flex-start; flex-direction: column; }
 }
+
+/* Browserless transport control */
+.account-transport-panel {
+  margin: 0 15px 14px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, var(--accent) 18%);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 20%, transparent), transparent 58%),
+    var(--panel-soft);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 4%, transparent);
+}
+.account-transport-panel.is-enabled {
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
+}
+.account-transport-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+.account-transport-copy { min-width: 0; }
+.account-transport-label {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 760;
+  letter-spacing: -.015em;
+}
+.account-transport-note {
+  max-width: 46ch;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.account-transport-toggle {
+  width: 42px;
+  height: 24px;
+}
+.account-transport-toggle .toggle-track {
+  border: 1px solid color-mix(in srgb, var(--border) 86%, var(--text) 14%);
+  background: color-mix(in srgb, var(--border) 84%, transparent);
+}
+.account-transport-toggle .toggle-track::after {
+  width: 16px;
+  height: 16px;
+  top: 3px;
+  left: 3px;
+}
+.account-transport-toggle input:checked + .toggle-track::after {
+  transform: translateX(18px);
+}
+.account-transport-toggle input:focus-visible + .toggle-track {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+.account-transport-toggle input:disabled + .toggle-track {
+  opacity: .45;
+  cursor: not-allowed;
+}
+.account-transport-effective {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  margin-top: 12px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 84%, transparent);
+}
+.account-transport-effective.warning {
+  border-color: color-mix(in srgb, var(--warning) 25%, var(--border));
+  background: color-mix(in srgb, var(--warning) 5%, var(--panel));
+}
+.account-transport-effective.fallback {
+  border-color: color-mix(in srgb, var(--warning) 18%, var(--border));
+}
+.account-transport-effective.ready {
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
+}
+.account-transport-status-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 820;
+}
+.account-transport-effective.warning .account-transport-status-icon,
+.account-transport-effective.fallback .account-transport-status-icon {
+  background: color-mix(in srgb, var(--warning) 13%, transparent);
+  color: var(--warning);
+}
+.account-transport-status-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.account-transport-status-label {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 680;
+  letter-spacing: .02em;
+}
+.account-transport-status-copy strong {
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 780;
+}
+.account-transport-effective.warning .account-transport-status-copy strong,
+.account-transport-effective.fallback .account-transport-status-copy strong {
+  color: var(--warning);
+}
+.account-transport-adapter {
+  max-width: 150px;
+  overflow: hidden;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.transport-warning {
+  display: inline-flex;
+  margin-top: 5px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
+  font-size: 8px;
+  font-weight: 730;
+}
+
+@media (max-width: 520px) {
+  .account-transport-panel { margin-inline: 11px; padding: 12px; }
+  .account-transport-effective { grid-template-columns: auto minmax(0, 1fr); }
+  .account-transport-adapter { grid-column: 2; max-width: 100%; justify-self: start; }
+}
