@@ -567,11 +567,10 @@
         body: JSON.stringify({ transport_policy: desired ? "browserless-preferred" : "browser-only" }),
       });
       if (!response.ok) throw new Error(extractError(await response.text(), response.status));
-      const transport = await response.json();
-      const account = state.accounts.find((candidate) => candidate.id === accountId);
-      if (account) account.transport_control = transport;
+      await response.json();
       toast(`Browserless ${desired ? "enabled" : "disabled"} for ${accountId}`);
-      renderAccounts();
+      state.accounts = [];
+      await loadAccounts(true);
     } catch (error) {
       checkbox.checked = !desired;
       checkbox.disabled = false;
