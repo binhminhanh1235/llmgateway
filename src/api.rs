@@ -1,4 +1,5 @@
 use crate::{
+    artifact_store::ArtifactStore,
     catalog::{canonical_model_id, CatalogError, ModelCatalog},
     compat::{anthropic, responses},
     client_policy::{ClientAccess, ClientPolicyError, ClientPolicyStore},
@@ -36,6 +37,7 @@ pub struct AppState {
     pub gateway: Arc<Gateway>,
     pub catalog: Arc<ModelCatalog>,
     pub conversations: Arc<ConversationStore>,
+    pub artifacts: Arc<ArtifactStore>,
     pub gateway_api_key: Arc<String>,
     pub client_policies: Arc<ClientPolicyStore>,
 }
@@ -596,6 +598,15 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
             },
             "gateway_execution":ModelCapabilities::foundation_text_execution(),
             "live_attachments":false,
+            "artifact_store":{
+                "enabled":true,
+                "max_file_size_bytes":state.artifacts.config().max_file_size_bytes,
+                "max_request_size_bytes":state.artifacts.config().max_request_size_bytes,
+                "max_files_per_request":state.artifacts.config().max_files_per_request,
+                "allowed_mime_types":state.artifacts.config().allowed_mime_types.clone(),
+                "denied_mime_types":state.artifacts.config().denied_mime_types.clone(),
+                "remote_url_ingestion":state.artifacts.config().remote_url_ingestion
+            },
             "models":models,
             "adapters":adapters
         }),
