@@ -30,7 +30,7 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 
 | Phase | Task | Status | Dependency | Exit gate |
 |---|---|---|---|---|
-| P0 | [#70 Multimodal Foundation](https://github.com/binhminhanh1235/llmgateway/issues/70) | **IN PROGRESS** | none | canonical contracts + structured capabilities + compatibility tests + exact-head CI |
+| P0 | [#70 Multimodal Foundation](https://github.com/binhminhanh1235/llmgateway/issues/70) | **DONE / VERIFIED** | none | canonical contracts + structured capabilities + compatibility tests + exact-head CI |
 | P1 | [#71 ArtifactStore and Files API](https://github.com/binhminhanh1235/llmgateway/issues/71) | **BLOCKED** | P0 DONE / VERIFIED | durable files API, dedup, persistence, MIME/size/security tests |
 | P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **BLOCKED** | P1 DONE / VERIFIED | API + UI image input + deterministic fixtures + verified live adapter |
 | P3 | [#73 General File Attachments](https://github.com/binhminhanh1235/llmgateway/issues/73) | **BLOCKED** | P2 DONE / VERIFIED | native PDF path + extraction fallback + provider binding isolation |
@@ -45,9 +45,18 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 - Detailed implementation plan is committed.
 - Tracking issue #69 exists.
 - Phase issues #70-#77 exist.
-- P0 #70 is **IN PROGRESS**.
+- P0 #70 is **DONE / VERIFIED**.
 - Verified start checkpoint: `main` = `46e70faf3b4a8034ca278f049f0af4b3e256e477`; working branch before implementation = `77ccfea383cbebf619e05fc6993c3204bd6f17e5`; branch was ahead 3 / behind 0, so no reconcile was required.
-- `main` must remain untouched by this initiative until explicit user authorization after completion.
+- Re-verified before closing P0: `main` remains `46e70faf3b4a8034ca278f049f0af4b3e256e477`; P0 implementation head = `aa13c0fb7f3e3db44f86ef5238e9f75f1a207410`; branch remained behind 0.
+- Canonical provider-neutral contracts are implemented in `src/multimodal.rs`: `Modality`, `InputContent`, `OutputContent`, `MultimodalMessage`, `MultimodalRequest`, `MultimodalResponse`, `ModelCapabilities`, `AdapterCapabilities`, and deterministic multimodal errors.
+- `src/multimodal_compat.rs` is the common semantic boundary for Responses, Chat Completions, and Anthropic Messages. P0 text-only requests are validated canonically and then returned to the existing execution envelope unchanged.
+- `GET /v1/models` retains legacy string capability tags and adds `llmgateway.multimodal_capabilities`; `GET /v1/capabilities` exposes provider-neutral model/adapter diagnostics.
+- Live attachment execution remains disabled in P0. Known image/file/audio input and non-text output requests fail with deterministic capability errors rather than generic malformed-request errors.
+- Deterministic tests cover Responses normalization, Chat/Responses equivalence, Anthropic normalization, current execution round-trip semantics, stable structured capability serialization, legacy capability compatibility, and unsupported modality errors.
+- Full implementation exact-head CI: workflow CI #1345 / run `33975834628` on `aa13c0fb7f3e3db44f86ef5238e9f75f1a207410`: **PASS** on Rust + Windows, including strict cargo check, Clippy, all-target tests, OpenAI SDK, browser/browserless, streaming, native affinity, routing/traces, client policies, local multimodal assertions, and Docker build.
+- The final status-only checkpoint commit is evidence-only. Its exact-head CI run is recorded in issue #70 after completion so no code-evidence commit is mutated merely to embed its own future run ID.
+- P1 #71 and every later phase remain **BLOCKED / NOT STARTED** per the explicit P0 stop condition.
+- `main` remains untouched. No multimodal work may be merged to `main` without a separate explicit user authorization.
 
 ## Update protocol
 
