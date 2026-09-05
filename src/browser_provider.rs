@@ -1298,8 +1298,8 @@ impl BrowserProviderRegistry {
                 .get(&account.id)
                 .is_some_and(|models| models.contains(&route.model))
                 && !binding.models.iter().any(|model| model == &route.model);
-            let direct_failure_can_open_browser = provider.kind != "browser-chatgpt"
-                || matches!(binding.transport_mode, BrowserTransportMode::Auto);
+            let direct_failure_can_open_browser =
+                direct_failure_can_open_browser(&provider.kind, binding.transport_mode);
             let safe_fallback_candidate = direct_failure_can_open_browser
                 && direct_result.as_ref().err().is_some_and(|error| {
                     direct_error_allows_browser_fallback(
@@ -3372,6 +3372,13 @@ fn contract_error_to_provider_error(
 }
 
 
+fn direct_failure_can_open_browser(
+    provider_kind: &str,
+    mode: BrowserTransportMode,
+) -> bool {
+    provider_kind != "browser-chatgpt" || matches!(mode, BrowserTransportMode::Auto)
+}
+
 fn direct_error_allows_browser_fallback(
     error: &BrowserProviderError,
     dynamic_model: bool,
@@ -4244,6 +4251,22 @@ mod browser_transport_policy_tests {
             first_byte_timeout_ms: None,
             idle_stream_timeout_ms: None,
         }
+    }
+
+    #[test]
+    fn chatgpt_http_preferred_never_reopens_browser_on_direct_failure() {
+        assert!(!direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::HttpPreferred
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-chatgpt",
+            BrowserTransportMode::Auto
+        ));
+        assert!(direct_failure_can_open_browser(
+            "browser-gemini",
+            BrowserTransportMode::HttpPreferred
+        ));
     }
 
     #[test]
