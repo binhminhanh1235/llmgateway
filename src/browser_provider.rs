@@ -3953,6 +3953,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn browser_fallback_lock_serializes_same_session_runtime() {
+        let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
+        let first = registry.browser_fallback_lock("session-a");
+        let second = registry.browser_fallback_lock("session-a");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let first_guard = first.clone().lock_owned().await;
+        assert!(
+            timeout(Duration::from_millis(25), second.clone().lock_owned())
+                .await
+                .is_err(),
+            "same-session fallback must wait while another response still owns CDP"
+        );
+        drop(first_guard);
+        assert!(
+            timeout(Duration::from_millis(250), second.lock_owned())
+                .await
+                .is_ok(),
+            "same-session fallback lock must release after the response completes"
+        );
+    }
+
     #[test]
     fn browser_kind_is_explicit() {
         assert!(BrowserProviderRegistry::is_browser_kind("browser-http"));
