@@ -26,7 +26,7 @@ use std::{
 use thiserror::Error;
 use tracing::warn;
 use tokio::{
-    sync::RwLock,
+    sync::{Mutex as AsyncMutex, OwnedMutexGuard, RwLock},
     time::{sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -362,6 +362,7 @@ pub struct BrowserProviderRegistry {
     last_transport: Arc<RwLock<BTreeMap<String, BrowserTransportExecution>>>,
     discovered_models: Arc<StdRwLock<BTreeMap<String, BTreeSet<String>>>>,
     discovered_model_labels: Arc<StdRwLock<BTreeMap<String, BTreeMap<String, String>>>>,
+    browser_fallback_locks: Arc<StdRwLock<BTreeMap<String, Arc<AsyncMutex<()>>>>>,
     model_catalog_refresh_required: Arc<StdRwLock<BTreeSet<String>>>,
 }
 
@@ -500,6 +501,7 @@ impl BrowserProviderRegistry {
             last_transport: Arc::new(RwLock::new(BTreeMap::new())),
             discovered_models: Arc::new(StdRwLock::new(BTreeMap::new())),
             discovered_model_labels: Arc::new(StdRwLock::new(BTreeMap::new())),
+            browser_fallback_locks: Arc::new(StdRwLock::new(BTreeMap::new())),
             model_catalog_refresh_required: Arc::new(StdRwLock::new(BTreeSet::new())),
         })
     }
@@ -1177,6 +1179,17 @@ impl BrowserProviderRegistry {
         session.status == "ready"
     }
 
+    fn browser_fallback_lock(&self, session_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self
+            .browser_fallback_locks
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
     async fn cdp_session_live(&self, session_id: &str) -> bool {
         let Some(driver) = chromium_driver_runtime::get() else {
             return false;
@@ -1438,6 +1451,18 @@ impl BrowserProviderRegistry {
                         browser_adapter.is_cdp(),
                     )
                 });
+            // Serialize browser recovery for a session all the way through the
+            // response body. Previously a prior fallback response could drop its
+            // auto-stop guard while the next fallback was already using CDP. The
+            // resulting Chromium kill surfaced as:
+            // "WebSocket protocol error: Connection reset without closing handshake".
+            let fallback_lock = safe_fallback_candidate
+                .then(|| self.browser_fallback_lock(&binding.session));
+            let fallback_guard = if let Some(lock) = fallback_lock.as_ref() {
+                Some(lock.clone().lock_owned().await)
+            } else {
+                None
+            };
             let browser_was_live = safe_fallback_candidate
                 && self.cdp_session_live(&binding.session).await;
             let safe_browser_fallback = if safe_fallback_candidate {
@@ -1449,29 +1474,48 @@ impl BrowserProviderRegistry {
             if safe_browser_fallback {
                 browser_fallback_used = true;
                 used_adapter = browser_adapter.clone();
+                let stop_after_response = !browser_was_live;
                 if let Err(error) = self.mark_direct_state_unsynced(&adapter_request).await {
-                    if !browser_was_live {
-                        stop_browser_runtime_soon(binding.session.clone());
+                    if let Some(guard) = fallback_guard {
+                        drop(guard);
+                    }
+                    if stop_after_response {
+                        if let Some(lock) = fallback_lock {
+                            schedule_browser_runtime_stop(binding.session.clone(), lock);
+                        }
                     }
                     Err(error)
                 } else {
                     let fallback_result = browser_adapter.execute_chat(adapter_request).await;
-                    if browser_was_live {
-                        fallback_result
-                    } else {
-                        match fallback_result {
-                            Ok(response) => wrap_response_with_browser_stop(
+                    match fallback_result {
+                        Ok(response) => {
+                            let lock = fallback_lock.expect("fallback lock exists when browser fallback is active");
+                            let guard = fallback_guard.expect("fallback guard exists when browser fallback is active");
+                            wrap_response_with_browser_runtime_guard(
                                 response,
                                 binding.session.clone(),
-                            ),
-                            Err(error) => {
-                                stop_browser_runtime_soon(binding.session.clone());
-                                Err(error)
+                                lock,
+                                guard,
+                                stop_after_response,
+                            )
+                        }
+                        Err(error) => {
+                            if let Some(guard) = fallback_guard {
+                                drop(guard);
                             }
+                            if stop_after_response {
+                                if let Some(lock) = fallback_lock {
+                                    schedule_browser_runtime_stop(binding.session.clone(), lock);
+                                }
+                            }
+                            Err(error)
                         }
                     }
                 }
             } else {
+                if let Some(guard) = fallback_guard {
+                    drop(guard);
+                }
                 direct_result
             }
         } else {
@@ -1542,46 +1586,72 @@ impl BrowserProviderRegistry {
 }
 
 
-struct BrowserFallbackStopGuard {
-    session_id: Option<String>,
+struct BrowserFallbackRuntimeGuard {
+    session_id: String,
+    lock: Arc<AsyncMutex<()>>,
+    lock_guard: Option<OwnedMutexGuard<()>>,
+    stop_on_drop: bool,
 }
 
-impl BrowserFallbackStopGuard {
-    fn new(session_id: String) -> Self {
+impl BrowserFallbackRuntimeGuard {
+    fn new(
+        session_id: String,
+        lock: Arc<AsyncMutex<()>>,
+        lock_guard: OwnedMutexGuard<()>,
+        stop_on_drop: bool,
+    ) -> Self {
         Self {
-            session_id: Some(session_id),
+            session_id,
+            lock,
+            lock_guard: Some(lock_guard),
+            stop_on_drop,
         }
     }
 }
 
-impl Drop for BrowserFallbackStopGuard {
+impl Drop for BrowserFallbackRuntimeGuard {
     fn drop(&mut self) {
-        if let Some(session_id) = self.session_id.take() {
-            stop_browser_runtime_soon(session_id);
+        // Release the current request's lease before scheduling a stop. Any newer
+        // recovery request can acquire the same session lock first and complete
+        // its CDP work before the stop task is allowed to terminate Chromium.
+        if let Some(guard) = self.lock_guard.take() {
+            drop(guard);
+        }
+        if self.stop_on_drop {
+            schedule_browser_runtime_stop(self.session_id.clone(), self.lock.clone());
         }
     }
 }
 
-fn stop_browser_runtime_soon(session_id: String) {
+fn schedule_browser_runtime_stop(session_id: String, lock: Arc<AsyncMutex<()>>) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
     handle.spawn(async move {
+        let _lease = lock.lock_owned().await;
         if let Some(driver) = chromium_driver_runtime::get() {
             let _ = driver.stop(&session_id).await;
         }
     });
 }
 
-fn wrap_response_with_browser_stop(
+fn wrap_response_with_browser_runtime_guard(
     response: reqwest::Response,
     session_id: String,
+    lock: Arc<AsyncMutex<()>>,
+    lock_guard: OwnedMutexGuard<()>,
+    stop_on_drop: bool,
 ) -> Result<reqwest::Response, BrowserProviderError> {
     let status = response.status();
     let headers = response.headers().clone();
-    // Construct the guard outside the generator so the response owns it even if
-    // the body is dropped before its first poll.
-    let guard = BrowserFallbackStopGuard::new(session_id);
+    // The guard lives for the response body, which is required for browser-backed
+    // streaming responses whose subsequent polls still use the same CDP runtime.
+    let guard = BrowserFallbackRuntimeGuard::new(
+        session_id,
+        lock,
+        lock_guard,
+        stop_on_drop,
+    );
     let stream = async_stream::stream! {
         let _guard = guard;
         let mut body = response.bytes_stream();
@@ -3652,7 +3722,11 @@ async fn evaluate_cdp(
 ) -> Result<Value, BrowserProviderError> {
     let (mut socket, _) = connect_async(websocket_url)
         .await
-        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        .map_err(|error| {
+            BrowserProviderError::Transport(format!(
+                "CDP websocket connect failed: {error}"
+            ))
+        })?;
     let request_id = 1u64;
     let command = json!({
         "id": request_id,
@@ -3667,11 +3741,19 @@ async fn evaluate_cdp(
     socket
         .send(Message::Text(command.to_string().into()))
         .await
-        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        .map_err(|error| {
+            BrowserProviderError::Transport(format!(
+                "CDP websocket send failed: {error}"
+            ))
+        })?;
 
     let value = timeout(Duration::from_secs(CDP_EXECUTION_TIMEOUT_SECONDS), async {
         while let Some(message) = socket.next().await {
-            let message = message.map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+            let message = message.map_err(|error| {
+                BrowserProviderError::Transport(format!(
+                    "CDP websocket receive failed: {error}"
+                ))
+            })?;
             match message {
                 Message::Text(text) => {
                     let payload: Value = serde_json::from_str(text.as_ref())
