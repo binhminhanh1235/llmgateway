@@ -298,7 +298,7 @@ PY
     sleep 2
     assert_browser_closed "cancelled stream"
     api GET "/v1/threads/$THREAD_C" "$TMP_DIR/cancel-thread.json"
-    assert_python "$TMP_DIR/cancel-thread.json" "not any(m.get('role') == 'assistant' and not str((m.get('message') or {}).get('content') or '').strip() for m in x.get('messages',[]))" "cancelled stream persisted an empty assistant"
+    assert_python "$TMP_DIR/cancel-thread.json" "not any(m.get('role') == 'assistant' for m in x.get('messages',[]))" "cancelled stream persisted an assistant message"
   else
     echo "[browserless-live] WARNING: cancellation request finished before timeout; cleanup was not exercised."
   fi
