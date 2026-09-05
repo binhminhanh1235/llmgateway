@@ -6,7 +6,7 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 
 > One conversation. Any model. Context intact.
 
-## Current highlights (v0.31)
+## Current highlights (v0.32)
 
 - OpenAI-compatible `POST /v1/chat/completions`
 - OpenAI-compatible `POST /v1/responses`
@@ -31,6 +31,10 @@ Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compati
 - Explicit `prefer-browser`, `browser-only`, `prefer-api`, and `api-only` routing policies
 - Model-catalog capability/context enrichment for configured browser routes
 - Browser-aware route-explain policy, fairness, and recovery diagnostics
+- Per-client API keys for OpenAI/Anthropic-compatible local tools
+- Per-client model/route allowlists and browser/API routing boundaries
+- Persistent daily/monthly request and token budgets with restart-safe enforcement
+- Client-scoped route explain plus secret-free admin policy diagnostics
 - Versioned browser adapter contract with page-drift diagnostics
 - Stateless per-request browser chat tabs for built-in providers
 - Sticky route affinity with automatic fallback
@@ -146,6 +150,23 @@ Persistent llmgateway threads can also keep provider-native Gemini and ChatGPT c
 
 See [Browser-aware routing intelligence](docs/browser-aware-routing.md) for policy semantics, scoring order, fairness, recovery, context enforcement, and route-explain fields.
 
+## Client policies and budgets
+
+v0.32 lets each local tool use its own environment-backed gateway key instead of sharing the unrestricted admin key. A client policy can restrict requested/virtual models, physical route IDs, browser/API transport behavior, and daily/monthly request or token budgets.
+
+```toml
+[clients.claude-code]
+key_env = "LLMGATEWAY_CLAUDE_CODE_KEY"
+allowed_models = ["claude-*", "llmgateway-coding"]
+execution_preference = "prefer-browser"
+api_fallback = true
+daily_request_limit = 2000
+```
+
+Client keys work on the compatibility surface (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and `/v1/models`). The global `LLMGATEWAY_API_KEY` remains the admin/legacy credential. Request-level `llmgateway_execution_preference` and `llmgateway_api_fallback` controls may make routing more restrictive, but a client cannot use them to expand its configured transport permissions.
+
+See [Client policies and budgets](docs/client-policies.md) for presets, budget semantics, diagnostics, and security behavior.
+
 Built-in adapters default to fresh provider chat tabs per request while reusing the authenticated Chromium profile. Optional `model_labels` select provider UI models explicitly; without a mapping, the current provider UI model is preserved.
 
 See [Browser provider adapters](docs/browser-provider-adapters.md) for complete Gemini/ChatGPT/Qwen configuration, adapter diagnostics, page-drift recovery, and the coding-agent tool bridge.
@@ -188,6 +209,7 @@ Admin/model APIs:
 GET   /_llmgateway/health
 GET   /_llmgateway/models
 GET   /_llmgateway/accounts
+GET   /_llmgateway/clients
 GET   /_llmgateway/accounts/{account_id}/models
 PATCH /_llmgateway/accounts/{account_id}/models
 POST  /_llmgateway/accounts/{account_id}/models/refresh
@@ -380,19 +402,19 @@ Use [`examples/opencode-config.json`](examples/opencode-config.json). OpenCode c
 
 ## Authentication and security
 
-Gateway/admin/thread APIs accept either:
+The unrestricted admin/legacy credential is `LLMGATEWAY_API_KEY`. The compatibility APIs also accept enabled v0.32 client keys configured under `[clients.<id>]`. Both credential types may be sent as:
 
 ```text
-Authorization: Bearer <LLMGATEWAY_API_KEY>
+Authorization: Bearer <key>
 ```
 
 or:
 
 ```text
-x-api-key: <LLMGATEWAY_API_KEY>
+x-api-key: <key>
 ```
 
-Provider credentials are never returned to clients. The default bind address is `127.0.0.1`. Active config, provider keys, and SQLite data are gitignored.
+Admin and persistent-thread management APIs continue to require the global key. Client key values and provider credentials are never returned by diagnostics. The default bind address is `127.0.0.1`. Active config, provider keys, and SQLite data are gitignored.
 
 Do not expose the service publicly without TLS, network controls, authentication, and rate limiting.
 
@@ -425,11 +447,12 @@ Current browser milestones:
 - **v0.29 Browser Accounts UX** ✅ - managed Gemini/Qwen account wizard, safe config persistence, hot activation, lifecycle controls, immutable request snapshots, and deterministic hot-activation E2E coverage.
 - **v0.30 True Browser Streaming and Cancellation** ✅ - incremental CDP streaming, downstream-driven backpressure, disconnect cancellation, first-byte/idle timeouts, stream traces, and Chat/Responses/Anthropic E2E coverage.
 - **v0.31 Browser-aware Routing Intelligence** ✅ - browser-account fairness, session-aware affinity, recovery scoring, explicit transport policies, catalog-enriched task/context routing, and deterministic API fallback.
+- **v0.32 Client Policies and Budgets** ✅ - per-client credentials, model/route permissions, transport policy boundaries, persistent budgets, diagnostics, and deterministic policy E2E coverage.
 
 Next milestones:
 
-1. **v0.32 Client Policies and Budgets** - per-client models, browser/API permissions, budgets, and routing strategy.
-2. **v0.33+** - usage/cost intelligence, model/cost intelligence, production hardening, and distribution.
+1. **v0.33 Usage, Cost and Savings Intelligence** - normalized usage, browser/API breakdown, avoided API spend, and routing analytics.
+2. **v0.34+** - model/cost intelligence, production hardening, distribution, and v1.0.
 
 See the detailed [browser-first roadmap](docs/roadmap.md), including release gates for v1.0.
 

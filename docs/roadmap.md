@@ -38,7 +38,7 @@ The security boundary stays unchanged:
 - CAPTCHA/2FA and normal authentication are completed interactively by the user;
 - browser integrations must respect provider terms, anti-abuse controls and quota limits.
 
-## Current baseline: v0.31
+## Current baseline: v0.32
 
 Already implemented:
 
@@ -94,11 +94,16 @@ Already implemented:
 - Model Catalog enrichment of configured route capability/context metadata;
 - browser-aware route-explain policy, fairness and recovery diagnostics;
 - deterministic multi-browser routing/fallback E2E coverage;
+- environment-backed per-client API keys with legacy admin-key compatibility;
+- per-client model/route allowlists and browser/API execution boundaries;
+- request-level transport overrides that can narrow but never broaden client permissions;
+- restart-persistent daily/monthly request and token budgets;
+- policy-filtered compatibility model discovery plus sanitized client diagnostics;
 - provider-native Gemini conversation affinity for persistent llmgateway threads;
 - persisted per-thread/provider/account native conversation URLs with sync cursors;
 - delta replay for provider-missed turns across browser-account failover.
 
-The remaining browser work is now mostly **client policy, usage/cost intelligence, broader provider-native conversation support, and production hardening**, rather than browser execution plumbing.
+The remaining browser work is now mostly **usage/cost intelligence, broader provider-native conversation support, and production hardening**, rather than browser execution plumbing.
 
 ---
 
@@ -293,16 +298,32 @@ Equal-quality browser accounts share traffic predictably, persistent conversatio
 
 ---
 
-## v0.32 - Client Policies and Budgets
+## v0.32 - Client Policies and Budgets ✅
 
-**Priority: P1**
+**Status: shipped**
 
-- per-client API keys;
-- allowed virtual/physical models;
-- browser-only or API-fallback permissions per client;
-- request/token budgets;
-- routing strategy per client;
-- policies for Claude Code, Codex, OpenCode, OmniVoiceStudio and other local tools.
+v0.32 gives each local tool an explicit identity and a bounded slice of the gateway instead of requiring every client to share the unrestricted admin credential.
+
+### Shipped scope
+
+- environment-backed per-client API keys with disabled/unknown credential rejection;
+- backward-compatible global admin/legacy key behavior when no client policies are configured;
+- requested/virtual/physical model allowlists with alias-aware matching;
+- optional route-ID allowlists as a second execution boundary;
+- per-client `prefer-browser`, `browser-only`, `balanced`, `prefer-api`, and `api-only` routing policy;
+- per-client API fallback permission;
+- request-level routing overrides that may narrow, but never broaden, client transport permissions;
+- persistent UTC daily/monthly request budgets;
+- persistent token reservations using estimated input plus caller-declared maximum output;
+- restart-safe budget enforcement in the shared SQLite store;
+- `GET /_llmgateway/clients` sanitized diagnostics with no client secret values;
+- client-scoped route explain with model/route policy exclusion reasons;
+- configuration presets for Claude Code, Codex, OpenCode, and OmniVoiceStudio;
+- deterministic E2E coverage for auth, model filtering, browser-only enforcement, API fallback, request/token budgets, restart persistence, secret-free diagnostics, and legacy compatibility.
+
+### Exit criteria
+
+Different local tools can safely share one llmgateway process without sharing identical model, transport, or budget permissions, and a client cannot escape its configured browser/API boundary through a request override.
 
 ---
 

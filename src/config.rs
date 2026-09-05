@@ -7,6 +7,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub api: ApiConfig,
     #[serde(default)]
+    pub clients: HashMap<String, ClientPolicyConfig>,
+    #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
     pub context: ContextConfig,
@@ -40,6 +42,54 @@ pub struct ApiConfig {
     pub default_model: String,
     #[serde(default)]
     pub strict_openai_compatibility: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ClientPolicyConfig {
+    pub key_env: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+    #[serde(default)]
+    pub allowed_routes: Vec<String>,
+    #[serde(default)]
+    pub execution_preference: Option<String>,
+    #[serde(default)]
+    pub api_fallback: Option<bool>,
+    #[serde(default)]
+    pub daily_request_limit: Option<u64>,
+    #[serde(default)]
+    pub monthly_request_limit: Option<u64>,
+    #[serde(default)]
+    pub daily_token_limit: Option<u64>,
+    #[serde(default)]
+    pub monthly_token_limit: Option<u64>,
+}
+
+impl ClientPolicyConfig {
+    pub fn model_allowed(&self, requested: &str, resolved: &str) -> bool {
+        self.allowed_models.is_empty()
+            || self
+                .allowed_models
+                .iter()
+                .any(|pattern| pattern_matches(pattern, requested) || pattern_matches(pattern, resolved))
+    }
+
+    pub fn route_allowed(&self, route_id: &str) -> bool {
+        self.allowed_routes.is_empty()
+            || self
+                .allowed_routes
+                .iter()
+                .any(|pattern| pattern_matches(pattern, route_id))
+    }
+
+    pub fn has_budget(&self) -> bool {
+        self.daily_request_limit.is_some()
+            || self.monthly_request_limit.is_some()
+            || self.daily_token_limit.is_some()
+            || self.monthly_token_limit.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -338,6 +388,42 @@ impl AppConfig {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        for (client_id, client) in &self.clients {
+            if client.key_env.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "clients.{client_id}.key_env must not be empty"
+                )));
+            }
+            if let Some(preference) = client.execution_preference.as_deref() {
+                if !matches!(
+                    preference,
+                    "browser-first"
+                        | "prefer-browser"
+                        | "browser-only"
+                        | "balanced"
+                        | "api-first"
+                        | "prefer-api"
+                        | "api-only"
+                ) {
+                    return Err(ConfigError::Invalid(format!(
+                        "clients.{client_id}.execution_preference has unsupported value '{preference}'"
+                    )));
+                }
+            }
+            for (name, limit) in [
+                ("daily_request_limit", client.daily_request_limit),
+                ("monthly_request_limit", client.monthly_request_limit),
+                ("daily_token_limit", client.daily_token_limit),
+                ("monthly_token_limit", client.monthly_token_limit),
+            ] {
+                if limit == Some(0) {
+                    return Err(ConfigError::Invalid(format!(
+                        "clients.{client_id}.{name} must be greater than zero when configured"
+                    )));
+                }
+            }
+        }
+
         if self.providers.is_empty() {
             return Err(ConfigError::Invalid("at least one provider is required".into()));
         }

@@ -16,6 +16,8 @@ mod chatgpt_web_transport;
 mod chromium_driver;
 mod chromium_driver_api;
 mod chromium_driver_runtime;
+mod client_policy;
+mod client_policy_api;
 mod compat;
 mod config;
 mod context_engine;
@@ -73,6 +75,8 @@ use chromium_driver::{ChromiumConfig, ChromiumDriver};
 use chromium_driver_api::{
     chromium_status, launch_chromium_login, stop_chromium, verify_chromium_login,
 };
+use client_policy::ClientPolicyStore;
+use client_policy_api::list_client_policies;
 use config::AppConfig;
 use context_engine::ContextEngine;
 use conversation::ConversationStore;
@@ -122,6 +126,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(AppConfig::load(&config_path)?);
     let live_config = LiveConfig::new(config.clone());
     let gateway_api_key = Arc::new(config.gateway_api_key()?);
+    let client_policies = Arc::new(
+        ClientPolicyStore::connect(
+            config.clone(),
+            live_config.clone(),
+            gateway_api_key.clone(),
+        )
+        .await?,
+    );
 
     let catalog = Arc::new(ModelCatalog::connect(live_config.clone()).await?);
     catalog.seed_from_config().await?;
@@ -243,6 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         catalog,
         conversations,
         gateway_api_key,
+        client_policies,
     };
     let app = Router::new()
         .route("/", get(ui_index))
@@ -277,6 +290,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_llmgateway/models", get(admin_models))
         .route("/_llmgateway/accounts", get(admin_accounts))
         .route("/_llmgateway/account-intelligence", get(account_intelligence))
+        .route("/_llmgateway/clients", get(list_client_policies))
         .route("/_llmgateway/routes/explain", post(explain_routes))
         .route("/_llmgateway/executions", get(list_executions))
         .route("/_llmgateway/executions/{request_id}", get(get_execution))

@@ -2,7 +2,7 @@ use crate::{
     browser_provider::{BrowserProviderError, BrowserProviderRegistry},
     browser_provider_runtime,
     catalog::ModelCatalog,
-    config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
+    config::{AccountConfig, AppConfig, ClientPolicyConfig, ProviderConfig, RouteConfig},
     execution_trace::{AttemptRecord, ExecutionTraceError, ExecutionTraceStore},
     live_config::LiveConfig,
     quota_usage::{QuotaUsageStore, UsageEvent},
@@ -201,6 +201,8 @@ pub enum GatewayError {
     MissingCredential(String),
     #[error("invalid upstream configuration: {0}")]
     InvalidConfig(String),
+    #[error("client policy denied request: {0}")]
+    ClientPolicyDenied(String),
     #[error("upstream request failed: {0}")]
     Transport(String),
     #[error("browser session unavailable: {0}")]
@@ -249,6 +251,85 @@ impl Gateway {
         self.live_config.snapshot()
     }
 
+    pub fn effective_client_config(
+        &self,
+        config: Arc<AppConfig>,
+        client_policy: Option<&ClientPolicyConfig>,
+    ) -> Arc<AppConfig> {
+        let Some(policy) = client_policy else {
+            return config;
+        };
+        if policy.execution_preference.is_none() && policy.api_fallback.is_none() {
+            return config;
+        }
+
+        let mut effective = (*config).clone();
+        if let Some(preference) = &policy.execution_preference {
+            effective.routing.execution_preference = preference.clone();
+        }
+        if let Some(api_fallback) = policy.api_fallback {
+            effective.routing.api_fallback = api_fallback;
+        }
+        Arc::new(effective)
+    }
+
+    pub(crate) fn effective_request_config(
+        &self,
+        base_config: Arc<AppConfig>,
+        client_policy: Option<&ClientPolicyConfig>,
+        body: &Value,
+    ) -> Result<Arc<AppConfig>, GatewayError> {
+        let client_config = self.effective_client_config(base_config, client_policy);
+        let request_preference = body
+            .get("llmgateway_execution_preference")
+            .and_then(Value::as_str);
+        let request_api_fallback = body
+            .get("llmgateway_api_fallback")
+            .and_then(Value::as_bool);
+
+        if request_preference.is_none() && request_api_fallback.is_none() {
+            return Ok(client_config);
+        }
+
+        if let Some(preference) = request_preference {
+            if !is_execution_preference(preference) {
+                return Err(GatewayError::ClientPolicyDenied(format!(
+                    "unsupported request execution preference '{preference}'"
+                )));
+            }
+        }
+
+        let client_policy_name = client_config.routing.execution_policy();
+        let client_api_fallback = client_config.routing.api_fallback;
+        let requested_policy_name = request_preference
+            .map(normalize_execution_policy)
+            .unwrap_or(client_policy_name);
+        let requested_api_fallback = request_api_fallback.unwrap_or(client_api_fallback);
+
+        if client_policy.is_some()
+            && !transport_permissions_subset(
+                requested_policy_name,
+                requested_api_fallback,
+                client_policy_name,
+                client_api_fallback,
+            )
+        {
+            return Err(GatewayError::ClientPolicyDenied(
+                "request routing override exceeds the configured client transport permissions"
+                    .into(),
+            ));
+        }
+
+        let mut effective = (*client_config).clone();
+        if let Some(preference) = request_preference {
+            effective.routing.execution_preference = preference.to_string();
+        }
+        if let Some(api_fallback) = request_api_fallback {
+            effective.routing.api_fallback = api_fallback;
+        }
+        Ok(Arc::new(effective))
+    }
+
     pub async fn restore_adaptive_from_traces(&self) -> Result<usize, ExecutionTraceError> {
         let samples = self
             .execution_traces
@@ -267,13 +348,19 @@ impl Gateway {
             .await)
     }
 
-    pub async fn execute_openai_chat(
+    pub async fn execute_openai_chat_for_client(
         &self,
         requested_model: &str,
         body: &Value,
+        client_policy: Option<&ClientPolicyConfig>,
     ) -> Result<RoutedResponse, GatewayError> {
-        self.execute_openai_chat_with_affinity(requested_model, body, None)
-            .await
+        self.execute_openai_chat_with_affinity_for_client(
+            requested_model,
+            body,
+            None,
+            client_policy,
+        )
+        .await
     }
 
     pub async fn execute_openai_chat_with_affinity(
@@ -282,8 +369,30 @@ impl Gateway {
         body: &Value,
         preferred_route: Option<&str>,
     ) -> Result<RoutedResponse, GatewayError> {
-        self.execute_openai_chat_with_context(requested_model, body, preferred_route, None)
-            .await
+        self.execute_openai_chat_with_affinity_for_client(
+            requested_model,
+            body,
+            preferred_route,
+            None,
+        )
+        .await
+    }
+
+    pub async fn execute_openai_chat_with_affinity_for_client(
+        &self,
+        requested_model: &str,
+        body: &Value,
+        preferred_route: Option<&str>,
+        client_policy: Option<&ClientPolicyConfig>,
+    ) -> Result<RoutedResponse, GatewayError> {
+        self.execute_openai_chat_with_context(
+            requested_model,
+            body,
+            preferred_route,
+            None,
+            client_policy,
+        )
+        .await
     }
 
     pub async fn execute_openai_chat_with_thread_affinity(
@@ -298,6 +407,7 @@ impl Gateway {
             body,
             preferred_route,
             Some(thread_id),
+            None,
         )
         .await
     }
@@ -308,6 +418,7 @@ impl Gateway {
         body: &Value,
         preferred_route: Option<&str>,
         thread_id: Option<&str>,
+        client_policy: Option<&ClientPolicyConfig>,
     ) -> Result<RoutedResponse, GatewayError> {
         let started_at = Instant::now();
         let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
@@ -323,11 +434,27 @@ impl Gateway {
             }
         };
 
-        let config = self.live_config.snapshot();
+        let base_config = self.live_config.snapshot();
+        if let Some(policy) = client_policy {
+            let resolved = base_config.resolve_model_alias(requested_model);
+            if !policy.model_allowed(requested_model, resolved) {
+                let error = GatewayError::ClientPolicyDenied(format!(
+                    "model '{requested_model}' is not allowed for this client"
+                ));
+                return Err(self.finish_execution_error(&request_id, error).await);
+            }
+        }
+        let config = match self.effective_request_config(base_config, client_policy, body) {
+            Ok(config) => config,
+            Err(error) => return Err(self.finish_execution_error(&request_id, error).await),
+        };
         let mut routes = self
             .router
             .plan_for_body_with_config(config.clone(), requested_model, Some(body))
             .await;
+        if let Some(policy) = client_policy {
+            routes.retain(|route| policy.route_allowed(&route.id));
+        }
         if let Some(preferred_route) = preferred_route {
             if let Some(index) = routes.iter().position(|route| route.id == preferred_route) {
                 let keep_sticky = index == 0
@@ -804,10 +931,55 @@ impl Gateway {
     }
 }
 
+fn is_execution_preference(value: &str) -> bool {
+    matches!(
+        value,
+        "browser-first"
+            | "prefer-browser"
+            | "browser-only"
+            | "balanced"
+            | "api-first"
+            | "prefer-api"
+            | "api-only"
+    )
+}
+
+fn normalize_execution_policy(value: &str) -> &str {
+    match value {
+        "browser-first" | "prefer-browser" => "prefer-browser",
+        "browser-only" => "browser-only",
+        "api-first" | "prefer-api" => "prefer-api",
+        "api-only" => "api-only",
+        _ => "balanced",
+    }
+}
+
+fn transport_permissions(policy: &str, api_fallback: bool) -> (bool, bool) {
+    match policy {
+        "browser-only" => (true, false),
+        "api-only" => (false, true),
+        "prefer-browser" if !api_fallback => (true, false),
+        _ => (true, true),
+    }
+}
+
+fn transport_permissions_subset(
+    requested_policy: &str,
+    requested_api_fallback: bool,
+    client_policy: &str,
+    client_api_fallback: bool,
+) -> bool {
+    let requested = transport_permissions(requested_policy, requested_api_fallback);
+    let allowed = transport_permissions(client_policy, client_api_fallback);
+    (!requested.0 || allowed.0) && (!requested.1 || allowed.1)
+}
+
 fn sanitized_upstream_body(body: &Value) -> Value {
     let mut sanitized = body.clone();
     if let Some(object) = sanitized.as_object_mut() {
         object.remove("llmgateway_task");
+        object.remove("llmgateway_execution_preference");
+        object.remove("llmgateway_api_fallback");
     }
     sanitized
 }
@@ -945,6 +1117,52 @@ fn cooldown_for(status: StatusCode) -> i64 {
         429 => 60,
         500..=599 => 20,
         _ => 10,
+    }
+}
+
+#[cfg(test)]
+mod client_policy_tests {
+    use super::{normalize_execution_policy, transport_permissions_subset};
+
+    #[test]
+    fn request_transport_permissions_can_narrow_but_not_broaden_client_policy() {
+        assert!(transport_permissions_subset(
+            "browser-only",
+            false,
+            "prefer-browser",
+            true,
+        ));
+        assert!(transport_permissions_subset(
+            "prefer-browser",
+            false,
+            "browser-only",
+            false,
+        ));
+        assert!(!transport_permissions_subset(
+            "api-only",
+            true,
+            "browser-only",
+            false,
+        ));
+        assert!(!transport_permissions_subset(
+            "balanced",
+            false,
+            "prefer-browser",
+            false,
+        ));
+        assert!(!transport_permissions_subset(
+            "browser-only",
+            false,
+            "api-only",
+            true,
+        ));
+    }
+
+    #[test]
+    fn legacy_execution_preference_aliases_normalize_before_permission_checks() {
+        assert_eq!(normalize_execution_policy("browser-first"), "prefer-browser");
+        assert_eq!(normalize_execution_policy("api-first"), "prefer-api");
+        assert_eq!(normalize_execution_policy("balanced"), "balanced");
     }
 }
 

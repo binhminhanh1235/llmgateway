@@ -71,6 +71,7 @@ pub struct ThreadContext {
 pub struct ResponseContext {
     pub messages: Vec<Value>,
     pub route_id: Option<String>,
+    pub client_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -143,11 +144,24 @@ impl ConversationStore {
                 requested_model TEXT NOT NULL,
                 messages_json TEXT NOT NULL,
                 route_id TEXT,
+                client_id TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )",
         )
         .execute(&self.pool)
         .await?;
+        let response_context_columns = sqlx::query("PRAGMA table_info(response_contexts)")
+            .fetch_all(&self.pool)
+            .await?;
+        let has_client_id = response_context_columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "client_id")
+        });
+        if !has_client_id {
+            sqlx::query("ALTER TABLE response_contexts ADD COLUMN client_id TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS provider_conversations (
@@ -536,29 +550,36 @@ impl ConversationStore {
         requested_model: &str,
         messages: &[Value],
         route_id: Option<&str>,
+        client_id: Option<&str>,
     ) -> Result<(), ConversationError> {
         let raw = serde_json::to_string(messages)
             .map_err(|error| ConversationError::InvalidJson(error.to_string()))?;
         sqlx::query(
-            "INSERT INTO response_contexts (response_id, requested_model, messages_json, route_id)
-             VALUES (?, ?, ?, ?)
+            "INSERT INTO response_contexts
+             (response_id, requested_model, messages_json, route_id, client_id)
+             VALUES (?, ?, ?, ?, ?)
              ON CONFLICT(response_id) DO UPDATE SET
                 requested_model = excluded.requested_model,
                 messages_json = excluded.messages_json,
-                route_id = excluded.route_id",
+                route_id = excluded.route_id,
+                client_id = excluded.client_id",
         )
         .bind(response_id)
         .bind(requested_model)
         .bind(raw)
         .bind(route_id)
+        .bind(client_id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    pub async fn response_context(&self, response_id: &str) -> Result<ResponseContext, ConversationError> {
+    pub async fn response_context(
+        &self,
+        response_id: &str,
+    ) -> Result<ResponseContext, ConversationError> {
         let row = sqlx::query(
-            "SELECT messages_json, route_id
+            "SELECT messages_json, route_id, client_id
              FROM response_contexts WHERE response_id = ?",
         )
         .bind(response_id)
@@ -571,6 +592,7 @@ impl ConversationStore {
         Ok(ResponseContext {
             messages,
             route_id: row.try_get("route_id")?,
+            client_id: row.try_get("client_id")?,
         })
     }
 
