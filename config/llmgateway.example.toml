@@ -55,6 +55,23 @@ strict_openai_compatibility = false
 [storage]
 database_url = "sqlite://data/llmgateway.db"
 
+# P1 multimodal artifacts use content-addressed blobs under a configurable local data root.
+# Metadata, ownership, references and future provider-file bindings live in the shared SQLite DB.
+[artifacts]
+root = "data/artifacts"
+max_file_size_bytes = 26214400
+max_request_size_bytes = 52428800
+max_files_per_request = 8
+# Empty allow-list means "allow any MIME not denied below" after content sniffing.
+allowed_mime_types = []
+denied_mime_types = [
+  "application/x-dosexec",
+  "application/x-executable",
+  "application/x-mach-binary"
+]
+# P1 deliberately keeps remote URL ingestion off until SSRF controls are implemented.
+remote_url_ingestion = false
+
 # Browser sessions are opt-in. Each session receives an isolated Chromium profile directory.
 # llmgateway never returns raw cookies through its API. Login challenges, CAPTCHA, and 2FA
 # must be completed normally by the user in the browser.
