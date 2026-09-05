@@ -133,6 +133,54 @@ function Get-Affinity([string]$ThreadId) {
     return Invoke-GatewayJson -Method GET -Path "/_llmgateway/threads/$ThreadId/browser-affinity/$AccountId"
 }
 
+function Assert-ModelSwitchRejected([string]$ThreadId, [object]$FromModel, [object]$ToModel, [string]$ExpectedUrl, [int]$ExpectedOrdinal) {
+    $threadBefore = Invoke-GatewayJson -Method GET -Path "/v1/threads/$ThreadId"
+    $messageCountBefore = @($threadBefore.messages).Count
+    $bodyPath = [System.IO.Path]::GetTempFileName()
+    $responsePath = [System.IO.Path]::GetTempFileName()
+    try {
+        $body = @{
+            content = "This request must be rejected before provider submit."
+            model = [string]$ToModel.id
+            stream = $false
+        } | ConvertTo-Json -Compress
+        [System.IO.File]::WriteAllText(
+            $bodyPath,
+            $body,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        $curlArgs = @(
+            "--silent", "--show-error",
+            "--output", $responsePath,
+            "--write-out", "%{http_code}",
+            "-H", "Authorization: Bearer $ApiKey",
+            "-H", "Content-Type: application/json",
+            "--data-binary", "@$bodyPath",
+            "$BaseUrl/v1/threads/$ThreadId/messages"
+        )
+        $httpCode = [string](& curl.exe @curlArgs)
+        Assert-True ($LASTEXITCODE -eq 0) "model-switch probe failed to reach llmgateway"
+        $httpCode = $httpCode.Trim()
+        Assert-True ([int]$httpCode -ge 400) "switching '$($FromModel.id)' -> '$($ToModel.id)' unexpectedly succeeded"
+        $errorText = [System.IO.File]::ReadAllText($responsePath)
+        Assert-True ($errorText.Contains("start a new llmgateway thread")) "model-switch rejection did not come from Gemini native model affinity: $errorText"
+
+        Start-Sleep -Milliseconds 250
+        $runtime = Invoke-GatewayJson -Method GET -Path "/_llmgateway/browser-accounts/$AccountId/runtime"
+        Assert-True (-not [bool]$runtime.browser_running) "Chromium started while rejecting a model switch"
+
+        $affinityAfter = Get-Affinity $ThreadId
+        Assert-True ([string]$affinityAfter.mapping.conversation_url -eq $ExpectedUrl) "model-switch rejection changed native Gemini conversation"
+        Assert-True ([int]$affinityAfter.mapping.last_synced_ordinal -eq $ExpectedOrdinal) "model-switch rejection advanced native Gemini affinity"
+
+        $threadAfter = Invoke-GatewayJson -Method GET -Path "/v1/threads/$ThreadId"
+        Assert-True (@($threadAfter.messages).Count -eq $messageCountBefore) "model-switch rejection persisted a local user/assistant message"
+    } finally {
+        Remove-Item -LiteralPath $bodyPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $responsePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Cleanup {
     if ($KeepThreads) {
         Write-Host "[gemini-model-live] Keeping threads: $($CreatedThreads -join ', ')"
@@ -210,6 +258,8 @@ try {
     Assert-True ($urlA -ne $urlB) "two local threads reused the same native Gemini conversation"
 
     $ordA = [int]$affinityA.mapping.last_synced_ordinal
+    Write-Host "[gemini-model-live] Verifying mid-thread model switch is rejected before submit"
+    Assert-ModelSwitchRejected $threadA $selectedA $selectedB $urlA $ordA
     Send-Message $threadA $selectedA "Reply with exactly: model-a-continued"
     $affinityA2 = Get-Affinity $threadA
     Assert-True ([string]$affinityA2.mapping.conversation_url -eq $urlA) "Model A continuation changed native Gemini conversation"
