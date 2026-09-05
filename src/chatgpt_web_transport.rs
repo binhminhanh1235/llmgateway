@@ -22,6 +22,7 @@ use reqwest::{
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    error::Error as StdError,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -250,10 +251,12 @@ impl ChatGptWebHttpAdapter {
             });
         }
 
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|error| preflight_error(account_id, "session_bootstrap_invalid", error))?;
+        let body = parse_chatgpt_json_response(
+            response,
+            account_id,
+            "session_bootstrap_invalid",
+        )
+        .await?;
         let access_token = body
             .get("accessToken")
             .or_else(|| body.get("access_token"))
@@ -313,10 +316,12 @@ impl ChatGptWebHttpAdapter {
                 message: format!("ChatGPT model catalog returned HTTP {status}"),
             });
         }
-        let payload: Value = response
-            .json()
-            .await
-            .map_err(|error| preflight_error(account_id, "model_catalog_invalid", error))?;
+        let payload = parse_chatgpt_json_response(
+            response,
+            account_id,
+            "model_catalog_invalid",
+        )
+        .await?;
         let models = parse_chatgpt_model_catalog(&payload);
         if models.is_empty() {
             return Err(BrowserProviderError::AdapterIncompatible {
@@ -387,10 +392,12 @@ impl ChatGptWebHttpAdapter {
                 message: format!("ChatGPT Sentinel prepare returned HTTP {status}"),
             });
         }
-        let prepared: Value = prepare
-            .json()
-            .await
-            .map_err(|error| preflight_error(account_id, "sentinel_prepare_invalid", error))?;
+        let prepared = parse_chatgpt_json_response(
+            prepare,
+            account_id,
+            "sentinel_prepare_invalid",
+        )
+        .await?;
 
         for challenge in ["turnstile", "arkose", "so"] {
             if challenge_required(prepared.get(challenge)) {
@@ -495,10 +502,12 @@ impl ChatGptWebHttpAdapter {
                 message: format!("ChatGPT Sentinel finalize returned HTTP {status}"),
             });
         }
-        let finalized: Value = finalized
-            .json()
-            .await
-            .map_err(|error| preflight_error(account_id, "sentinel_finalize_invalid", error))?;
+        let finalized = parse_chatgpt_json_response(
+            finalized,
+            account_id,
+            "sentinel_finalize_invalid",
+        )
+        .await?;
         let token = finalized
             .get("token")
             .and_then(Value::as_str)
@@ -605,12 +614,12 @@ impl ChatGptWebHttpAdapter {
                 ),
             });
         }
-        let detail: Value = response
-            .json()
-            .await
-            .map_err(|error| {
-                preflight_error(&request.account.id, "direct_state_unsynced", error)
-            })?;
+        let detail = parse_chatgpt_json_response(
+            response,
+            &request.account.id,
+            "direct_state_unsynced",
+        )
+        .await?;
         let parent_message_id = detail
             .get("current_node")
             .and_then(Value::as_str)
@@ -707,16 +716,12 @@ impl ChatGptWebHttpAdapter {
             {
                 conduit = value.to_string();
             }
-            let body: Value = response
-                .json()
-                .await
-                .map_err(|error| {
-                    preflight_error(
-                        &request.account.id,
-                        "conversation_prepare_invalid",
-                        error,
-                    )
-                })?;
+            let body = parse_chatgpt_json_response(
+                response,
+                &request.account.id,
+                "conversation_prepare_invalid",
+            )
+            .await?;
             if let Some(value) = body
                 .get("conduit_token")
                 .and_then(Value::as_str)
@@ -1343,6 +1348,81 @@ fn chatgpt_conversation_id(raw: &str) -> Option<String> {
         .get(index + 1)
         .filter(|value| !value.is_empty())
         .map(|value| (*value).to_string())
+}
+
+fn reqwest_error_detail(error: &reqwest::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(current) = source {
+        let value = current.to_string();
+        if !value.trim().is_empty() && !parts.iter().any(|part| part == &value) {
+            parts.push(value);
+        }
+        source = current.source();
+    }
+    parts.join(": ")
+}
+
+async fn parse_chatgpt_json_response(
+    response: Response,
+    account_id: &str,
+    invalid_code: &str,
+) -> Result<Value, BrowserProviderError> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<none>")
+        .to_string();
+    let content_encoding = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<none>")
+        .to_string();
+
+    let bytes = response.bytes().await.map_err(|error| {
+        BrowserProviderError::AdapterIncompatible {
+            account_id: account_id.to_string(),
+            code: invalid_code.to_string(),
+            message: format!(
+                "ChatGPT response body could not be decoded (HTTP {status}, content-type={content_type}, content-encoding={content_encoding}): {}",
+                reqwest_error_detail(&error)
+            ),
+        }
+    })?;
+
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_ascii_lowercase();
+            let looks_like_challenge = content_type.to_ascii_lowercase().contains("text/html")
+                || sample.contains("<!doctype html")
+                || sample.contains("<html")
+                || sample.contains("turnstile")
+                || sample.contains("cf-chl")
+                || sample.contains("cloudflare");
+            Err(BrowserProviderError::AdapterIncompatible {
+                account_id: account_id.to_string(),
+                code: if looks_like_challenge {
+                    "browser_challenge_required".into()
+                } else {
+                    invalid_code.to_string()
+                },
+                message: if looks_like_challenge {
+                    format!(
+                        "ChatGPT returned an HTML/challenge response instead of JSON (HTTP {status}, content-type={content_type}); authenticated browser verification is required"
+                    )
+                } else {
+                    format!(
+                        "ChatGPT returned invalid JSON (HTTP {status}, content-type={content_type}, content-encoding={content_encoding}, bytes={}): {error}",
+                        bytes.len()
+                    )
+                },
+            })
+        }
+    }
 }
 
 fn preflight_error(
