@@ -512,21 +512,30 @@
       "browser-fallback": "Browser fallback",
       "unavailable": "Unavailable",
     };
-    const effective = effectiveLabels[transport.effective_transport] || transport.effective_transport || "Unavailable";
+    const effectiveState = Object.prototype.hasOwnProperty.call(effectiveLabels, transport.effective_transport)
+      ? transport.effective_transport
+      : "unavailable";
+    const effective = effectiveLabels[effectiveState];
+    const effectiveTone = effectiveState === "unavailable"
+      ? "warning"
+      : (effectiveState === "browser-fallback" ? "fallback" : "ready");
     const authWarning = browserlessOn && capability.requires_auth_snapshot && transport.auth_state !== "captured"
       ? '<span class="transport-warning">Authentication required</span>'
       : "";
     const supportNote = supported
-      ? (browserlessOn ? "Adapter-recommended browserless transport is preferred." : "Browser transport is forced for new requests.")
-      : "Not supported by this adapter";
+      ? (browserlessOn ? "Prefer the transport recommended by this adapter." : "Force browser transport for new requests.")
+      : "Browserless is not supported by this adapter.";
+    const adapterBadge = transport.effective_adapter_id
+      ? `<code class="account-transport-adapter">${escapeHtml(transport.effective_adapter_id)}</code>`
+      : "";
     return `
-      <section class="account-transport-panel">
+      <section class="account-transport-panel ${browserlessOn ? "is-enabled" : "is-disabled"}">
         <div class="account-transport-row">
-          <div>
+          <div class="account-transport-copy">
             <div class="account-transport-label">Browserless</div>
             <div class="account-transport-note">${escapeHtml(supportNote)}</div>
           </div>
-          <label class="toggle" title="${supported ? "Prefer adapter-recommended browserless transport" : "Browserless is not supported by this adapter"}">
+          <label class="toggle account-transport-toggle" title="${supported ? "Prefer adapter-recommended browserless transport" : "Browserless is not supported by this adapter"}">
             <input type="checkbox"
               data-toggle-browserless="${escapeAttr(account.id)}"
               ${browserlessOn ? "checked" : ""}
@@ -535,11 +544,14 @@
             <span class="toggle-track"></span>
           </label>
         </div>
-        <div class="account-transport-effective">
-          <span>Effective</span>
-          <strong>${escapeHtml(effective)}</strong>
-          ${transport.effective_adapter_id ? `<code>${escapeHtml(transport.effective_adapter_id)}</code>` : ""}
-          ${authWarning}
+        <div class="account-transport-effective ${effectiveTone}">
+          <span class="account-transport-status-icon" aria-hidden="true">${effectiveTone === "warning" ? "!" : "✓"}</span>
+          <div class="account-transport-status-copy">
+            <span class="account-transport-status-label">Effective transport</span>
+            <strong>${escapeHtml(effective)}</strong>
+            ${authWarning}
+          </div>
+          ${adapterBadge}
         </div>
       </section>`;
   }
