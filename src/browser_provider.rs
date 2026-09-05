@@ -1013,8 +1013,11 @@ fn wrap_response_with_browser_stop(
 ) -> Result<reqwest::Response, BrowserProviderError> {
     let status = response.status();
     let headers = response.headers().clone();
+    // Construct the guard outside the generator so the response owns it even if
+    // the body is dropped before its first poll.
+    let guard = BrowserFallbackStopGuard::new(session_id);
     let stream = async_stream::stream! {
-        let _guard = BrowserFallbackStopGuard::new(session_id);
+        let _guard = guard;
         let mut body = response.bytes_stream();
         while let Some(chunk) = body.next().await {
             match chunk {
