@@ -3887,7 +3887,7 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_http_preferred_opens_browser_only_for_interactive_recovery() {
+    fn chatgpt_http_preferred_opens_browser_for_safe_pre_submit_recovery() {
         let challenge = BrowserProviderError::AdapterIncompatible {
             account_id: "account-a".into(),
             code: "browser_challenge_required".into(),
@@ -3914,7 +3914,7 @@ mod tests {
             BrowserTransportMode::HttpPreferred,
             &login,
         ));
-        assert!(!direct_failure_can_open_browser(
+        assert!(direct_failure_can_open_browser(
             "browser-chatgpt",
             BrowserTransportMode::HttpPreferred,
             &generic,
@@ -4719,7 +4719,7 @@ mod browser_transport_policy_tests {
     }
 
     #[test]
-    fn chatgpt_http_preferred_reopens_browser_only_for_interactive_failure() {
+    fn chatgpt_http_preferred_reopens_browser_for_safe_pre_submit_failure() {
         let challenge = BrowserProviderError::AdapterIncompatible {
             account_id: "account-a".into(),
             code: "browser_challenge_required".into(),
@@ -4735,7 +4735,7 @@ mod browser_transport_policy_tests {
             BrowserTransportMode::HttpPreferred,
             &challenge,
         ));
-        assert!(!direct_failure_can_open_browser(
+        assert!(direct_failure_can_open_browser(
             "browser-chatgpt",
             BrowserTransportMode::HttpPreferred,
             &generic,
