@@ -695,8 +695,8 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
                 "input":canonical_input_modalities(),
                 "output":canonical_output_modalities()
             },
-            "gateway_execution":ModelCapabilities::foundation_text_execution(),
-            "live_attachments":false,
+            "gateway_execution":ModelCapabilities::vision_execution(),
+            "live_attachments":true,
             "artifact_store":{
                 "enabled":true,
                 "max_file_size_bytes":state.artifacts.config().max_file_size_bytes,
