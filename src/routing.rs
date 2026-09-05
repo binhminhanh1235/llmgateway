@@ -112,20 +112,7 @@ impl Router {
         }
     }
 
-    pub async fn plan(&self, requested_model: &str) -> Vec<RouteConfig> {
-        self.plan_for_body(requested_model, None).await
-    }
-
-    pub async fn plan_for_body(
-        &self,
-        requested_model: &str,
-        body: Option<&Value>,
-    ) -> Vec<RouteConfig> {
-        let config = self.live_config.snapshot();
-        self.plan_for_body_with_config(config, requested_model, body).await
-    }
-
-    pub async fn plan_for_body_with_config(
+     pub async fn plan_for_body_with_config(
         &self,
         config: Arc<AppConfig>,
         requested_model: &str,
@@ -141,28 +128,7 @@ impl Router {
         eligible.into_iter().map(|candidate| candidate.route).collect()
     }
 
-    pub async fn explain(&self, requested_model: &str) -> RouteDecisionTrace {
-        self.explain_for_body(requested_model, None).await
-    }
-
-    pub fn sticky_route_matches_best_task_fit(
-        &self,
-        requested_model: &str,
-        body: &Value,
-        preferred: &RouteConfig,
-        best: &RouteConfig,
-    ) -> bool {
-        let config = self.live_config.snapshot();
-        self.sticky_route_matches_best_task_fit_with_config(
-            config.as_ref(),
-            requested_model,
-            body,
-            preferred,
-            best,
-        )
-    }
-
-    pub fn sticky_route_matches_best_task_fit_with_config(
+     pub fn sticky_route_matches_best_task_fit_with_config(
         &self,
         config: &AppConfig,
         requested_model: &str,
@@ -192,16 +158,7 @@ impl Router {
             && preferred_fit.snapshot.adjustment == best_fit.snapshot.adjustment
     }
 
-    pub async fn explain_for_body(
-        &self,
-        requested_model: &str,
-        body: Option<&Value>,
-    ) -> RouteDecisionTrace {
-        let config = self.live_config.snapshot();
-        self.explain_for_body_with_config(config, requested_model, body).await
-    }
-
-    pub async fn explain_for_body_with_config(
+     pub async fn explain_for_body_with_config(
         &self,
         config: Arc<AppConfig>,
         requested_model: &str,
