@@ -236,11 +236,6 @@ pub struct AccountConfig {
 }
 
 impl AccountConfig {
-    #[cfg(test)]
-    pub fn discovery_enabled(&self, provider: &ProviderConfig) -> bool {
-        self.discover_models && !provider.is_browser()
-    }
-
     pub fn credential_required(&self, provider: &ProviderConfig) -> bool {
         !provider.is_browser()
     }
