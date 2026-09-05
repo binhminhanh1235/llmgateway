@@ -52,7 +52,6 @@ pub struct GeminiWebHttpAdapter {
 struct GeminiModelRecipe {
     external_id: String,
     display_name: String,
-    description: String,
     model_id: String,
     capacity: i64,
     capacity_field: usize,
@@ -1271,7 +1270,6 @@ fn parse_model_recipe(
         } else {
             display_name
         },
-        description,
         model_id,
         capacity,
         capacity_field,
