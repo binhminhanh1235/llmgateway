@@ -72,6 +72,42 @@ pub async fn browser_account_runtime_diagnostics(
         .adapter_diagnostics(&provider.kind, &account_id)
         .await;
     let last_execution = registry.last_transport_execution(&account_id).await;
+    let refresh_required = registry.model_catalog_refresh_required(&account_id);
+    let model_catalog = match state.catalog.models().await {
+        Ok(models) => {
+            let mut count = 0usize;
+            let mut discovered_at: Option<String> = None;
+            for model in models {
+                let Some(binding) = model.accounts.into_iter().find(|binding| {
+                    binding.account_id == account_id
+                        && binding.enabled
+                        && binding.discovered
+                        && binding.availability != "unavailable"
+                }) else {
+                    continue;
+                };
+                count += 1;
+                if let Some(timestamp) = binding.last_verified_at.or(binding.last_seen_at) {
+                    if discovered_at
+                        .as_ref()
+                        .is_none_or(|current| timestamp.as_str() > current.as_str())
+                    {
+                        discovered_at = Some(timestamp);
+                    }
+                }
+            }
+            json!({
+                "count": count,
+                "discovered_at": discovered_at,
+                "refresh_required": refresh_required,
+            })
+        }
+        Err(_) => json!({
+            "count": 0,
+            "discovered_at": Value::Null,
+            "refresh_required": true,
+        }),
+    };
     let auth_snapshot_available = browser_auth_runtime::get()
         .is_some_and(|vault| vault.contains(&session_id));
     let browser = match chromium_driver_runtime::get() {
@@ -111,6 +147,7 @@ pub async fn browser_account_runtime_diagnostics(
             },
             "auth_snapshot_available": auth_snapshot_available,
             "adapter": adapter,
+            "model_catalog": model_catalog,
             "last_execution": last_execution,
             "browser": browser,
             "effective_transport": effective_transport,
