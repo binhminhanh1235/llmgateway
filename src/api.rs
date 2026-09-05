@@ -39,11 +39,27 @@ pub async fn openai_chat(
         return response;
     }
     let config = state.gateway.config_snapshot();
-    let requested_model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(&config.api.default_model)
-        .to_string();
+    let requested_model = if config.api.strict_openai_compatibility {
+        match body
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+        {
+            Some(model) => model.to_string(),
+            None => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "'model' is required when api.strict_openai_compatibility is enabled",
+                )
+            }
+        }
+    } else {
+        body.get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(&config.api.default_model)
+            .to_string()
+    };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
     match state

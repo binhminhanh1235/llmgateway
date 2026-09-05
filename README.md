@@ -152,6 +152,15 @@ See [Browser provider adapters](docs/browser-provider-adapters.md) for complete 
 
 ## Gateway APIs
 
+By default, llmgateway keeps its local auto-routing extension for Chat Completions: a request that omits `model` uses `[api].default_model`. To enforce the stricter OpenAI Chat Completions contract, set:
+
+```toml
+[api]
+strict_openai_compatibility = true
+```
+
+With strict mode enabled, `POST /v1/chat/completions` requires a non-empty string `model` and returns HTTP 400 `invalid_request_error` when it is missing or invalid. Persistent thread APIs continue to use llmgateway defaults independently.
+
 ```text
 POST /v1/chat/completions
 POST /v1/responses

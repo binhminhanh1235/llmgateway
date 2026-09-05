@@ -37,6 +37,7 @@ jobs:
       - run: bash scripts/smoke-gemini-recovery.sh
       - run: bash scripts/smoke-chatgpt-browser.sh
       - run: bash scripts/smoke-local.sh
+      - run: bash scripts/smoke-openai-sdk.sh
       - run: bash scripts/smoke-hybrid.sh
       - run: bash scripts/smoke-memory.sh
       - run: bash scripts/smoke-quota.sh
