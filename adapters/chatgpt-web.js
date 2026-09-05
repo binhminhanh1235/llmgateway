@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.05.3";
+  const ADAPTER_VERSION = "2026.09.05.4";
 
   const defaults = {
     input: [
@@ -16,6 +16,11 @@
       "div#prompt-textarea[contenteditable='true']",
       "[contenteditable='true'][data-testid='composer-input']",
       "[contenteditable='true'][role='textbox']"
+    ],
+    fileInput: [
+      "input[type='file'][accept*='image']",
+      "input[type='file'][accept*='png']",
+      "input[type='file']"
     ],
     send: [
       "#composer-submit-button",
@@ -152,6 +157,52 @@
       }).filter(Boolean).join("\n");
     }
     return String(content || "");
+  };
+
+  const imageDataUrls = (request) => {
+    const urls = [];
+    for (const message of Array.isArray(request?.messages) ? request.messages : []) {
+      for (const part of Array.isArray(message?.content) ? message.content : []) {
+        if (!["image_url", "input_image", "image"].includes(String(part?.type || ""))) continue;
+        const raw = typeof part?.image_url === "string"
+          ? part.image_url
+          : part?.image_url?.url || part?.url || "";
+        if (typeof raw === "string" && raw.startsWith("data:image/")) urls.push(raw);
+      }
+    }
+    return urls;
+  };
+
+  const dataUrlFile = (dataUrl, index) => {
+    const match = String(dataUrl || "").match(/^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i);
+    if (!match) throw new Error("INVALID_REQUEST: browser image attachment must be a base64 image data URL");
+    const mime = match[1].toLowerCase();
+    const binary = atob(match[2]);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    const extension = mime === "image/jpeg" ? "jpg" : (mime.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "");
+    return new File([bytes], "llmgateway-image-" + index + "." + extension, { type: mime });
+  };
+
+  const attachImages = async (request, context) => {
+    const urls = imageDataUrls(request);
+    if (!urls.length) return 0;
+    const input = await waitFor(() => queryFirst(context, "fileInput"), 8000);
+    if (!input) throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT image file input was not found");
+    if (urls.length > 1 && input.multiple === false) {
+      throw new Error("INVALID_REQUEST: ChatGPT composer currently accepts one image per file input");
+    }
+    const transfer = new DataTransfer();
+    urls.forEach((url, index) => transfer.items.add(dataUrlFile(url, index)));
+    try {
+      input.files = transfer.files;
+    } catch (_) {
+      throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT image file input rejected DataTransfer files");
+    }
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(350);
+    return urls.length;
   };
 
   const toolProtocol = (request) => {
@@ -745,6 +796,8 @@
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
       await setComposer(composer, prompt);
       markStreamProgress(state, "prompt-ready");
+      const attachedImages = await attachImages(request, context);
+      if (attachedImages) markStreamProgress(state, "attachments-ready");
 
       state.recoveryArmed = true;
       saveStreamRecovery(state);
@@ -1012,6 +1065,7 @@
       const prompt = formatMessages(request);
       if (!prompt.trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
       await setComposer(composer, prompt);
+      await attachImages(request, context);
       await submitComposer(context, composer);
 
       const startedAt = Date.now();
