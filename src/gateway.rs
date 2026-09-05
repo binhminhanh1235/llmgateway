@@ -972,10 +972,13 @@ mod stream_trace_tests {
 
     #[test]
     fn model_binding_conflict_does_not_mutate_route_health() {
-        let conflict = GatewayError::BrowserTransport(
-            "Gemini native conversation is already bound to model 'pro'".into(),
-        );
-        assert_eq!(route_failure_policy(&conflict), None);
+        for provider in ["Gemini", "Qwen"] {
+            let conflict = GatewayError::BrowserTransport(format!(
+                "{provider} native conversation is already bound to model 'pro'"
+            ));
+            assert!(!is_retryable_attempt_error(&conflict));
+            assert_eq!(route_failure_policy(&conflict), None);
+        }
 
         assert_eq!(
             route_failure_policy(&GatewayError::BrowserTransport("network".into())),
