@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euxo pipefail
+set -euo pipefail
 
 export LLMGATEWAY_API_KEY="ci-local-key"
 export GROUP_ROUTE_KEY="healthy"
@@ -73,8 +73,8 @@ done
 AUTH=(-H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 JSON=(-H "Content-Type: application/json")
 
-GROUPS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
-printf '%s' "$GROUPS" | python3 -c '
+GROUP_PAYLOAD=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
+printf '%s' "$GROUP_PAYLOAD" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
 ids={m["id"] for m in x["models"]}
