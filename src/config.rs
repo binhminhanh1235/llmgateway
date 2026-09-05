@@ -11,6 +11,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
+    pub artifacts: ArtifactConfig,
+    #[serde(default)]
     pub context: ContextConfig,
     #[serde(default)]
     pub routing: RoutingConfig,
@@ -102,6 +104,38 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             database_url: default_database_url(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ArtifactConfig {
+    #[serde(default = "default_artifact_root")]
+    pub root: String,
+    #[serde(default = "default_artifact_max_file_size_bytes")]
+    pub max_file_size_bytes: usize,
+    #[serde(default = "default_artifact_max_request_size_bytes")]
+    pub max_request_size_bytes: usize,
+    #[serde(default = "default_artifact_max_files_per_request")]
+    pub max_files_per_request: usize,
+    #[serde(default)]
+    pub allowed_mime_types: Vec<String>,
+    #[serde(default = "default_artifact_denied_mime_types")]
+    pub denied_mime_types: Vec<String>,
+    #[serde(default)]
+    pub remote_url_ingestion: bool,
+}
+
+impl Default for ArtifactConfig {
+    fn default() -> Self {
+        Self {
+            root: default_artifact_root(),
+            max_file_size_bytes: default_artifact_max_file_size_bytes(),
+            max_request_size_bytes: default_artifact_max_request_size_bytes(),
+            max_files_per_request: default_artifact_max_files_per_request(),
+            allowed_mime_types: Vec::new(),
+            denied_mime_types: default_artifact_denied_mime_types(),
+            remote_url_ingestion: false,
         }
     }
 }
@@ -411,6 +445,32 @@ impl AppConfig {
             }
         }
 
+        if self.artifacts.root.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "artifacts.root must not be empty".into(),
+            ));
+        }
+        if self.artifacts.max_file_size_bytes == 0 {
+            return Err(ConfigError::Invalid(
+                "artifacts.max_file_size_bytes must be greater than zero".into(),
+            ));
+        }
+        if self.artifacts.max_request_size_bytes < self.artifacts.max_file_size_bytes {
+            return Err(ConfigError::Invalid(
+                "artifacts.max_request_size_bytes must be greater than or equal to artifacts.max_file_size_bytes".into(),
+            ));
+        }
+        if self.artifacts.max_files_per_request == 0 {
+            return Err(ConfigError::Invalid(
+                "artifacts.max_files_per_request must be greater than zero".into(),
+            ));
+        }
+        if self.artifacts.remote_url_ingestion {
+            return Err(ConfigError::Invalid(
+                "artifacts.remote_url_ingestion is not available until SSRF controls are implemented".into(),
+            ));
+        }
+
         if self.providers.is_empty() {
             return Err(ConfigError::Invalid("at least one provider is required".into()));
         }
@@ -708,6 +768,17 @@ fn default_port() -> u16 { 7331 }
 fn default_gateway_key_env() -> String { "LLMGATEWAY_API_KEY".into() }
 fn default_model() -> String { "llmgateway-auto".into() }
 fn default_database_url() -> String { "sqlite://data/llmgateway.db".into() }
+fn default_artifact_root() -> String { "data/artifacts".into() }
+fn default_artifact_max_file_size_bytes() -> usize { 25 * 1024 * 1024 }
+fn default_artifact_max_request_size_bytes() -> usize { 50 * 1024 * 1024 }
+fn default_artifact_max_files_per_request() -> usize { 8 }
+fn default_artifact_denied_mime_types() -> Vec<String> {
+    vec![
+        "application/x-dosexec".into(),
+        "application/x-executable".into(),
+        "application/x-mach-binary".into(),
+    ]
+}
 fn default_provider_kind() -> String { "openai-compatible".into() }
 fn default_models_path() -> String { "models".into() }
 fn default_auth_style() -> String { "bearer".into() }
