@@ -63,3 +63,26 @@ llmgateway rejects:
 ## Future extensions
 
 The tier model is intentionally small. Follow-up work can add per-tier strategies such as weighted, round-robin, least-loaded or lowest-latency selection, capability requirements, group-to-group fallback and a drag/drop admin editor without changing the hard-tier contract.
+
+
+## Admin UI and CRUD API
+
+The built-in UI includes a **Groups** view. Choose **Create group** to define a stable group ID, add ordered fallback tiers, and assign configured routes without editing TOML by hand.
+
+Saving a group:
+
+- validates all tier priorities and route references;
+- persists the active `virtual_models` / `model_groups` namespace with a backup;
+- hot-swaps the live gateway configuration;
+- exposes the new logical model through `/v1/models` immediately, without a restart.
+
+Admin endpoints:
+
+- `GET /_llmgateway/model-groups` — list groups plus configured route inventory;
+- `POST /_llmgateway/model-groups` — create a tiered group;
+- `PUT /_llmgateway/model-groups/{group_id}` — replace the group's tiers;
+- `DELETE /_llmgateway/model-groups/{group_id}` — delete a non-default group.
+
+The default group cannot be deleted. A group targeted by an alias must be detached from that alias before deletion.
+
+The browser-account wizard is tier-aware: when it auto-adds a new route to an existing tiered built-in group, it appends that route to the lowest-priority fallback tier instead of creating an invalid mixed `routes` + `tiers` configuration.
