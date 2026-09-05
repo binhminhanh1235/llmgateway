@@ -42,7 +42,7 @@ pub struct DeepSeekWebHttpAdapter {
 #[derive(Clone, Debug)]
 struct DeepSeekNativeConversation {
     chat_session_id: String,
-    response_message_id: String,
+    response_message_id: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -61,7 +61,7 @@ enum DeepSeekChannel {
 
 #[derive(Clone, Debug, Default)]
 struct DeepSeekFrameUpdate {
-    response_message_id: Option<String>,
+    response_message_id: Option<u32>,
     output: String,
     reasoning: String,
     completed: bool,
@@ -78,7 +78,7 @@ struct DeepSeekSseDecoder {
 struct DeepSeekStreamState {
     output: String,
     reasoning: String,
-    response_message_id: String,
+    response_message_id: Option<u32>,
     completed: bool,
 }
 
@@ -87,11 +87,8 @@ impl DeepSeekStreamState {
         if let Some(error) = update.error {
             return Err(error);
         }
-        if let Some(id) = update
-            .response_message_id
-            .filter(|value| !value.trim().is_empty())
-        {
-            self.response_message_id = id;
+        if let Some(id) = update.response_message_id {
+            self.response_message_id = Some(id);
         }
         self.completed |= update.completed;
         self.output.push_str(&update.output);
@@ -107,7 +104,7 @@ impl DeepSeekStreamState {
         if self.output.trim().is_empty() {
             return Err("DeepSeek direct stream completed without assistant output".into());
         }
-        if self.response_message_id.trim().is_empty() {
+        if self.response_message_id.is_none() {
             return Err(
                 "DeepSeek direct stream completed without response_message_id".into(),
             );
@@ -185,7 +182,7 @@ impl DeepSeekSseDecoder {
             update.response_message_id = value
                 .pointer("/data/response_message_id")
                 .or_else(|| value.get("response_message_id"))
-                .and_then(value_to_id);
+                .and_then(value_to_u32);
         }
         if event == "close" {
             update.completed = true;
@@ -195,7 +192,7 @@ impl DeepSeekSseDecoder {
             update.response_message_id = value
                 .pointer("/data/response_message_id")
                 .or_else(|| value.get("response_message_id"))
-                .and_then(value_to_id);
+                .and_then(value_to_u32);
         }
 
         if let Some(response) = value.pointer("/data/v/response") {
@@ -641,15 +638,21 @@ impl DeepSeekWebHttpAdapter {
             .get("next_parent_id")
             .or_else(|| state.get("response_message_id"))
             .or_else(|| state.get("response_id"))
-            .and_then(value_to_id)
-            .unwrap_or_default();
-        if chat_session_id.is_empty() || response_message_id.is_empty() {
+            .and_then(value_to_u32);
+        let Some(response_message_id) = response_message_id else {
             return Err(BrowserProviderError::AdapterIncompatible {
                 account_id: request.account.id.clone(),
                 code: "direct_state_unsynced".into(),
                 message:
-                    "DeepSeek direct conversation state is missing chat_session_id/response_message_id"
+                    "DeepSeek direct conversation state is missing a numeric response_message_id"
                         .into(),
+            });
+        };
+        if chat_session_id.is_empty() {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "direct_state_unsynced".into(),
+                message: "DeepSeek direct conversation state is missing chat_session_id".into(),
             });
         }
         Ok(Some(DeepSeekNativeConversation {
@@ -664,7 +667,7 @@ impl DeepSeekWebHttpAdapter {
         material: &BrowserAuthMaterial,
         access_token: &str,
         chat_session_id: &str,
-        parent_message_id: Option<&str>,
+        parent_message_id: Option<u32>,
         prompt: &str,
         model: &DeepSeekModelSelection,
     ) -> Result<Response, BrowserProviderError> {
@@ -753,7 +756,7 @@ impl DeepSeekWebHttpAdapter {
     async fn persist_conversation_state(
         request: &BrowserAdapterRequest,
         chat_session_id: &str,
-        request_parent_id: Option<&str>,
+        request_parent_id: Option<u32>,
         state: &DeepSeekStreamState,
         model: &DeepSeekModelSelection,
     ) -> Result<(), BrowserProviderError> {
@@ -799,7 +802,7 @@ impl DeepSeekWebHttpAdapter {
         request: &BrowserAdapterRequest,
         response: Response,
         chat_session_id: String,
-        request_parent_id: Option<String>,
+        request_parent_id: Option<u32>,
         model: DeepSeekModelSelection,
     ) -> Result<Response, BrowserProviderError> {
         let mut decoder = DeepSeekSseDecoder::default();
@@ -831,7 +834,7 @@ impl DeepSeekWebHttpAdapter {
         Self::persist_conversation_state(
             request,
             &chat_session_id,
-            request_parent_id.as_deref(),
+            request_parent_id,
             &state,
             &model,
         )
@@ -865,7 +868,7 @@ impl DeepSeekWebHttpAdapter {
         request: &BrowserAdapterRequest,
         response: Response,
         chat_session_id: String,
-        request_parent_id: Option<String>,
+        request_parent_id: Option<u32>,
         model_selection: DeepSeekModelSelection,
     ) -> Result<Response, BrowserProviderError> {
         let request = request.clone();
@@ -973,7 +976,7 @@ impl DeepSeekWebHttpAdapter {
             if let Err(error) = Self::persist_conversation_state(
                 &request,
                 &chat_session_id,
-                request_parent_id.as_deref(),
+                request_parent_id,
                 &state,
                 &model_selection,
             )
@@ -1118,7 +1121,7 @@ impl BrowserProviderAdapter for DeepSeekWebHttpAdapter {
                 &material,
                 &access_token,
                 &chat_session_id,
-                request_parent_id.as_deref(),
+                request_parent_id,
                 &prompt,
                 &model,
             )
@@ -1374,12 +1377,18 @@ fn error_message(value: &Value) -> String {
         .to_string()
 }
 
-fn value_to_id(value: &Value) -> Option<String> {
+fn value_to_u32(value: &Value) -> Option<u32> {
     value
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| value.as_i64().map(|id| id.to_string()))
-        .or_else(|| value.as_u64().map(|id| id.to_string()))
+        .as_u64()
+        .and_then(|id| u32::try_from(id).ok())
+        .or_else(|| value.as_i64().and_then(|id| u32::try_from(id).ok()))
+        .or_else(|| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .and_then(|value| value.parse::<u32>().ok())
+        })
 }
 
 fn login_required(account_id: &str, message: &str) -> BrowserProviderError {
@@ -1465,7 +1474,7 @@ mod tests {
     #[test]
     fn sse_decoder_tracks_reasoning_output_and_parent_id_across_chunks() {
         let mut decoder = DeepSeekSseDecoder::default();
-        let first = b"event: ready\ndata: {\"data\":{\"response_message_id\":\"r1\"}}\n\ndata: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"THINK\",\"content\":\"why \"}]}\n\n";
+        let first = b"event: ready\ndata: {\"data\":{\"response_message_id\":2}}\n\ndata: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"THINK\",\"content\":\"why \"}]}\n\n";
         let second = b"data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"because\"}\n\ndata: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"RESPONSE\",\"content\":\"hello\"}]}\n\nevent: close\ndata: {}\n\n";
         let mut state = DeepSeekStreamState::default();
         for update in decoder.push(first).unwrap() {
@@ -1474,7 +1483,7 @@ mod tests {
         for update in decoder.push(second).unwrap() {
             state.apply(update).unwrap();
         }
-        assert_eq!(state.response_message_id, "r1");
+        assert_eq!(state.response_message_id, Some(2));
         assert_eq!(state.reasoning, "why because");
         assert_eq!(state.output, "hello");
         assert!(state.completed);
@@ -1482,10 +1491,26 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_parent_message_id_is_numeric_on_wire_and_legacy_strings_migrate() {
+        assert_eq!(value_to_u32(&json!(2)), Some(2));
+        assert_eq!(value_to_u32(&json!("2")), Some(2));
+        assert_eq!(value_to_u32(&json!("-1")), None);
+        assert_eq!(value_to_u32(&json!("not-a-number")), None);
+
+        let parent_message_id = value_to_u32(&json!("2"));
+        let body = json!({
+            "chat_session_id": "session-1",
+            "parent_message_id": parent_message_id,
+        });
+        assert_eq!(body["parent_message_id"], json!(2));
+        assert!(body["parent_message_id"].is_u64());
+    }
+
+    #[test]
     fn incomplete_stream_is_never_accepted() {
         let state = DeepSeekStreamState {
             output: "partial".into(),
-            response_message_id: "r1".into(),
+            response_message_id: Some(2),
             ..Default::default()
         };
         assert!(state
