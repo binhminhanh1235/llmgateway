@@ -80,6 +80,8 @@ pub enum BrowserAccountSetupError {
     TomlEdit(#[from] toml_edit::TomlError),
     #[error("browser account setup produced invalid gateway configuration: {0}")]
     InvalidGatewayConfig(#[from] crate::config::ConfigError),
+    #[error("browser account '{0}' was not found")]
+    NotFound(String),
     #[error("invalid browser account setup: {0}")]
     Invalid(String),
     #[error("browser account '{0}' already exists")]
@@ -135,6 +137,11 @@ pub async fn set_browser_account_enabled(
                 &error.to_string(),
             ),
         },
+        Err(BrowserAccountSetupError::NotFound(account_id)) => json_error(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            &format!("unknown account '{account_id}'"),
+        ),
         Err(BrowserAccountSetupError::Invalid(message)) => json_error(
             StatusCode::BAD_REQUEST,
             "browser_account_setup_error",
@@ -248,7 +255,7 @@ pub fn apply_browser_account_enabled(
     let raw = fs::read_to_string(path)?;
     let current = AppConfig::parse(&raw)?;
     let account = current.account(account_id).ok_or_else(|| {
-        BrowserAccountSetupError::Invalid(format!("unknown account '{account_id}'"))
+        BrowserAccountSetupError::NotFound(account_id.to_string())
     })?;
     let provider = current.provider(&account.provider).ok_or_else(|| {
         BrowserAccountSetupError::Invalid(format!(
@@ -280,7 +287,7 @@ pub fn apply_browser_account_enabled(
         .iter_mut()
         .find(|table| table.get("id").and_then(Item::as_str) == Some(account_id))
         .ok_or_else(|| {
-            BrowserAccountSetupError::Invalid(format!("unknown account '{account_id}'"))
+            BrowserAccountSetupError::NotFound(account_id.to_string())
         })?;
     table["enabled"] = value(enabled);
 
