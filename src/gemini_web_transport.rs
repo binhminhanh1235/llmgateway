@@ -3,7 +3,8 @@ use crate::{
     browser_auth_runtime, conversation_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
-        BrowserProviderAdapter, BrowserProviderError, BROWSER_ADAPTER_CONTRACT_VERSION,
+        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
+        BROWSER_ADAPTER_CONTRACT_VERSION,
     },
 };
 use async_trait::async_trait;
@@ -16,24 +17,61 @@ use reqwest::{
 };
 use serde_json::{json, Value};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 const GEMINI_HOST: &str = "gemini.google.com";
 const GEMINI_INIT_URL: &str = "https://gemini.google.com/app";
 const GEMINI_GENERATE_URL: &str =
     "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate";
+const GEMINI_BATCH_EXEC_URL: &str = "https://gemini.google.com/_/BardChatUi/data/batchexecute";
+const GEMINI_GET_USER_STATUS_RPC: &str = "otAQ7b";
+const GEMINI_MODEL_HEADER: &str = "x-goog-ext-525001261-jspb";
+const GEMINI_MODEL_AUX_HEADER_1: &str = "x-goog-ext-73010989-jspb";
+const GEMINI_MODEL_AUX_HEADER_2: &str = "x-goog-ext-73010990-jspb";
 const GEMINI_REFERER: &str = "https://gemini.google.com/";
 const GEMINI_DEFAULT_LANGUAGE: &str = "en";
-const GEMINI_ADAPTER_VERSION: &str = "experimental-1";
+const GEMINI_DEFAULT_MODEL: &str = "gemini-web-default";
+const GEMINI_ADAPTER_VERSION: &str = "experimental-2";
 const USAGE_LIMIT_EXCEEDED: i64 = 1037;
+const MODEL_HEADER_INVALID: i64 = 1052;
 const STREAM_REWRITE_HOLD_CHARS: usize = 192;
+const MODEL_CATALOG_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Clone)]
 pub struct GeminiWebHttpAdapter {
     client: Client,
+    model_catalogs: Arc<RwLock<BTreeMap<String, GeminiModelCatalogSnapshot>>>,
+}
+
+#[derive(Clone, Debug)]
+struct GeminiModelRecipe {
+    external_id: String,
+    display_name: String,
+    description: String,
+    model_id: String,
+    capacity: i64,
+    capacity_field: usize,
+    model_number: i64,
+    aliases: BTreeSet<String>,
+    capabilities: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct GeminiModelCatalogSnapshot {
+    discovered_at: Instant,
+    wire_session_id: String,
+    models: Vec<GeminiModelRecipe>,
+}
+
+#[derive(Clone, Debug)]
+struct GeminiModelSelection {
+    recipe: GeminiModelRecipe,
+    wire_session_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -75,7 +113,10 @@ impl GeminiWebHttpAdapter {
             .connect_timeout(Duration::from_secs(5))
             .build()
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            model_catalogs: Arc::new(RwLock::new(BTreeMap::new())),
+        })
     }
 
     fn vault() -> Result<&'static Arc<BrowserAuthVault>, BrowserProviderError> {
@@ -189,20 +230,193 @@ impl GeminiWebHttpAdapter {
         })
     }
 
+    async fn model_catalog(
+        &self,
+        binding: &BrowserAccountBinding,
+        account_id: &str,
+        force: bool,
+    ) -> Result<GeminiModelCatalogSnapshot, BrowserProviderError> {
+        if !force {
+            if let Some(cached) = self.model_catalogs.read().await.get(&binding.session).cloned() {
+                if cached.discovered_at.elapsed() <= MODEL_CATALOG_TTL {
+                    return Ok(cached);
+                }
+            }
+        }
+
+        let material = self.auth_material(&binding.session, account_id)?;
+        let timeout_duration =
+            Duration::from_millis(binding.probe_timeout_ms.unwrap_or(8_000).max(3_000));
+        let session = self
+            .init_session(&material, account_id, timeout_duration)
+            .await?;
+        let snapshot = self
+            .fetch_model_catalog(&session, account_id, timeout_duration)
+            .await?;
+        self.model_catalogs
+            .write()
+            .await
+            .insert(binding.session.clone(), snapshot.clone());
+        Ok(snapshot)
+    }
+
+    async fn fetch_model_catalog(
+        &self,
+        session: &GeminiInitSession,
+        account_id: &str,
+        timeout_duration: Duration,
+    ) -> Result<GeminiModelCatalogSnapshot, BrowserProviderError> {
+        let wire_session_id = Uuid::new_v4().to_string().to_uppercase();
+        let batch_header = serde_json::to_string(&json!([
+            1,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            [4, 5, 6, 8],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            wire_session_id
+        ]))
+        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        let f_req = serde_json::to_string(&json!([[[
+            GEMINI_GET_USER_STATUS_RPC,
+            "[]",
+            null,
+            "generic"
+        ]]]))
+        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+
+        let mut query: Vec<(&str, String)> = vec![
+            ("rpcids", GEMINI_GET_USER_STATUS_RPC.into()),
+            ("hl", session.language.clone()),
+            ("_reqid", request_id().to_string()),
+            ("rt", "c".into()),
+            ("source-path", "/app".into()),
+        ];
+        if !session.build_label.is_empty() {
+            query.push(("bl", session.build_label.clone()));
+        }
+        if !session.frontend_session_id.is_empty() {
+            query.push(("f.sid", session.frontend_session_id.clone()));
+        }
+
+        let mut upstream = self
+            .client
+            .post(GEMINI_BATCH_EXEC_URL)
+            .query(&query)
+            .header(
+                CONTENT_TYPE,
+                "application/x-www-form-urlencoded;charset=utf-8",
+            )
+            .header(ORIGIN, "https://gemini.google.com")
+            .header(REFERER, GEMINI_REFERER)
+            .header("x-same-domain", "1")
+            .header(GEMINI_MODEL_HEADER, batch_header)
+            .header(GEMINI_MODEL_AUX_HEADER_1, "[0]")
+            .header(COOKIE, &session.cookie_header)
+            .form(&[("at", session.access_token.clone()), ("f.req", f_req)])
+            .timeout(timeout_duration);
+        if let Some(selected) = selection {
+            upstream = upstream
+                .header(
+                    GEMINI_MODEL_HEADER,
+                    model_header_value(&selected.recipe, &selected.wire_session_id)?,
+                )
+                .header(GEMINI_MODEL_AUX_HEADER_1, "[0]")
+                .header(GEMINI_MODEL_AUX_HEADER_2, "[0,0,0]");
+        }
+        if !session.user_agent.trim().is_empty() {
+            upstream = upstream.header(USER_AGENT, session.user_agent.trim());
+        }
+
+        let response = upstream
+            .send()
+            .await
+            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        let status = response.status();
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: account_id.to_string(),
+                code: "login_required".into(),
+                message: format!("Gemini model discovery rejected saved auth with HTTP {status}"),
+            });
+        }
+        if !status.is_success() {
+            return Err(BrowserProviderError::Transport(format!(
+                "Gemini model discovery returned HTTP {status}"
+            )));
+        }
+        let raw = response
+            .bytes()
+            .await
+            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        let models = parse_model_catalog_response(&raw)?;
+        if models.is_empty() {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: account_id.to_string(),
+                code: "model_discovery_empty".into(),
+                message: "Gemini GET_USER_STATUS returned no selectable models".into(),
+            });
+        }
+
+        Ok(GeminiModelCatalogSnapshot {
+            discovered_at: Instant::now(),
+            wire_session_id,
+            models,
+        })
+    }
+
+    async fn resolve_model_selection(
+        &self,
+        request: &BrowserAdapterRequest,
+    ) -> Result<Option<GeminiModelSelection>, BrowserProviderError> {
+        if request.route.model == GEMINI_DEFAULT_MODEL {
+            return Ok(None);
+        }
+        let snapshot = self
+            .model_catalog(&request.binding, &request.account.id, false)
+            .await?;
+        let requested = normalize_model_lookup(&request.route.model);
+        let recipe = snapshot
+            .models
+            .iter()
+            .find(|model| {
+                model.external_id == request.route.model
+                    || model.aliases.contains(&requested)
+                    || model.model_id.eq_ignore_ascii_case(&request.route.model)
+            })
+            .cloned()
+            .ok_or_else(|| BrowserProviderError::ModelUnavailable {
+                account_id: request.account.id.clone(),
+                model: request.route.model.clone(),
+            })?;
+        Ok(Some(GeminiModelSelection {
+            recipe,
+            wire_session_id: snapshot.wire_session_id,
+        }))
+    }
+
+    async fn invalidate_model_catalog(&self, session_id: &str) {
+        self.model_catalogs.write().await.remove(session_id);
+    }
+
     async fn submit_generation(
         &self,
         request: &BrowserAdapterRequest,
         session: &GeminiInitSession,
         prompt: &str,
         metadata: Value,
+        selection: Option<&GeminiModelSelection>,
     ) -> Result<Response, BrowserProviderError> {
-        if request.route.model != "gemini-web-default" {
-            return Err(BrowserProviderError::ModelUnavailable {
-                account_id: request.account.id.clone(),
-                model: request.route.model.clone(),
-            });
-        }
-
         let request_uuid = Uuid::new_v4().to_string().to_uppercase();
         let inner = build_inner_request(
             prompt,
@@ -210,6 +424,7 @@ impl GeminiWebHttpAdapter {
             metadata,
             &request_uuid,
             request.binding.ephemeral_chat.unwrap_or(false) && request.thread_id.is_none(),
+            selection.map_or(1, |selected| selected.recipe.model_number),
         );
         let f_req = serde_json::to_string(&json!([
             Value::Null,
@@ -377,6 +592,9 @@ impl GeminiWebHttpAdapter {
                         "Gemini web usage limit exceeded".into(),
                     ));
                 }
+                if error_code == MODEL_HEADER_INVALID {
+                    self.invalidate_model_catalog(&request.session_id).await;
+                }
                 if error_code != 0 {
                     return Err(BrowserProviderError::Transport(format!(
                         "Gemini StreamGenerate returned error code {error_code}"
@@ -426,8 +644,10 @@ impl GeminiWebHttpAdapter {
         request: &BrowserAdapterRequest,
         response: Response,
     ) -> Result<reqwest::Response, BrowserProviderError> {
+        let adapter = self.clone();
         let provider_id = request.provider.id.clone();
         let account_id = request.account.id.clone();
+        let session_id = request.session_id.clone();
         let thread_id = request.thread_id.clone();
         let model = request.route.model.clone();
         let completion_id = format!("chatcmpl_gemini_{}", Uuid::new_v4().simple());
@@ -478,6 +698,9 @@ impl GeminiWebHttpAdapter {
                 for part in frames {
                     let update = parse_frame_update(&part);
                     if let Some(error_code) = update.error_code {
+                        if error_code == MODEL_HEADER_INVALID {
+                            adapter.invalidate_model_catalog(&session_id).await;
+                        }
                         let message = if error_code == USAGE_LIMIT_EXCEEDED {
                             "Gemini web usage limit exceeded".to_string()
                         } else {
@@ -620,32 +843,36 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
         "gemini-web-http"
     }
 
+    fn supports_model_discovery(&self) -> bool {
+        true
+    }
+
+    async fn discover_models(
+        &self,
+        account_id: &str,
+        binding: &BrowserAccountBinding,
+        force: bool,
+    ) -> Result<Vec<BrowserDiscoveredModel>, BrowserProviderError> {
+        let snapshot = self.model_catalog(binding, account_id, force).await?;
+        Ok(snapshot
+            .models
+            .iter()
+            .map(|model| BrowserDiscoveredModel {
+                external_id: model.external_id.clone(),
+                display_name: model.display_name.clone(),
+                owned_by: "Google".into(),
+                context_window: None,
+                capabilities: model.capabilities.clone(),
+            })
+            .collect())
+    }
+
     async fn diagnose(
         &self,
         account_id: &str,
         _profile_dir: &str,
         binding: &BrowserAccountBinding,
     ) -> BrowserAdapterDiagnostics {
-        if binding
-            .models
-            .iter()
-            .any(|model| model != "gemini-web-default")
-        {
-            return BrowserAdapterDiagnostics {
-                account_id: account_id.to_string(),
-                provider_kind: "browser-gemini".into(),
-                adapter_id: Some(self.adapter_id().into()),
-                adapter_version: Some(GEMINI_ADAPTER_VERSION.into()),
-                contract_version: Some(BROWSER_ADAPTER_CONTRACT_VERSION),
-                expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
-                status: "adapter_incompatible".into(),
-                message: "Gemini direct HTTP currently supports gemini-web-default only; keeping Chromium fallback for pinned web models".into(),
-                page_signature: None,
-                target_url_prefix: Some(GEMINI_INIT_URL.into()),
-                configured_models: binding.models.clone(),
-            };
-        }
-
         let result = async {
             let material = self.auth_material(&binding.session, account_id)?;
             self.init_session(
@@ -719,11 +946,12 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
                 Duration::from_millis(request.binding.probe_timeout_ms.unwrap_or(8_000).max(3_000)),
             )
             .await?;
+        let selection = self.resolve_model_selection(&request).await?;
         let metadata = self.conversation_metadata(&request).await?;
         let has_native_state = metadata != default_metadata();
         let prompt = serialize_prompt(&request.body, has_native_state)?;
         let response = self
-            .submit_generation(&request, &session, &prompt, metadata)
+            .submit_generation(&request, &session, &prompt, metadata, selection.as_ref())
             .await?;
 
         if request
@@ -754,6 +982,7 @@ fn build_inner_request(
     metadata: Value,
     request_uuid: &str,
     temporary: bool,
+    model_number: i64,
 ) -> Vec<Value> {
     let mut inner = vec![Value::Null; 81];
     inner[0] = json!([prompt, 0, null, null, null, null, 0]);
@@ -775,9 +1004,261 @@ fn build_inner_request(
     inner[59] = json!(request_uuid);
     inner[61] = json!([]);
     inner[68] = json!(1);
-    inner[79] = json!(1);
+    inner[79] = json!(model_number);
     inner[80] = json!(1);
     inner
+}
+
+fn model_header_value(
+    recipe: &GeminiModelRecipe,
+    wire_session_id: &str,
+) -> Result<String, BrowserProviderError> {
+    let mut header = vec![
+        json!(1),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        json!(recipe.model_id),
+        Value::Null,
+        Value::Null,
+        json!(0),
+        json!([4, 5, 6, 8]),
+        Value::Null,
+        Value::Null,
+    ];
+    if recipe.capacity_field == 13 {
+        header.push(Value::Null);
+        header.push(json!(recipe.capacity));
+    } else {
+        header.push(json!(recipe.capacity));
+    }
+    header.push(Value::Null);
+    header.push(Value::Null);
+    header.push(json!(recipe.model_number));
+    header.push(json!(1));
+    header.push(json!(wire_session_id));
+    serde_json::to_string(&header)
+        .map_err(|error| BrowserProviderError::Transport(error.to_string()))
+}
+
+fn parse_model_catalog_response(raw: &[u8]) -> Result<Vec<GeminiModelRecipe>, BrowserProviderError> {
+    let values = decode_response_values(raw)?;
+    let mut bodies = Vec::new();
+    for value in &values {
+        collect_rpc_bodies(value, GEMINI_GET_USER_STATUS_RPC, &mut bodies);
+    }
+    let mut models = Vec::new();
+    let mut used_ids = BTreeSet::new();
+    for body in bodies {
+        let Some(model_items) = nested(&body, &[15]).and_then(Value::as_array) else {
+            continue;
+        };
+        let tier_flags = nested(&body, &[16])
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let capability_flags = nested(&body, &[17])
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let (capacity, capacity_field) =
+            compute_model_capacity(&tier_flags, &capability_flags);
+        for item in model_items {
+            let Some(mut recipe) =
+                parse_model_recipe(item, capacity, capacity_field)
+            else {
+                continue;
+            };
+            if !used_ids.insert(recipe.external_id.clone()) {
+                recipe.external_id = format!(
+                    "{}-{}",
+                    recipe.external_id,
+                    &recipe.model_id[..recipe.model_id.len().min(8)]
+                );
+            }
+            recipe
+                .aliases
+                .insert(normalize_model_lookup(&recipe.external_id));
+            models.push(recipe);
+        }
+        if !models.is_empty() {
+            break;
+        }
+    }
+    Ok(models)
+}
+
+fn decode_response_values(raw: &[u8]) -> Result<Vec<Value>, BrowserProviderError> {
+    let mut decoder = GeminiFrameDecoder::default();
+    let mut values = decoder
+        .push(raw)
+        .map_err(BrowserProviderError::Transport)?;
+    values.extend(
+        decoder
+            .finish()
+            .map_err(BrowserProviderError::Transport)?,
+    );
+    Ok(values)
+}
+
+fn collect_rpc_bodies(value: &Value, target: &str, bodies: &mut Vec<Value>) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    if items.get(1).and_then(Value::as_str) == Some(target) {
+        if let Some(body) = items
+            .get(2)
+            .and_then(Value::as_str)
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        {
+            bodies.push(body);
+        }
+    }
+    for item in items {
+        if item.is_array() {
+            collect_rpc_bodies(item, target, bodies);
+        }
+    }
+}
+
+fn compute_model_capacity(tier_flags: &[Value], capability_flags: &[Value]) -> (i64, usize) {
+    if contains_int(tier_flags, 21) {
+        return (1, 13);
+    }
+    if contains_int(tier_flags, 22) {
+        return (2, 13);
+    }
+    if contains_int(capability_flags, 115) {
+        return (4, 12);
+    }
+    if contains_int(tier_flags, 16) || contains_int(capability_flags, 106) {
+        return (3, 12);
+    }
+    if contains_int(tier_flags, 8) || contains_int(capability_flags, 19) {
+        return (2, 12);
+    }
+    (1, 12)
+}
+
+fn contains_int(values: &[Value], expected: i64) -> bool {
+    values.iter().any(|value| value.as_i64() == Some(expected))
+}
+
+fn parse_model_recipe(
+    model_data: &Value,
+    capacity: i64,
+    capacity_field: usize,
+) -> Option<GeminiModelRecipe> {
+    let model_id = nested(model_data, &[0])?.as_str()?.trim().to_string();
+    if model_id.is_empty() {
+        return None;
+    }
+    let category_name = nested(model_data, &[1])
+        .or_else(|| nested(model_data, &[10]))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let display_name = nested(model_data, &[11])
+        .or_else(|| nested(model_data, &[19]))
+        .or_else(|| nested(model_data, &[1]))
+        .and_then(Value::as_str)
+        .unwrap_or(&model_id)
+        .trim()
+        .to_string();
+    let description = nested(model_data, &[12])
+        .or_else(|| nested(model_data, &[2]))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let model_number = nested(model_data, &[17])
+        .and_then(Value::as_i64)
+        .or_else(|| nested(model_data, &[9]).and_then(Value::as_i64))
+        .unwrap_or(1);
+
+    let base_name = if !category_name.is_empty() {
+        category_name.as_str()
+    } else if !display_name.is_empty() {
+        display_name.as_str()
+    } else {
+        model_id.as_str()
+    };
+    let external_id = format!("gemini-web-{}", slugify(base_name));
+    let mut aliases = BTreeSet::new();
+    for alias in [
+        model_id.as_str(),
+        category_name.as_str(),
+        display_name.as_str(),
+        external_id.as_str(),
+    ] {
+        if !alias.trim().is_empty() {
+            aliases.insert(normalize_model_lookup(alias));
+        }
+    }
+    if !category_name.is_empty() {
+        aliases.insert(normalize_model_lookup(&format!("gemini-{category_name}")));
+    }
+    let capabilities = infer_model_capabilities(&category_name, &display_name, &description);
+
+    Some(GeminiModelRecipe {
+        external_id,
+        display_name: if display_name.is_empty() {
+            category_name
+        } else {
+            display_name
+        },
+        description,
+        model_id,
+        capacity,
+        capacity_field,
+        model_number,
+        aliases,
+        capabilities,
+    })
+}
+
+fn infer_model_capabilities(category: &str, display: &str, description: &str) -> Vec<String> {
+    let haystack = format!("{category} {display} {description}").to_ascii_lowercase();
+    let mut capabilities = BTreeSet::from(["chat".to_string(), "long-context".to_string()]);
+    if haystack.contains("pro") || haystack.contains("think") || haystack.contains("reason") {
+        capabilities.insert("reasoning".into());
+        capabilities.insert("coding".into());
+        capabilities.insert("premium".into());
+    }
+    if haystack.contains("flash") {
+        capabilities.insert("fast".into());
+        capabilities.insert("simple-chat".into());
+    }
+    if haystack.contains("lite") {
+        capabilities.insert("cheap".into());
+    }
+    capabilities.into_iter().collect()
+}
+
+fn slugify(value: &str) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(character.to_ascii_lowercase());
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    if slug.is_empty() {
+        "model".into()
+    } else {
+        slug
+    }
+}
+
+fn normalize_model_lookup(value: &str) -> String {
+    slugify(value.trim().trim_start_matches("gemini-web/"))
 }
 
 fn serialize_prompt(body: &Value, native_continuation: bool) -> Result<String, BrowserProviderError> {
@@ -1204,6 +1685,61 @@ mod tests {
         let mut committed_rewrite = prefix;
         committed_rewrite.replace_range(0..1, "b");
         assert!(emitter.observe(&committed_rewrite, false).is_err());
+    }
+
+    #[test]
+    fn parses_dynamic_model_catalog_and_builds_private_header() {
+        let model_data = json!([
+            "model-hex-pro",
+            "Pro",
+            "Reasoning model",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "Gemini 3.1 Pro",
+            "Reasoning and coding",
+            null,
+            null,
+            null,
+            null,
+            3
+        ]);
+        let mut body = vec![Value::Null; 18];
+        body[15] = json!([model_data]);
+        body[16] = json!([8]);
+        body[17] = json!([19]);
+        let part = json!([["wrb.fr"], GEMINI_GET_USER_STATUS_RPC, Value::Array(body).to_string()]);
+        let json_frame = serde_json::to_string(&vec![part]).unwrap();
+        let payload = format!("\n{}\n{}\n", json_frame.encode_utf16().count() + 1, json_frame);
+        let models = parse_model_catalog_response(payload.as_bytes()).unwrap();
+        assert_eq!(models.len(), 1);
+        let model = &models[0];
+        assert_eq!(model.external_id, "gemini-web-pro");
+        assert_eq!(model.display_name, "Gemini 3.1 Pro");
+        assert_eq!(model.capacity, 2);
+        assert_eq!(model.model_number, 3);
+        assert!(model.capabilities.contains(&"reasoning".to_string()));
+        let header = model_header_value(model, "SESSION").unwrap();
+        assert!(header.contains("model-hex-pro"));
+        assert!(header.contains("SESSION"));
+    }
+
+    #[test]
+    fn model_number_is_written_into_inner_request() {
+        let inner = build_inner_request(
+            "hello",
+            "en",
+            default_metadata(),
+            "REQUEST",
+            false,
+            6,
+        );
+        assert_eq!(inner[79], json!(6));
     }
 
     #[test]
