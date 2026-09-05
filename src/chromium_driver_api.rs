@@ -163,9 +163,11 @@ fn unavailable() -> Response<Body> {
 
 fn driver_error(error: ChromiumDriverError) -> Response<Body> {
     match error {
+        ChromiumDriverError::SessionNotConfigured(_) => {
+            json_error(StatusCode::NOT_FOUND, "not_found_error", &error.to_string())
+        }
         ChromiumDriverError::Disabled
         | ChromiumDriverError::SessionDisabled(_)
-        | ChromiumDriverError::SessionNotConfigured(_)
         | ChromiumDriverError::ExecutableNotFound
         | ChromiumDriverError::AlreadyRunning(_)
         | ChromiumDriverError::InvalidDevToolsPort(_)
