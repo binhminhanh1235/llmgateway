@@ -547,33 +547,20 @@ impl Gateway {
                     let duration_ms = attempt_started.elapsed().as_millis();
                     let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     let error_text = error.to_string();
-                    let is_model_binding_conflict = matches!(
-                        &error,
-                        GatewayError::BrowserTransport(msg)
-                            if msg.contains("native conversation is already bound to model")
-                    );
                     let non_retryable_post_submit = !is_retryable_attempt_error(&error);
-                    let adaptive_failure = matches!(
-                        &error,
-                        GatewayError::Transport(_) | GatewayError::BrowserTransport(_)
-                    ) && !is_model_binding_conflict;
-                    let route_cooldown_secs = match &error {
-                        GatewayError::BrowserAdapterIncompatible(_)
-                        | GatewayError::BrowserModelUnavailable(_)
-                        | GatewayError::BrowserModelRecipeStale(_) => 0,
-                        GatewayError::BrowserTransport(_) if is_model_binding_conflict => 0,
-                        GatewayError::BrowserSessionUnavailable(_) => 2,
-                        _ => 10,
-                    };
-                    self.router
-                        .mark_failure(
-                            &route.id,
-                            error_text.clone(),
-                            route_cooldown_secs,
-                            adaptive_latency_ms,
-                            adaptive_failure,
-                        )
-                        .await;
+                    if let Some((route_cooldown_secs, adaptive_failure)) =
+                        route_failure_policy(&error)
+                    {
+                        self.router
+                            .mark_failure(
+                                &route.id,
+                                error_text.clone(),
+                                route_cooldown_secs,
+                                adaptive_latency_ms,
+                                adaptive_failure,
+                            )
+                            .await;
+                    }
                     let outcome = match &error {
                         GatewayError::BrowserSessionUnavailable(_) => "browser_session_unavailable",
                         GatewayError::BrowserTransport(_) => "browser_transport_error",
@@ -913,13 +900,36 @@ fn no_route_message(trace: &RouteDecisionTrace) -> String {
     )
 }
 
+fn is_model_binding_conflict(error: &GatewayError) -> bool {
+    matches!(
+        error,
+        GatewayError::BrowserTransport(msg)
+            if msg.contains("native conversation is already bound to model")
+    )
+}
+
+fn route_failure_policy(error: &GatewayError) -> Option<(i64, bool)> {
+    if is_model_binding_conflict(error) {
+        return None;
+    }
+
+    let adaptive_failure = matches!(
+        error,
+        GatewayError::Transport(_) | GatewayError::BrowserTransport(_)
+    );
+    let route_cooldown_secs = match error {
+        GatewayError::BrowserAdapterIncompatible(_)
+        | GatewayError::BrowserModelUnavailable(_)
+        | GatewayError::BrowserModelRecipeStale(_) => 0,
+        GatewayError::BrowserSessionUnavailable(_) => 2,
+        _ => 10,
+    };
+    Some((route_cooldown_secs, adaptive_failure))
+}
+
 fn is_retryable_attempt_error(error: &GatewayError) -> bool {
     !matches!(error, GatewayError::BrowserModelRecipeStale(_))
-        && !matches!(
-            error,
-            GatewayError::BrowserTransport(msg)
-                if msg.contains("native conversation is already bound to model")
-        )
+        && !is_model_binding_conflict(error)
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -941,8 +951,8 @@ fn cooldown_for(status: StatusCode) -> i64 {
 #[cfg(test)]
 mod stream_trace_tests {
     use super::{
-        is_retryable_attempt_error, observe_terminal_sse_completion, stream_error_message,
-        upstream_stream_error_sse, GatewayError,
+        is_retryable_attempt_error, observe_terminal_sse_completion, route_failure_policy,
+        stream_error_message, upstream_stream_error_sse, GatewayError,
     };
 
     #[test]
@@ -958,6 +968,25 @@ mod stream_trace_tests {
         assert!(is_retryable_attempt_error(&GatewayError::BrowserTransport(
             "network".into()
         )));
+    }
+
+    #[test]
+    fn model_binding_conflict_does_not_mutate_route_health() {
+        let conflict = GatewayError::BrowserTransport(
+            "Gemini native conversation is already bound to model 'pro'".into(),
+        );
+        assert_eq!(route_failure_policy(&conflict), None);
+
+        assert_eq!(
+            route_failure_policy(&GatewayError::BrowserTransport("network".into())),
+            Some((10, true))
+        );
+        assert_eq!(
+            route_failure_policy(&GatewayError::BrowserSessionUnavailable(
+                "browser unavailable".into()
+            )),
+            Some((2, false))
+        );
     }
 
     #[test]
