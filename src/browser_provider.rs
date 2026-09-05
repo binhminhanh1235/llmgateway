@@ -635,7 +635,10 @@ impl BrowserProviderRegistry {
             && self.auth_material_available(&binding.session)
         {
             let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
-            if diagnostics.status == "ready" {
+            if matches!(
+                diagnostics.status.as_str(),
+                "ready" | "browser_fallback_required"
+            ) {
                 return true;
             }
         }
@@ -665,6 +668,37 @@ impl BrowserProviderRegistry {
         driver.status(session_id).await.is_ok_and(|status| {
             status.running && status.debugger_reachable && status.ready_match.is_some()
         })
+    }
+
+    async fn ensure_cdp_session_ready(&self, session_id: &str) -> bool {
+        if self.cdp_session_live(session_id).await {
+            return true;
+        }
+        let Some(driver) = chromium_driver_runtime::get() else {
+            return false;
+        };
+
+        if driver.launch(session_id).await.is_err()
+            && !driver
+                .status(session_id)
+                .await
+                .is_ok_and(|status| status.running)
+        {
+            return false;
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if driver
+                .verify(session_id)
+                .await
+                .is_ok_and(|verification| verification.authenticated)
+            {
+                return true;
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+        false
     }
 
     pub async fn mark_degraded(
@@ -821,13 +855,16 @@ impl BrowserProviderRegistry {
             let direct = direct_adapter.expect("direct adapter checked above");
             used_adapter = direct.clone();
             let direct_result = direct.execute_chat(adapter_request.clone()).await;
-            let safe_browser_fallback = matches!(
+            let safe_fallback_candidate = matches!(
                 &direct_result,
                 Err(BrowserProviderError::AdapterIncompatible { .. })
                     | Err(BrowserProviderError::ModelUnavailable { .. })
-            ) && session.status == "ready"
-                && browser_adapter.is_cdp()
-                && self.cdp_session_live(&binding.session).await;
+            ) && browser_adapter.is_cdp();
+            let safe_browser_fallback = if safe_fallback_candidate {
+                self.ensure_cdp_session_ready(&binding.session).await
+            } else {
+                false
+            };
 
             if safe_browser_fallback {
                 used_adapter = browser_adapter.clone();
@@ -852,6 +889,8 @@ impl BrowserProviderRegistry {
                         )
                         .await;
                     "login_required"
+                } else if code == "browser_challenge_required" {
+                    "browser_fallback_required"
                 } else {
                     "adapter_incompatible"
                 };
