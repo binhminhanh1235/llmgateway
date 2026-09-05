@@ -128,7 +128,17 @@ function Cleanup {
 }
 
 try {
-    Write-Host "[gemini-model-live] Refreshing Gemini model catalog for '$AccountId'"
+    $preflight = Invoke-GatewayJson -Method GET -Path "/_llmgateway/browser-accounts/$AccountId/runtime"
+    if ([bool]$preflight.browser_running) {
+        $null = Invoke-GatewayJson -Method POST -Path "/_llmgateway/browser-sessions/$($preflight.session_id)/driver/stop"
+        Start-Sleep -Milliseconds 300
+    }
+    $preflight = Invoke-GatewayJson -Method GET -Path "/_llmgateway/browser-accounts/$AccountId/runtime"
+    Assert-True (-not [bool]$preflight.browser_running) "Chromium could not be stopped before model refresh"
+    Assert-True ([bool]$preflight.direct_ready) "Gemini account is not direct-ready before model refresh"
+    Assert-True ([string]$preflight.effective_transport -eq "direct-http") "effective transport is not direct-http before model refresh"
+
+    Write-Host "[gemini-model-live] Refreshing Gemini model catalog for '$AccountId' with Chromium stopped"
     $refresh = Invoke-GatewayJson -Method POST -Path "/_llmgateway/accounts/$AccountId/models/refresh"
     Assert-True ([int]$refresh.discovered_models -gt 0) "model discovery returned zero models"
 
@@ -157,10 +167,7 @@ try {
     Assert-True ([int]$runtime.model_catalog.count -ge 2) "runtime model catalog exposes fewer than two models"
     Assert-True (-not [bool]$runtime.model_catalog.refresh_required) "runtime model catalog still requires refresh"
     Assert-True (-not [string]::IsNullOrWhiteSpace([string]$runtime.model_catalog.discovered_at)) "runtime model catalog has no discovered_at timestamp"
-    if ([bool]$runtime.browser_running) {
-        $null = Invoke-GatewayJson -Method POST -Path "/_llmgateway/browser-sessions/$($runtime.session_id)/driver/stop"
-        Start-Sleep -Milliseconds 300
-    }
+    Assert-True (-not [bool]$runtime.browser_running) "Chromium started during browserless model refresh"
 
     $threadA = New-Thread "Gemini model A acceptance" ([string]$selectedA.id)
     Send-Message $threadA $selectedA "Reply with exactly: model-a"
