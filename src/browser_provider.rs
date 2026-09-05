@@ -990,7 +990,7 @@ impl BrowserProviderRegistry {
             .cloned()
             .ok_or_else(|| BrowserProviderError::MissingBinding(account.id.clone()))?;
 
-        if !binding.models.is_empty() && !binding.models.iter().any(|model| model == &route.model) {
+        if !self.model_allowed(&account.id, &route.model) {
             return Err(BrowserProviderError::ModelUnavailable {
                 account_id: account.id.clone(),
                 model: route.model.clone(),
@@ -1041,11 +1041,20 @@ impl BrowserProviderRegistry {
             let direct = direct_adapter.expect("direct adapter checked above");
             used_adapter = direct.clone();
             let direct_result = direct.execute_chat(adapter_request.clone()).await;
-            let safe_fallback_candidate = matches!(
-                &direct_result,
-                Err(BrowserProviderError::AdapterIncompatible { .. })
-                    | Err(BrowserProviderError::ModelUnavailable { .. })
-            ) && browser_adapter.is_cdp();
+            let dynamic_model = self
+                .discovered_models
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&account.id)
+                .is_some_and(|models| models.contains(&route.model))
+                && !binding.models.iter().any(|model| model == &route.model);
+            let safe_fallback_candidate = !dynamic_model
+                && matches!(
+                    &direct_result,
+                    Err(BrowserProviderError::AdapterIncompatible { .. })
+                        | Err(BrowserProviderError::ModelUnavailable { .. })
+                )
+                && browser_adapter.is_cdp();
             let browser_was_live = safe_fallback_candidate
                 && self.cdp_session_live(&binding.session).await;
             let safe_browser_fallback = if safe_fallback_candidate {
