@@ -142,6 +142,13 @@ impl ModelCapabilities {
         }
     }
 
+    pub fn vision_execution() -> Self {
+        let mut capabilities = Self::foundation_text_execution();
+        capabilities.input_modalities.push(Modality::Image);
+        capabilities.native_file_upload = true;
+        capabilities
+    }
+
     pub fn from_legacy_tags(tags: &[String]) -> Self {
         let normalized = tags
             .iter()
