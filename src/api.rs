@@ -12,6 +12,7 @@ use crate::{
     multimodal_compat,
     quota_usage_runtime,
     response_state::{response_to_openai_assistant, responses_stream_with_capture},
+    vision::{self, VisionError},
 };
 use axum::{
     body::{to_bytes, Body},
@@ -73,6 +74,16 @@ pub async fn openai_chat(
             .unwrap_or(&config.api.default_model)
             .to_string()
     };
+    if let Err(error) = vision::resolve_image_inputs(
+        &mut body,
+        &state.artifacts,
+        access.client_id(),
+        access.client_id().is_none(),
+    )
+    .await
+    {
+        return vision_error(error);
+    }
     let normalized = match multimodal_compat::normalize_chat_request(&body, &requested_model) {
         Ok(normalized) => normalized,
         Err(error) => return multimodal_error(error),
@@ -91,9 +102,21 @@ pub async fn openai_chat(
         Err(error) => return client_policy_error(error),
     };
 
+    let execution_body = match vision::materialize_image_inputs(
+        &body,
+        &state.artifacts,
+        access.client_id(),
+        access.client_id().is_none(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(error) => return vision_error(error),
+    };
+
     match state
         .gateway
-        .execute_openai_chat_for_client(&requested_model, &body, access.policy())
+        .execute_openai_chat_for_client(&requested_model, &execution_body, access.policy())
         .await
     {
         Ok(routed) => {
@@ -148,12 +171,22 @@ pub async fn openai_chat(
 pub async fn openai_responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Response<Body> {
     let access = match authorize_client(&headers, &state) {
         Ok(access) => access,
         Err(response) => return response,
     };
+    if let Err(error) = vision::resolve_image_inputs(
+        &mut body,
+        &state.artifacts,
+        access.client_id(),
+        access.client_id().is_none(),
+    )
+    .await
+    {
+        return vision_error(error);
+    }
 
     let previous_response_id = body
         .get("previous_response_id")
@@ -218,11 +251,22 @@ pub async fn openai_responses(
         Ok(reservation) => reservation,
         Err(error) => return client_policy_error(error),
     };
+    let execution_body = match vision::materialize_image_inputs(
+        &openai_body,
+        &state.artifacts,
+        access.client_id(),
+        access.client_id().is_none(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(error) => return vision_error(error),
+    };
     match state
         .gateway
         .execute_openai_chat_with_affinity_for_client(
             &requested_model,
-            &openai_body,
+            &execution_body,
             preferred_route.as_deref(),
             access.policy(),
         )
@@ -415,6 +459,49 @@ pub async fn anthropic_messages(
             }
         }
         Err(error) => gateway_error(error),
+    }
+}
+
+fn vision_error(error: VisionError) -> Response<Body> {
+    match error {
+        VisionError::Artifact(crate::artifact_store::ArtifactError::NotFound(_)) => json_error(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            "image artifact was not found",
+        ),
+        VisionError::Artifact(crate::artifact_store::ArtifactError::TooLarge { limit }) => json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "file_too_large",
+            &format!("image exceeds configured limit of {limit} bytes"),
+        ),
+        VisionError::Artifact(crate::artifact_store::ArtifactError::MimeDenied(mime)) => json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            &format!("MIME type '{mime}' is not allowed"),
+        ),
+        VisionError::Artifact(crate::artifact_store::ArtifactError::MimeMismatch { declared, detected }) => json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "mime_type_mismatch",
+            &format!("declared MIME '{declared}' does not match detected MIME '{detected}'"),
+        ),
+        VisionError::Artifact(error) => json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &error.to_string(),
+        ),
+        VisionError::Invalid(message) => {
+            json_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message)
+        }
+        VisionError::UnsupportedCapability(capability) => json_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_capability",
+            &format!("unsupported capability '{capability}'"),
+        ),
+        VisionError::NotImage(id) => json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_input_modality",
+            &format!("artifact '{id}' is not an image"),
+        ),
     }
 }
 
