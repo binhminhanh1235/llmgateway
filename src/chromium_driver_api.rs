@@ -104,7 +104,7 @@ async fn refresh_session_browser_models(state: &AppState, session_id: &str) {
 pub(crate) async fn release_session_browser_if_direct_ready(
     state: &AppState,
     session_id: &str,
-) -> Option<crate::chromium_driver::ChromiumSessionStatus> {
+) -> Option<crate::chromium_driver::ChromiumStatusView> {
     if !session_can_release_browser(state, session_id).await {
         return None;
     }
