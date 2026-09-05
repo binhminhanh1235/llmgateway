@@ -548,8 +548,7 @@ impl Gateway {
                     let duration_ms = attempt_started.elapsed().as_millis();
                     let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     let error_text = error.to_string();
-                    let non_retryable_post_submit =
-                        matches!(&error, GatewayError::BrowserModelRecipeStale(_));
+                    let non_retryable_post_submit = !is_retryable_attempt_error(&error);
                     let adaptive_failure = matches!(
                         &error,
                         GatewayError::Transport(_) | GatewayError::BrowserTransport(_)
@@ -907,6 +906,10 @@ fn no_route_message(trace: &RouteDecisionTrace) -> String {
     )
 }
 
+fn is_retryable_attempt_error(error: &GatewayError) -> bool {
+    !matches!(error, GatewayError::BrowserModelRecipeStale(_))
+}
+
 fn is_retryable_status(status: StatusCode) -> bool {
     matches!(
         status.as_u16(),
@@ -926,7 +929,20 @@ fn cooldown_for(status: StatusCode) -> i64 {
 
 #[cfg(test)]
 mod stream_trace_tests {
-    use super::{observe_terminal_sse_completion, stream_error_message, upstream_stream_error_sse};
+    use super::{
+        is_retryable_attempt_error, observe_terminal_sse_completion, stream_error_message,
+        upstream_stream_error_sse, GatewayError,
+    };
+
+    #[test]
+    fn stale_model_recipe_is_not_retryable_after_submit() {
+        assert!(!is_retryable_attempt_error(
+            &GatewayError::BrowserModelRecipeStale("stale".into())
+        ));
+        assert!(is_retryable_attempt_error(
+            &GatewayError::BrowserTransport("network".into())
+        ));
+    }
 
     #[test]
     fn terminal_detector_requires_a_complete_sse_data_frame() {
