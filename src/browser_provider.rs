@@ -361,6 +361,7 @@ pub struct BrowserProviderRegistry {
     adapter_health: Arc<RwLock<BTreeMap<String, CachedAdapterDiagnostics>>>,
     last_transport: Arc<RwLock<BTreeMap<String, BrowserTransportExecution>>>,
     discovered_models: Arc<StdRwLock<BTreeMap<String, BTreeSet<String>>>>,
+    discovered_model_labels: Arc<StdRwLock<BTreeMap<String, BTreeMap<String, String>>>>,
     model_catalog_refresh_required: Arc<StdRwLock<BTreeSet<String>>>,
 }
 
@@ -498,6 +499,7 @@ impl BrowserProviderRegistry {
             adapter_health: Arc::new(RwLock::new(BTreeMap::new())),
             last_transport: Arc::new(RwLock::new(BTreeMap::new())),
             discovered_models: Arc::new(StdRwLock::new(BTreeMap::new())),
+            discovered_model_labels: Arc::new(StdRwLock::new(BTreeMap::new())),
             model_catalog_refresh_required: Arc::new(StdRwLock::new(BTreeSet::new())),
         })
     }
@@ -826,6 +828,27 @@ impl BrowserProviderRegistry {
                 .map(|model| model.external_id.clone())
                 .collect(),
         );
+        drop(guard);
+
+        self.discovered_model_labels
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                account_id.to_string(),
+                models
+                    .iter()
+                    .map(|model| (model.external_id.clone(), model.display_name.clone()))
+                    .collect(),
+            );
+    }
+
+    fn discovered_model_label(&self, account_id: &str, model: &str) -> Option<String> {
+        self.discovered_model_labels
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(account_id)
+            .and_then(|labels| labels.get(model))
+            .cloned()
     }
 
     pub fn session_id_for_account(&self, account_id: &str) -> Option<String> {
@@ -1317,7 +1340,7 @@ impl BrowserProviderRegistry {
             .get(&provider.kind)
             .cloned()
             .ok_or_else(|| BrowserProviderError::UnsupportedAdapter(provider.kind.clone()))?;
-        let binding = self
+        let mut binding = self
             .config_snapshot()
             .bindings
             .get(&account.id)
@@ -1338,6 +1361,15 @@ impl BrowserProviderRegistry {
                 account_id: account.id.clone(),
                 model: route.model.clone(),
             });
+        }
+
+        // Dynamic discovery owns the public picker label. Carry that label into
+        // the CDP fallback request so ChatGPT selects "GPT-5.6 Sol" / "Terra"
+        // instead of trying to find an internal wire slug such as gpt-5-6.
+        if !binding.model_labels.contains_key(&route.model) {
+            if let Some(label) = self.discovered_model_label(&account.id, &route.model) {
+                binding.model_labels.insert(route.model.clone(), label);
+            }
         }
 
         let Some(store) = browser_session_runtime::get() else {
