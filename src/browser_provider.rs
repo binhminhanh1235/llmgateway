@@ -103,6 +103,14 @@ struct CachedAdapterDiagnostics {
     diagnostics: BrowserAdapterDiagnostics,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct BrowserTransportExecution {
+    pub transport: String,
+    pub adapter_id: String,
+    pub browser_fallback: bool,
+    pub recorded_at: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct AdapterMeta {
     contract_version: u32,
@@ -217,6 +225,7 @@ pub struct BrowserProviderRegistry {
     adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>>,
     direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>>,
     adapter_health: Arc<RwLock<BTreeMap<String, CachedAdapterDiagnostics>>>,
+    last_transport: Arc<RwLock<BTreeMap<String, BrowserTransportExecution>>>,
 }
 
 impl BrowserProviderConfig {
@@ -345,6 +354,7 @@ impl BrowserProviderRegistry {
             adapters,
             direct_adapters,
             adapter_health: Arc::new(RwLock::new(BTreeMap::new())),
+            last_transport: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
@@ -363,6 +373,40 @@ impl BrowserProviderRegistry {
 
     pub async fn clear_diagnostics(&self) {
         self.adapter_health.write().await.clear();
+    }
+
+    pub async fn last_transport_execution(
+        &self,
+        account_id: &str,
+    ) -> Option<BrowserTransportExecution> {
+        self.last_transport.read().await.get(account_id).cloned()
+    }
+
+    async fn record_transport_execution(
+        &self,
+        account_id: &str,
+        adapter: &dyn BrowserProviderAdapter,
+        browser_fallback: bool,
+    ) {
+        let transport = if adapter.is_cdp() {
+            "browser-cdp"
+        } else if matches!(
+            adapter.adapter_id(),
+            "gemini-web-http" | "chatgpt-web-http"
+        ) {
+            "direct-http"
+        } else {
+            "browser-http"
+        };
+        self.last_transport.write().await.insert(
+            account_id.to_string(),
+            BrowserTransportExecution {
+                transport: transport.into(),
+                adapter_id: adapter.adapter_id().into(),
+                browser_fallback,
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
     }
 
     fn config_snapshot(&self) -> BrowserProviderConfig {
@@ -877,6 +921,7 @@ impl BrowserProviderRegistry {
         };
 
         let mut used_adapter = browser_adapter.clone();
+        let mut browser_fallback_used = false;
         let result = if direct_snapshot_ready {
             let direct = direct_adapter.expect("direct adapter checked above");
             used_adapter = direct.clone();
@@ -895,6 +940,7 @@ impl BrowserProviderRegistry {
             };
 
             if safe_browser_fallback {
+                browser_fallback_used = true;
                 used_adapter = browser_adapter.clone();
                 if let Err(error) = self.mark_direct_state_unsynced(&adapter_request).await {
                     if !browser_was_live {
@@ -927,6 +973,12 @@ impl BrowserProviderRegistry {
 
         match &result {
             Ok(_) => {
+                self.record_transport_execution(
+                    &account.id,
+                    used_adapter.as_ref(),
+                    browser_fallback_used,
+                )
+                .await;
                 self.invalidate_diagnostics(&account.id).await;
             }
             Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
