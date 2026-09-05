@@ -596,10 +596,13 @@ impl BrowserProviderRegistry {
             .cloned()
             .ok_or_else(|| BrowserProviderError::MissingBinding(account_id.to_string()))?;
         let browserless = self.transport_capabilities(provider_kind);
-        let desired_policy = if binding.transport_mode == BrowserTransportMode::BrowserOnly {
-            BrowserTransportPolicy::BrowserOnly
-        } else {
-            BrowserTransportPolicy::BrowserlessPreferred
+        let desired_policy = match binding.transport_mode {
+            BrowserTransportMode::BrowserOnly => BrowserTransportPolicy::BrowserOnly,
+            BrowserTransportMode::HttpPreferred => BrowserTransportPolicy::BrowserlessPreferred,
+            BrowserTransportMode::Auto if browserless.modes.contains(&BrowserTransportMode::Auto) => {
+                BrowserTransportPolicy::BrowserlessPreferred
+            }
+            BrowserTransportMode::Auto => BrowserTransportPolicy::BrowserOnly,
         };
         let auth_state = if browserless.requires_auth_snapshot
             && self.auth_material_available(&binding.session)
