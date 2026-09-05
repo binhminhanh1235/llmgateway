@@ -156,6 +156,152 @@ def request_stream(path, payload):
     conn.close()
     return events, first_data_at, total, request_id
 
+# Regression: OpenAI logical completion may arrive before the transport [DONE]
+# marker. A client that closes on finish_reason must still be traced as completed.
+split_conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
+split_body = json.dumps({
+    "model": "api-route",
+    "stream": True,
+    "messages": [{"role": "user", "content": "split terminal before done"}],
+})
+split_conn.request(
+    "POST",
+    "/v1/chat/completions",
+    body=split_body,
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "Content-Length": str(len(split_body.encode())),
+    },
+)
+split_response = split_conn.getresponse()
+assert split_response.status == 200, (split_response.status, split_response.read())
+assert split_response.getheader("x-llmgateway-route") == "api-route", dict(split_response.getheaders())
+split_request_id = split_response.getheader("x-llmgateway-request-id")
+assert split_request_id, dict(split_response.getheaders())
+saw_split_finish = False
+while True:
+    line = split_response.readline()
+    if not line:
+        break
+    if not line.startswith(b"data: "):
+        continue
+    data = line[6:].strip()
+    if not data or data == b"[DONE]":
+        continue
+    event = json.loads(data)
+    finish_reason = (event.get("choices") or [{}])[0].get("finish_reason")
+    if finish_reason is not None:
+        saw_split_finish = True
+        break
+assert saw_split_finish
+split_conn.close()
+
+split_trace = None
+for _ in range(50):
+    trace_conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
+    trace_conn.request(
+        "GET",
+        f"/_llmgateway/executions/{split_request_id}",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+    )
+    trace_response = trace_conn.getresponse()
+    split_trace = json.loads(trace_response.read().decode())
+    trace_conn.close()
+    if split_trace.get("status") == "success":
+        break
+    time.sleep(0.05)
+assert split_trace is not None, split_trace
+assert split_trace["status"] == "success", split_trace
+assert split_trace["stream"]["outcome"] == "completed", split_trace
+assert split_trace["stream"]["partial_response"] is False, split_trace
+assert split_trace["stream"]["error"] is None, split_trace
+
+# The persistent-thread capture has the same boundary. It must publish the
+# completed assistant before the outer transport reaches EOF.
+thread_conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
+thread_body = json.dumps({"title": "split terminal capture", "model": "api-route"})
+thread_conn.request(
+    "POST",
+    "/v1/threads",
+    body=thread_body,
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "Content-Length": str(len(thread_body.encode())),
+    },
+)
+thread_response = thread_conn.getresponse()
+assert thread_response.status == 201, (thread_response.status, thread_response.read())
+thread_id = json.loads(thread_response.read().decode())["id"]
+thread_conn.close()
+
+thread_stream_conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
+thread_stream_body = json.dumps({
+    "content": "split terminal before done",
+    "model": "api-route",
+    "stream": True,
+})
+thread_stream_conn.request(
+    "POST",
+    f"/v1/threads/{thread_id}/messages",
+    body=thread_stream_body,
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "Content-Length": str(len(thread_stream_body.encode())),
+    },
+)
+thread_stream_response = thread_stream_conn.getresponse()
+assert thread_stream_response.status == 200, (
+    thread_stream_response.status,
+    thread_stream_response.read(),
+)
+saw_thread_finish = False
+while True:
+    line = thread_stream_response.readline()
+    if not line:
+        break
+    if not line.startswith(b"data: "):
+        continue
+    data = line[6:].strip()
+    if not data or data == b"[DONE]":
+        continue
+    event = json.loads(data)
+    finish_reason = (event.get("choices") or [{}])[0].get("finish_reason")
+    if finish_reason is not None:
+        saw_thread_finish = True
+        break
+assert saw_thread_finish
+thread_stream_conn.close()
+
+stored_thread = None
+for _ in range(50):
+    detail_conn = http.client.HTTPConnection("127.0.0.1", 7331, timeout=10)
+    detail_conn.request(
+        "GET",
+        f"/v1/threads/{thread_id}",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+    )
+    detail_response = detail_conn.getresponse()
+    stored_thread = json.loads(detail_response.read().decode())
+    detail_conn.close()
+    assistants = [
+        item.get("message", {})
+        for item in stored_thread.get("messages", [])
+        if item.get("role") == "assistant"
+    ]
+    if any("fake reply" in str(message.get("content", "")) for message in assistants):
+        break
+    time.sleep(0.05)
+assert stored_thread is not None, stored_thread
+assistants = [
+    item.get("message", {})
+    for item in stored_thread.get("messages", [])
+    if item.get("role") == "assistant"
+]
+assert any("fake reply" in str(message.get("content", "")) for message in assistants), stored_thread
+
 chat, first, total, chat_request_id = request_stream(
     "/v1/chat/completions",
     {

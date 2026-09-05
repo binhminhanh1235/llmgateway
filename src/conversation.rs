@@ -518,6 +518,7 @@ pub fn openai_stream_with_capture(
 ) -> impl futures_util::Stream<Item = Result<Bytes, Infallible>> {
     async_stream::stream! {
         let mut upstream = response.bytes_stream();
+        let mut completion = Some(completion);
         let mut buffer = String::new();
         let mut text = String::new();
         let mut tools: BTreeMap<usize, CapturedTool> = BTreeMap::new();
@@ -529,6 +530,12 @@ pub fn openai_stream_with_capture(
                     let normalized = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
                     buffer.push_str(&normalized);
                     capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
+                    send_captured_completion_if_ready(
+                        &mut completion,
+                        completed,
+                        &text,
+                        &tools,
+                    );
                     yield Ok(bytes);
                 }
                 Err(_) => {
@@ -537,27 +544,7 @@ pub fn openai_stream_with_capture(
             }
         }
         capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
-        if !captured_assistant_is_persistable(completed, &text, &tools) {
-            return;
-        }
-        let mut message = json!({
-            "role":"assistant",
-            "content": if text.is_empty() { Value::Null } else { Value::String(text) }
-        });
-        if !tools.is_empty() {
-            let tool_calls = tools.into_values().map(|tool| json!({
-                "id": if tool.id.is_empty() { format!("call_{}", Uuid::new_v4()) } else { tool.id },
-                "type":"function",
-                "function":{
-                    "name": if tool.name.is_empty() { "tool".to_string() } else { tool.name },
-                    "arguments":tool.arguments
-                }
-            })).collect::<Vec<_>>();
-            if let Some(object) = message.as_object_mut() {
-                object.insert("tool_calls".into(), Value::Array(tool_calls));
-            }
-        }
-        let _ = completion.send(message);
+        send_captured_completion_if_ready(&mut completion, completed, &text, &tools);
     }
 }
 
@@ -567,6 +554,56 @@ fn captured_assistant_is_persistable(
     tools: &BTreeMap<usize, CapturedTool>,
 ) -> bool {
     completed && (!text.is_empty() || !tools.is_empty())
+}
+
+fn captured_assistant_message(text: &str, tools: &BTreeMap<usize, CapturedTool>) -> Value {
+    let mut message = json!({
+        "role":"assistant",
+        "content": if text.is_empty() {
+            Value::Null
+        } else {
+            Value::String(text.to_string())
+        }
+    });
+    if !tools.is_empty() {
+        let tool_calls = tools
+            .values()
+            .map(|tool| json!({
+                "id": if tool.id.is_empty() {
+                    format!("call_{}", Uuid::new_v4())
+                } else {
+                    tool.id.clone()
+                },
+                "type":"function",
+                "function":{
+                    "name": if tool.name.is_empty() {
+                        "tool".to_string()
+                    } else {
+                        tool.name.clone()
+                    },
+                    "arguments":tool.arguments.clone()
+                }
+            }))
+            .collect::<Vec<_>>();
+        if let Some(object) = message.as_object_mut() {
+            object.insert("tool_calls".into(), Value::Array(tool_calls));
+        }
+    }
+    message
+}
+
+fn send_captured_completion_if_ready(
+    completion: &mut Option<oneshot::Sender<Value>>,
+    completed: bool,
+    text: &str,
+    tools: &BTreeMap<usize, CapturedTool>,
+) {
+    if !captured_assistant_is_persistable(completed, text, tools) {
+        return;
+    }
+    if let Some(sender) = completion.take() {
+        let _ = sender.send(captured_assistant_message(text, tools));
+    }
 }
 
 #[derive(Default)]
@@ -595,6 +632,19 @@ fn capture_frames(
         let Ok(chunk) = serde_json::from_str::<Value>(data) else {
             continue;
         };
+        if chunk
+            .get("choices")
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    choice
+                        .get("finish_reason")
+                        .is_some_and(|reason| !reason.is_null())
+                })
+            })
+        {
+            *completed = true;
+        }
         let Some(delta) = chunk
             .get("choices")
             .and_then(Value::as_array)
@@ -699,6 +749,46 @@ mod tests {
         capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
 
         assert!(completed);
+    }
+
+    #[test]
+    fn capture_frames_marks_finish_reason_terminal_without_done() {
+        let mut buffer = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        )
+        .to_string();
+        let mut text = String::new();
+        let mut tools = BTreeMap::new();
+        let mut completed = false;
+
+        capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
+
+        assert_eq!(text, "answer");
+        assert!(completed);
+        assert!(captured_assistant_is_persistable(completed, &text, &tools));
+    }
+
+    #[tokio::test]
+    async fn captured_completion_is_sent_as_soon_as_finish_reason_is_seen() {
+        let (tx, rx) = oneshot::channel();
+        let mut sender = Some(tx);
+        let mut buffer = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        )
+        .to_string();
+        let mut text = String::new();
+        let mut tools = BTreeMap::new();
+        let mut completed = false;
+
+        capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
+        send_captured_completion_if_ready(&mut sender, completed, &text, &tools);
+
+        let message = rx.await.expect("terminal finish_reason should publish assistant capture");
+        assert_eq!(message["role"], "assistant");
+        assert_eq!(message["content"], "answer");
+        assert!(sender.is_none());
     }
 
     #[test]

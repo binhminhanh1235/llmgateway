@@ -73,6 +73,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         messages = body.get("messages", [])
+        user_text = "\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if message.get("role") == "user"
+        )
+        split_terminal = "split terminal before done" in user_text.lower()
         system_text = "\n".join(
             str(message.get("content", ""))
             for message in messages
@@ -115,6 +121,11 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": len(messages), "completion_tokens": 3},
             }
             self.wfile.write(f"data: {json.dumps(done)}\n\n".encode())
+            self.wfile.flush()
+            if split_terminal:
+                # Keep the transport open after logical OpenAI completion so CI can
+                # reproduce clients that close on finish_reason before [DONE].
+                time.sleep(0.8)
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
             return
