@@ -1,6 +1,7 @@
 use crate::{
     catalog::{CatalogError, ModelCatalog},
     compat::{anthropic, responses},
+    client_policy::{ClientAccess, ClientPolicyError, ClientPolicyStore},
     conversation::{ConversationError, ConversationStore},
     gateway::{Gateway, GatewayError},
     quota_usage_runtime,
@@ -28,16 +29,18 @@ pub struct AppState {
     pub catalog: Arc<ModelCatalog>,
     pub conversations: Arc<ConversationStore>,
     pub gateway_api_key: Arc<String>,
+    pub client_policies: Arc<ClientPolicyStore>,
 }
 
 pub async fn openai_chat(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Response<Body> {
-    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
-        return response;
-    }
+    let access = match authorize_client(&headers, &state) {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
     let config = state.gateway.config_snapshot();
     let requested_model = if config.api.strict_openai_compatibility {
         match body
@@ -61,10 +64,21 @@ pub async fn openai_chat(
             .to_string()
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
+        return client_policy_error(error);
+    }
+    let reservation = match state
+        .client_policies
+        .reserve_request(&access, &mut body)
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => return client_policy_error(error),
+    };
 
     match state
         .gateway
-        .execute_openai_chat(&requested_model, &body)
+        .execute_openai_chat_for_client(&requested_model, &body, access.policy())
         .await
     {
         Ok(routed) => {
@@ -87,13 +101,24 @@ pub async fn openai_chat(
                 )
             } else {
                 match routed.response.bytes().await {
-                    Ok(bytes) => response_with_route_and_request(
-                        StatusCode::OK,
-                        "application/json",
-                        Body::from(bytes),
-                        &route_id,
-                        &request_id,
-                    ),
+                    Ok(bytes) => {
+                        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                            if let Err(error) = state
+                                .client_policies
+                                .reconcile_usage(reservation.as_ref(), &value)
+                                .await
+                            {
+                                return client_policy_error(error);
+                            }
+                        }
+                        response_with_route_and_request(
+                            StatusCode::OK,
+                            "application/json",
+                            Body::from(bytes),
+                            &route_id,
+                            &request_id,
+                        )
+                    }
                     Err(error) => gateway_error(GatewayError::Execution {
                         request_id,
                         source: Box::new(GatewayError::Transport(error.to_string())),
@@ -110,9 +135,10 @@ pub async fn openai_responses(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response<Body> {
-    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
-        return response;
-    }
+    let access = match authorize_client(&headers, &state) {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
 
     let previous_response_id = body
         .get("previous_response_id")
@@ -130,6 +156,10 @@ pub async fn openai_responses(
         }
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
+        return client_policy_error(error);
+    }
+    let response_owner = access.client_id().map(str::to_string);
     let mut preferred_route = None;
 
     if let Some(previous_response_id) = previous_response_id {
@@ -148,6 +178,15 @@ pub async fn openai_responses(
             }
             Err(error) => return conversation_state_error(error),
         };
+        if response_owner.is_some()
+            && previous.client_id.as_deref() != response_owner.as_deref()
+        {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                "invalid_request_error",
+                &format!("previous_response_id '{previous_response_id}' was not found"),
+            );
+        }
         preferred_route = previous.route_id.clone();
         let current = request_messages(&openai_body);
         let mut merged = previous.messages;
@@ -156,12 +195,21 @@ pub async fn openai_responses(
     }
 
     let history_before_response = request_messages(&openai_body);
+    let reservation = match state
+        .client_policies
+        .reserve_request(&access, &mut openai_body)
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => return client_policy_error(error),
+    };
     match state
         .gateway
-        .execute_openai_chat_with_affinity(
+        .execute_openai_chat_with_affinity_for_client(
             &requested_model,
             &openai_body,
             preferred_route.as_deref(),
+            access.policy(),
         )
         .await
     {
@@ -182,11 +230,17 @@ pub async fn openai_responses(
                 let (tx, rx) = oneshot::channel();
                 let stream = responses_stream_with_capture(stream, tx);
                 let conversations = state.conversations.clone();
+                let client_policies = state.client_policies.clone();
                 let model_for_task = requested_model.clone();
                 let route_for_task = route_id.clone();
                 let history_for_task = history_before_response.clone();
+                let owner_for_task = response_owner.clone();
+                let reservation_for_task = reservation.clone();
                 tokio::spawn(async move {
                     if let Ok(response) = rx.await {
+                        let _ = client_policies
+                            .reconcile_usage(reservation_for_task.as_ref(), &response)
+                            .await;
                         let mut history = history_for_task;
                         if let Some(assistant) = response_to_openai_assistant(&response) {
                             history.push(assistant);
@@ -198,6 +252,7 @@ pub async fn openai_responses(
                                     &model_for_task,
                                     &history,
                                     Some(&route_for_task),
+                                    owner_for_task.as_deref(),
                                 )
                                 .await;
                         }
@@ -215,6 +270,13 @@ pub async fn openai_responses(
                 match routed.response.json::<Value>().await {
                     Ok(openai) => {
                         update_provider_usage(usage_event_id.as_deref(), &openai).await;
+                        if let Err(error) = state
+                            .client_policies
+                            .reconcile_usage(reservation.as_ref(), &openai)
+                            .await
+                        {
+                            return client_policy_error(error);
+                        }
                         let response = responses::from_openai_response(&openai, &requested_model);
                         let mut history = history_before_response;
                         if let Some(assistant) = openai_assistant_message(&openai) {
@@ -234,6 +296,7 @@ pub async fn openai_responses(
                                 &requested_model,
                                 &history,
                                 Some(&route_id),
+                                response_owner.as_deref(),
                             )
                             .await
                         {
@@ -262,20 +325,32 @@ pub async fn anthropic_messages(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response<Body> {
-    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
-        return response;
-    }
-    let (requested_model, openai_body) = match anthropic::to_openai_request(&body) {
+    let access = match authorize_client(&headers, &state) {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
+    let (requested_model, mut openai_body) = match anthropic::to_openai_request(&body) {
         Ok(value) => value,
         Err(message) => {
             return json_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message)
         }
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
+        return client_policy_error(error);
+    }
+    let reservation = match state
+        .client_policies
+        .reserve_request(&access, &mut openai_body)
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => return client_policy_error(error),
+    };
 
     match state
         .gateway
-        .execute_openai_chat(&requested_model, &openai_body)
+        .execute_openai_chat_for_client(&requested_model, &openai_body, access.policy())
         .await
     {
         Ok(routed) => {
@@ -302,6 +377,13 @@ pub async fn anthropic_messages(
                 match routed.response.json::<Value>().await {
                     Ok(openai) => {
                         update_provider_usage(usage_event_id.as_deref(), &openai).await;
+                        if let Err(error) = state
+                            .client_policies
+                            .reconcile_usage(reservation.as_ref(), &openai)
+                            .await
+                        {
+                            return client_policy_error(error);
+                        }
                         let anthropic = anthropic::from_openai_response(&openai, &requested_model);
                         json_response_with_request(
                             StatusCode::OK,
@@ -322,9 +404,10 @@ pub async fn anthropic_messages(
 }
 
 pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response<Body> {
-    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
-        return response;
-    }
+    let access = match authorize_client(&headers, &state) {
+        Ok(access) => access,
+        Err(response) => return response,
+    };
 
     let config = state.gateway.config_snapshot();
     let physical = match state.catalog.selectable_models().await {
@@ -334,6 +417,9 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     let mut data: BTreeMap<String, Value> = BTreeMap::new();
 
     for id in config.virtual_models.keys() {
+        if access.policy().is_some_and(|policy| !policy.model_allowed(id, id)) {
+            continue;
+        }
         data.insert(
             id.clone(),
             json!({
@@ -346,6 +432,12 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     }
 
     for model in physical {
+        if access
+            .policy()
+            .is_some_and(|policy| !policy.model_allowed(&model.id, &model.id))
+        {
+            continue;
+        }
         let available_accounts = model
             .accounts
             .iter()
@@ -373,6 +465,12 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
 
     // Preserve v0.1 route IDs as selectable aliases for existing clients.
     for route in config.routes.iter().filter(|route| route.enabled) {
+        if access.policy().is_some_and(|policy| {
+            !policy.route_allowed(&route.id)
+                || !policy.model_allowed(&route.id, &route.model)
+        }) {
+            continue;
+        }
         data.entry(route.id.clone()).or_insert_with(|| {
             json!({
                 "id":route.id,
@@ -529,14 +627,7 @@ fn normalize_json_rejection_message(raw: &str) -> String {
 }
 
 pub(crate) fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), Response<Body>> {
-    let bearer = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    let x_api_key = headers
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok());
-    if bearer == Some(expected) || x_api_key == Some(expected) {
+    if presented_api_key(headers) == Some(expected) {
         Ok(())
     } else {
         Err(json_error(
@@ -544,6 +635,62 @@ pub(crate) fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), Respo
             "authentication_error",
             "invalid llmgateway API key",
         ))
+    }
+}
+
+pub(crate) fn authorize_client(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<ClientAccess, Response<Body>> {
+    let Some(presented) = presented_api_key(headers) else {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "missing llmgateway API key",
+        ));
+    };
+    state
+        .client_policies
+        .authenticate(presented)
+        .map_err(client_policy_error)
+}
+
+fn presented_api_key(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or_else(|| headers.get("x-api-key").and_then(|value| value.to_str().ok()))
+}
+
+pub(crate) fn client_policy_error(error: ClientPolicyError) -> Response<Body> {
+    match error {
+        ClientPolicyError::Unauthorized => json_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "invalid llmgateway API key",
+        ),
+        ClientPolicyError::Forbidden(message) => {
+            json_error(StatusCode::FORBIDDEN, "client_policy_error", &message)
+        }
+        ClientPolicyError::BudgetExceeded(message) => {
+            json_error(StatusCode::TOO_MANY_REQUESTS, "client_budget_exceeded", &message)
+        }
+        ClientPolicyError::MissingEnv(message) => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "client_policy_configuration_error",
+            &format!("configured client credential environment variable '{message}' is unavailable"),
+        ),
+        ClientPolicyError::Database(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "client_policy_database_error",
+            &error.to_string(),
+        ),
+        ClientPolicyError::Io(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "client_policy_storage_error",
+            &error.to_string(),
+        ),
     }
 }
 
@@ -560,6 +707,11 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
         GatewayError::InvalidConfig(message) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "configuration_error",
+            &message,
+        ),
+        GatewayError::ClientPolicyDenied(message) => json_error(
+            StatusCode::FORBIDDEN,
+            "client_policy_error",
             &message,
         ),
         GatewayError::Transport(message) => {

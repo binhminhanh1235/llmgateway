@@ -9,6 +9,49 @@ default_model = "llmgateway-auto"
 # Enable to make POST /v1/chat/completions require a non-empty string model.
 strict_openai_compatibility = false
 
+# v0.32 client policies are optional. The global LLMGATEWAY_API_KEY remains the
+# unrestricted admin/legacy key. Client keys are read from environment variables
+# and are never returned by diagnostics. Uncomment only the clients you want to enable.
+#
+# Claude Code: coding-focused models, browser preferred, explicit API fallback.
+# [clients.claude-code]
+# key_env = "LLMGATEWAY_CLAUDE_CODE_KEY"
+# enabled = true
+# allowed_models = ["claude-*", "llmgateway-coding", "llmgateway-best"]
+# execution_preference = "prefer-browser"
+# api_fallback = true
+# daily_request_limit = 2000
+# daily_token_limit = 10000000
+#
+# Codex: keep the model surface narrow and predictable.
+# [clients.codex]
+# key_env = "LLMGATEWAY_CODEX_KEY"
+# enabled = true
+# allowed_models = ["llmgateway-coding", "llmgateway-auto"]
+# execution_preference = "prefer-browser"
+# api_fallback = true
+#
+# OpenCode: allow the local virtual-model namespace.
+# [clients.opencode]
+# key_env = "LLMGATEWAY_OPENCODE_KEY"
+# enabled = true
+# allowed_models = ["llmgateway-*"]
+# execution_preference = "prefer-browser"
+# api_fallback = true
+#
+# OmniVoiceStudio: browser routes only by default so voice generation cannot silently
+# consume a paid API fallback. Change this explicitly if paid fallback is desired.
+# [clients.omnivoicestudio]
+# key_env = "LLMGATEWAY_OMNIVOICE_KEY"
+# enabled = true
+# allowed_models = ["llmgateway-auto"]
+# execution_preference = "prefer-browser"
+# api_fallback = false
+# daily_request_limit = 5000
+#
+# allowed_routes is an optional second boundary after model resolution:
+# allowed_routes = ["gemini-web-*", "qwen-web-*"]
+#
 [storage]
 database_url = "sqlite://data/llmgateway.db"
 

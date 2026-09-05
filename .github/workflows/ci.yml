@@ -54,6 +54,7 @@ jobs:
       - run: bash scripts/smoke-execution-trace.sh
       - run: bash scripts/smoke-adaptive-routing.sh
       - run: bash scripts/smoke-task-aware-routing.sh
+      - run: bash scripts/smoke-client-policies.sh
       - run: docker build -t llmgateway:ci .
 
   windows:
