@@ -7,6 +7,7 @@ ACCOUNT_ID=""
 MODEL_A=""
 MODEL_B=""
 KEEP_THREADS=0
+SKIP_REFRESH=0
 THREADS=()
 TMP_DIR="$(mktemp -d)"
 
@@ -20,6 +21,7 @@ Options:
   --api-key <key>       Or set LLMGATEWAY_API_KEY
   --model-a <id>        Canonical or external discovered model id
   --model-b <id>        Canonical or external discovered model id
+  --skip-refresh       Use persisted discovered models; intended for post-restart rehydration acceptance
   --keep-threads
 EOF
 }
@@ -31,6 +33,7 @@ while [[ $# -gt 0 ]]; do
     --api-key) API_KEY="${2:-}"; shift 2 ;;
     --model-a) MODEL_A="${2:-}"; shift 2 ;;
     --model-b) MODEL_B="${2:-}"; shift 2 ;;
+    --skip-refresh) SKIP_REFRESH=1; shift ;;
     --keep-threads) KEEP_THREADS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -80,15 +83,20 @@ if not runtime.get("direct_ready") or runtime.get("effective_transport") != "dir
     raise SystemExit(f"MODEL ACCEPTANCE FAILED: account is not direct-ready before model refresh: {runtime}")
 PY
 
-echo "[gemini-model-live] Refreshing model catalog for $ACCOUNT_ID with Chromium stopped"
-api POST "/_llmgateway/accounts/$ACCOUNT_ID/models/refresh" "$TMP_DIR/refresh.json"
+if [[ "$SKIP_REFRESH" -eq 1 ]]; then
+  echo "[gemini-model-live] Using persisted model catalog after restart; explicit refresh is disabled"
+  printf '{"skipped":true}\n' > "$TMP_DIR/refresh.json"
+else
+  echo "[gemini-model-live] Refreshing model catalog for $ACCOUNT_ID with Chromium stopped"
+  api POST "/_llmgateway/accounts/$ACCOUNT_ID/models/refresh" "$TMP_DIR/refresh.json"
+fi
 api GET "/_llmgateway/accounts/$ACCOUNT_ID/models" "$TMP_DIR/models.json"
 
-python3 - "$TMP_DIR/refresh.json" "$TMP_DIR/models.json" "$ACCOUNT_ID" "$MODEL_A" "$MODEL_B" "$TMP_DIR/selected.json" <<'PY'
+python3 - "$TMP_DIR/refresh.json" "$TMP_DIR/models.json" "$ACCOUNT_ID" "$MODEL_A" "$MODEL_B" "$SKIP_REFRESH" "$TMP_DIR/selected.json" <<'PY'
 import json, sys
-refresh_path, models_path, account, requested_a, requested_b, output = sys.argv[1:]
+refresh_path, models_path, account, requested_a, requested_b, skip_refresh, output = sys.argv[1:]
 refresh = json.load(open(refresh_path, encoding="utf-8"))
-if int(refresh.get("discovered_models", 0)) <= 0:
+if skip_refresh != "1" and int(refresh.get("discovered_models", 0)) <= 0:
     raise SystemExit("MODEL ACCEPTANCE FAILED: model discovery returned zero models")
 payload = json.load(open(models_path, encoding="utf-8"))
 models = []
@@ -297,6 +305,11 @@ echo "GEMINI BROWSERLESS MODEL SELECTION: PASS"
 echo "Account: $ACCOUNT_ID"
 echo "Model A: $MODEL_A_ID -> discovered:$ACCOUNT_ID:$MODEL_A_EXTERNAL"
 echo "Model B: $MODEL_B_ID -> discovered:$ACCOUNT_ID:$MODEL_B_EXTERNAL"
+if [[ "$SKIP_REFRESH" -eq 1 ]]; then
+  echo "Catalog mode: persisted-after-restart"
+else
+  echo "Catalog mode: live-refresh"
+fi
 echo "Chromium running: false"
  "$TMP_DIR/$prefix.sse" || { echo "MODEL ACCEPTANCE FAILED: $model stream ended without [DONE]" >&2; exit 1; }
   grep -Fq '"content"' "$TMP_DIR/$prefix.sse" || { echo "MODEL ACCEPTANCE FAILED: $model stream returned no assistant delta" >&2; exit 1; }
