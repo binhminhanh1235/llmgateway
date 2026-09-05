@@ -860,6 +860,8 @@ impl BrowserProviderRegistry {
                 Err(BrowserProviderError::AdapterIncompatible { .. })
                     | Err(BrowserProviderError::ModelUnavailable { .. })
             ) && browser_adapter.is_cdp();
+            let browser_was_live = safe_fallback_candidate
+                && self.cdp_session_live(&binding.session).await;
             let safe_browser_fallback = if safe_fallback_candidate {
                 self.ensure_cdp_session_ready(&binding.session).await
             } else {
@@ -868,7 +870,21 @@ impl BrowserProviderRegistry {
 
             if safe_browser_fallback {
                 used_adapter = browser_adapter.clone();
-                browser_adapter.execute_chat(adapter_request).await
+                let fallback_result = browser_adapter.execute_chat(adapter_request).await;
+                if browser_was_live {
+                    fallback_result
+                } else {
+                    match fallback_result {
+                        Ok(response) => wrap_response_with_browser_stop(
+                            response,
+                            binding.session.clone(),
+                        ),
+                        Err(error) => {
+                            stop_browser_runtime_soon(binding.session.clone());
+                            Err(error)
+                        }
+                    }
+                }
             } else {
                 direct_result
             }
@@ -926,6 +942,64 @@ impl BrowserProviderRegistry {
     }
 }
 
+
+struct BrowserFallbackStopGuard {
+    session_id: Option<String>,
+}
+
+impl BrowserFallbackStopGuard {
+    fn new(session_id: String) -> Self {
+        Self {
+            session_id: Some(session_id),
+        }
+    }
+}
+
+impl Drop for BrowserFallbackStopGuard {
+    fn drop(&mut self) {
+        if let Some(session_id) = self.session_id.take() {
+            stop_browser_runtime_soon(session_id);
+        }
+    }
+}
+
+fn stop_browser_runtime_soon(session_id: String) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        if let Some(driver) = chromium_driver_runtime::get() {
+            let _ = driver.stop(&session_id).await;
+        }
+    });
+}
+
+fn wrap_response_with_browser_stop(
+    response: reqwest::Response,
+    session_id: String,
+) -> Result<reqwest::Response, BrowserProviderError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let stream = async_stream::stream! {
+        let _guard = BrowserFallbackStopGuard::new(session_id);
+        let mut body = response.bytes_stream();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => yield Ok::<Bytes, std::io::Error>(bytes),
+                Err(error) => {
+                    yield Err(std::io::Error::other(error.to_string()));
+                    break;
+                }
+            }
+        }
+    };
+    let mut wrapped = HttpResponse::builder()
+        .status(status)
+        .body(reqwest::Body::wrap_stream(stream))
+        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+    *wrapped.headers_mut() = headers;
+    Ok(reqwest::Response::from(wrapped))
+}
 
 #[derive(Clone)]
 struct HttpBrowserAdapter {
