@@ -78,6 +78,8 @@ pub enum UsageError {
     Io(#[from] std::io::Error),
     #[error("usage config TOML error: {0}")]
     Toml(#[from] toml::de::Error),
+    #[error("unknown account '{0}'")]
+    AccountNotFound(String),
     #[error("invalid usage config: {0}")]
     InvalidConfig(String),
 }
@@ -313,9 +315,7 @@ impl QuotaUsageStore {
 
     pub async fn reset_account_state(&self, account_id: &str) -> Result<(), UsageError> {
         if self.app_config.account(account_id).is_none() {
-            return Err(UsageError::InvalidConfig(format!(
-                "unknown account '{account_id}'"
-            )));
+            return Err(UsageError::AccountNotFound(account_id.to_string()));
         }
         self.ensure_account_state(account_id).await?;
         sqlx::query(
@@ -370,9 +370,7 @@ impl QuotaUsageStore {
         account_id: &str,
     ) -> Result<AccountUsageSnapshot, UsageError> {
         if self.app_config.account(account_id).is_none() {
-            return Err(UsageError::InvalidConfig(format!(
-                "unknown account '{account_id}'"
-            )));
+            return Err(UsageError::AccountNotFound(account_id.to_string()));
         }
         self.ensure_account_state(account_id).await?;
         let quota = self.usage_config.accounts.get(account_id).cloned().unwrap_or_default();
