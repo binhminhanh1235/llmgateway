@@ -1,23 +1,45 @@
 # MCP integration
 
-The bundled MCP server is:
+llmgateway ships MCP inside the same Rust executable. No Python or separate MCP package is required.
 
-`skills/llmgateway/mcp/llmgateway_mcp.py`
+## Preferred transport: HTTP
 
-It uses newline-delimited JSON-RPC over stdio and is dependency-free.
+Start llmgateway normally:
 
-## Start
+```bash
+llmgateway
+```
+
+The native MCP endpoint is:
+
+```text
+POST http://127.0.0.1:7331/mcp
+```
+
+Use the same scoped client credential you use for inference.
+
+Modern MCP `2026-07-28` requests are stateless. Send:
+
+- `MCP-Protocol-Version: 2026-07-28`
+- `Mcp-Method: <json-rpc method>`
+- `Mcp-Name: <tool name>` for `tools/call`
+- the normal llmgateway Authorization header.
+
+## Local stdio fallback
+
+For MCP hosts that require stdio, configure the same executable:
 
 ```bash
 export LLMGATEWAY_BASE_URL="http://127.0.0.1:7331"
 export LLMGATEWAY_CLIENT_API_KEY="client-key"
-python3 skills/llmgateway/mcp/llmgateway_mcp.py
+llmgateway mcp --stdio
 ```
 
-Use a scoped client key whenever possible. The MCP server intentionally exposes only READ + EXECUTE tools.
+The stdio mode is a native Rust frontend. It does not require Python, Node.js, pip, npm, or a second installed application.
 
 ## Tools
 
+- `llmgateway_health`
 - `llmgateway_capabilities`
 - `llmgateway_resolve`
 - `llmgateway_diagnostics`
@@ -26,11 +48,7 @@ Use a scoped client key whenever possible. The MCP server intentionally exposes 
 - `llmgateway_chat`
 - `llmgateway_messages`
 
-There are no delete, enable/disable, credential, quota-reset, or browser-runtime mutation tools.
-
-## Protocol compatibility
-
-The server supports modern MCP discovery with `server/discover` and also the legacy `initialize` handshake used by older hosts.
+There are no delete, enable/disable, credential, quota-reset, or browser-runtime mutation MCP tools.
 
 ## Routing rule
 
@@ -38,7 +56,30 @@ For tasks with hard requirements:
 
 1. call `llmgateway_capabilities`;
 2. call `llmgateway_resolve`;
-3. execute with the same `task`, `capabilities`, and `min_context_window` arguments;
-4. call `llmgateway_diagnostics` when resolution is blocked.
+3. execute with the same `task`, `capabilities`, and `min_context_window`;
+4. call `llmgateway_diagnostics` if resolution is blocked.
 
-Do not resolve with one requirement set and then execute without it.
+Do not resolve with one requirement set and execute without it.
+
+## Host configuration
+
+HTTP-capable MCP hosts should point directly at:
+
+```text
+http://127.0.0.1:7331/mcp
+```
+
+For stdio-only hosts:
+
+```json
+{
+  "command": "llmgateway",
+  "args": ["mcp", "--stdio"],
+  "env": {
+    "LLMGATEWAY_BASE_URL": "http://127.0.0.1:7331",
+    "LLMGATEWAY_CLIENT_API_KEY": "<client-key>"
+  }
+}
+```
+
+Prefer HTTP when the host supports modern MCP because it uses the already-running llmgateway process.
