@@ -81,6 +81,7 @@
       item.selected_route,
       item.preferred_route,
       item.status,
+      item.attachment_strategy,
       item.final_error,
     ].some((value) => String(value || "").toLowerCase().includes(query)));
   }
@@ -113,6 +114,7 @@
     const statusClass = statusTone(item.status);
     const route = item.selected_route || "no route selected";
     const attempts = Number(item.attempt_count || 0);
+    const attachmentStrategy = attachmentStrategyLabel(item.attachment_strategy);
     return `<button type="button" class="trace-row ${selected ? "selected" : ""}" data-trace-request="${escapeAttr(item.request_id)}">
       <div class="trace-row-top">
         <code class="trace-request-id">${escapeHtml(shortId(item.request_id))}</code>
@@ -122,6 +124,7 @@
       <div class="trace-row-meta">
         <span>${escapeHtml(route)}</span>
         <span>${attempts} attempt${attempts === 1 ? "" : "s"}</span>
+        ${attachmentStrategy ? `<span>${escapeHtml(attachmentStrategy)}</span>` : ""}
       </div>
       <time class="trace-time" datetime="${escapeAttr(item.started_at || "")}">${escapeHtml(formatTime(item.started_at))}</time>
     </button>`;
@@ -160,6 +163,7 @@
       <div class="trace-summary-grid">
         ${summaryCell("Requested model", trace.requested_model || "unknown")}
         ${summaryCell("Selected route", selectedRoute)}
+        ${trace.attachment_strategy ? summaryCell("Attachment strategy", attachmentStrategyLabel(trace.attachment_strategy)) : ""}
         ${summaryCell("Attempts", String(attempts.length))}
         ${summaryCell("Upstream time", `${totalDuration.toLocaleString()} ms`)}
         ${summaryCell("Started", formatTime(trace.started_at, true))}
@@ -186,6 +190,13 @@
       </div>
 
       ${trace.final_error ? `<div class="trace-final-error"><div class="trace-eyebrow">Final error</div><pre>${escapeHtml(trace.final_error)}</pre></div>` : ""}`;
+  }
+
+  function attachmentStrategyLabel(strategy) {
+    if (strategy === "native_upload") return "Native upload";
+    if (strategy === "extracted_fallback") return "Extracted fallback";
+    if (strategy === "mixed") return "Mixed attachments";
+    return "";
   }
 
   function summaryCell(label, value) {
