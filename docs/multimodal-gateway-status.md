@@ -123,15 +123,23 @@ At every meaningful checkpoint:
 
 ## P3 General File Attachments verification
 
-- Exact current main re-check before the verification checkpoint: `71436138b0fe5d67b93dac5c0e68b1ad112ac7c2`.
-- P3 deterministic implementation head: `fc8fc8d82b9bb85bfb959d59288b15ed3c94df73`; branch is ahead 135 / behind 0 relative to that exact main, so no reconcile is required.
-- Exact-head CI #1654 / run `34010591132`: **PASS** on Linux and Windows, including strict cargo check, Clippy, all-target tests, provider-conversation affinity, browser/browserless regression smoke, routing/policy smoke, file UI fixtures, live-runner syntax and Docker build.
-- The P3 execution lane now supports native provider document upload for PDF/DOCX and bounded extraction fallback for TXT/Markdown/CSV/JSON. Unsupported remote file URLs and unsupported MIME/route combinations fail deterministically.
-- Provider artifact bindings are wired into successful production execution and isolated by gateway artifact + provider + account affinity. Same-affinity bindings are reused as stable gateway-internal opaque bindings; provider/account switches create distinct bindings without mutating the gateway artifact. Raw provider file IDs remain outside public API payloads.
-- File-capable model, route and adapter capability metadata now exposes supported file MIME types plus `max_attachment_count` and `max_attachment_size_bytes`. Deterministic smoke coverage locks the route-level metadata contract.
-- Threads and Responses persist stable `llmgateway://artifact/<id>` references. Native conversation replay keeps already-synced file turns out of incremental provider requests, while unsynced file turns remain replayable.
-- Extraction guardrails are explicitly tested for byte limits, character limits and invalid JSON.
-- `scripts/live-file-acceptance.sh` provides the P3 authenticated acceptance gate for ChatGPT/Gemini browser adapters: valid PDF upload, Responses, Threads, native CDP transport, trace strategy, stable artifact identity, leak checks, reference-safe delete and follow-up reuse semantics.
-- Remaining P3 blocker: execute the real authenticated native-PDF acceptance against at least one supported browser account. This gate has **not** been waived and is **not** claimed as a live PASS.
-- P4 #74 remains **BLOCKED / NOT STARTED** until P3 reaches DONE / VERIFIED.
+- P3 remains **VERIFYING**. Implementation and deterministic verification are complete; the authenticated native-PDF gate is still **PENDING** and has not been waived.
+- Current exact main: `852e18c428e11e7f3de70d17153bda6749d089dd`.
+- Current deterministic implementation head before this status-only update: `78cbe5435e3f1dc820d0335f54ecf72b727bed73`; branch was ahead 152 / behind 0 with merge-base equal to exact current main.
+- Current-main reconciliation merge: `90665aafe3b4375a62ab632cd9efa82db81a0088`, with parents `4f421327dd99ef143657e464a37d13c9bbfb3110` and current main `852e18c428e11e7f3de70d17153bda6749d089dd`.
+- Reconciliation preserves the P3 ArtifactStore/file-capability path while also adopting main's catalog fixes: per-account startup refresh when only default/no real models exist, enabled virtual groups remain discoverable even with no currently viable target, and canonical model disable no longer destroys account-level model bindings.
+- Follow-up compile correction `78cbe5435e3f1dc820d0335f54ecf72b727bed73` retains `route_is_valid` for physical route discovery while keeping the new enabled-group visibility semantics.
+- Exact-head deterministic CI #1681 / run `34015807354`, attempt 2, on `78cbe5435e3f1dc820d0335f54ecf72b727bed73`: **PASS**.
+- Linux passed UI/adapter fixtures, live-runner syntax gates, `cargo fmt --all -- --check`, `git diff --check`, strict `RUSTFLAGS="-D warnings" cargo check --all-targets`, Clippy, all-target tests, Local API + P3 file attachment smoke, provider-conversation affinity, all browser/browserless/routing/model-group/client-policy regression smokes, and Docker build.
+- Windows passed live-runner syntax, `cargo check --all-targets`, `cargo test --all-targets`, and Chromium-driver smoke.
+- Attempt 1 of the same exact-head run hit a single transient 10-second SSE read timeout in `smoke-browser-streaming.sh`. The failed Rust job was rerun without code changes or timeout relaxation; attempt 2 passed that same streaming smoke and the complete remaining regression/Docker tail. The workflow's final conclusion is **SUCCESS**.
+- The P3 execution lane supports native provider document upload for PDF/DOCX and bounded extraction fallback for TXT/Markdown/CSV/JSON. Unsupported remote URLs and unsupported MIME/route combinations fail deterministically.
+- Provider artifact bindings are persisted/reused only after successful native execution and isolated by gateway artifact + provider + account affinity. Provider/account switches create distinct bindings without corrupting the gateway artifact; raw provider-native file IDs remain outside public API payloads.
+- File-capable model, route and adapter metadata exposes supported MIME types plus `max_attachment_count` and `max_attachment_size_bytes`.
+- Threads and Responses persist stable `llmgateway://artifact/<id>` references. Native conversation replay excludes already-synced file turns while retaining unsynced file turns for replay.
+- Extraction guardrails cover byte limit, character limit and malformed JSON.
+- Deterministic P3 smoke verifies extraction fallback, native PDF execution through the fake provider, stable Thread/Responses references, leak prevention, route capability metadata, reference-safe delete and native conversation replay.
+- Authenticated acceptance runner: `scripts/live-file-acceptance.sh`. The required real authenticated ChatGPT/Gemini native-PDF run is still **PENDING**. Fake-provider CI and syntax checks are not counted as live evidence.
+- This status-only evidence update requires a final exact-head CI. Its run ID is recorded on #73 and #69 after completion rather than mutating the document merely to embed its own future run ID.
+- P4 #74 remains **BLOCKED / NOT STARTED** until P3 reaches **DONE / VERIFIED**.
 - `main` remains untouched and the merge guard remains active.
