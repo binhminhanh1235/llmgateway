@@ -148,12 +148,19 @@ jobs:
           # AppState or the test.
           api_path = Path("src/api.rs")
           api_text = api_path.read_text()
-          state_block = "        let state = AppState {\\n            gateway,\\n            catalog,\\n            conversations,\\n            gateway_api_key,\\n            client_policies,\\n        };\\n"
-          if api_text.count(state_block) != 1:
-              raise SystemExit(f"expected exactly one new-main AppState test initializer, found {api_text.count(state_block)}")
-          artifact_setup = "        let artifacts =\\n            Arc::new(ArtifactStore::connect(config.clone()).await.unwrap());\\n\\n"
-          patched_state = "        let state = AppState {\\n            gateway,\\n            catalog,\\n            conversations,\\n            artifacts,\\n            gateway_api_key,\\n            client_policies,\\n        };\\n"
-          api_text = api_text.replace(state_block, artifact_setup + patched_state)
+          state_marker = "        let state = AppState {"
+          if api_text.count(state_marker) != 1:
+              raise SystemExit(f"expected exactly one new-main AppState test initializer, found {api_text.count(state_marker)}")
+          state_pos = api_text.index(state_marker)
+          artifact_setup = "        let artifacts =\n            Arc::new(ArtifactStore::connect(config.clone()).await.unwrap());\n\n"
+          api_text = api_text[:state_pos] + artifact_setup + api_text[state_pos:]
+          state_pos += len(artifact_setup)
+          conversations_marker = "            conversations,\n"
+          conversations_pos = api_text.find(conversations_marker, state_pos, state_pos + 600)
+          if conversations_pos < 0:
+              raise SystemExit("new-main AppState initializer is missing conversations field")
+          insert_pos = conversations_pos + len(conversations_marker)
+          api_text = api_text[:insert_pos] + "            artifacts,\n" + api_text[insert_pos:]
           api_path.write_text(api_text)
           PY
 
