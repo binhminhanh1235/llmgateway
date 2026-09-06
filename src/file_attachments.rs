@@ -532,8 +532,8 @@ mod tests {
         let record = extraction_record("application/json");
         assert!(matches!(
             extract_text(&record, br#"{"broken":"#),
-            Err(FileAttachmentError::InvalidRequest(message))
-                if message.contains("JSON file 'file_guard' is invalid")
+            Err(FileAttachmentError::Invalid(message))
+                if message.contains("JSON file 'guard.txt' is invalid")
         ));
     }
 
