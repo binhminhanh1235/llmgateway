@@ -43,6 +43,7 @@ jobs:
       - run: bash -n scripts/live-file-acceptance.sh
       - run: bash -n scripts/smoke-file-attachments.sh
       - run: bash -n scripts/smoke-media-api.sh
+      - run: bash -n scripts/live-media-acceptance.sh
       - run: bash -n scripts/live-multimodal-acceptance.sh
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
       - run: bash -n scripts/live-mimo-browserless-acceptance.sh
