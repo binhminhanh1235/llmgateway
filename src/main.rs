@@ -1,8 +1,8 @@
 mod account_intelligence_api;
 mod admin;
-pub mod artifact_store;
 mod admin_api;
 mod api;
+pub mod artifact_store;
 mod browser_account_setup;
 mod browser_auth;
 mod browser_auth_runtime;
@@ -36,17 +36,18 @@ mod file_attachments;
 mod files_api;
 mod gateway;
 mod gemini_web_transport;
-mod qwen_web_transport;
 mod live_config;
 mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
 mod memory_provenance_runtime;
+mod mimo_web_transport;
+mod model_group_api;
 pub mod multimodal;
 mod multimodal_compat;
-mod model_group_api;
 mod quota_usage;
 mod quota_usage_runtime;
+mod qwen_web_transport;
 mod response_state;
 mod retrieval_api;
 mod routing;
@@ -59,26 +60,26 @@ mod vision;
 
 use account_intelligence_api::account_intelligence;
 use admin_api::{set_account, set_account_model, set_model};
-use artifact_store::ArtifactStore;
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
     anthropic_messages, capabilities, health, models, openai_chat, openai_responses, AppState,
 };
+use artifact_store::ArtifactStore;
 use axum::{
     extract::DefaultBodyLimit,
     routing::{get, post},
     Router,
 };
 use browser_account_setup::{
-    browser_account_setup_presets, create_browser_account_setup, get_account_transport_policy,
-    set_account_transport_policy, set_browser_account_enabled,
+    browser_account_setup_presets, create_browser_account_setup, delete_account,
+    get_account_transport_policy, set_account_transport_policy, set_browser_account_enabled,
 };
 use browser_auth::BrowserAuthVault;
 use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
-use browser_session::{BrowserConfig, BrowserSessionStore};
 use browser_runtime_api::{
     browser_account_runtime_diagnostics, browser_thread_affinity_diagnostics,
 };
+use browser_session::{BrowserConfig, BrowserSessionStore};
 use browser_session_api::{
     begin_browser_login, complete_browser_login, get_browser_session, list_browser_sessions,
     require_browser_attention, reset_browser_session, verify_browser_session,
@@ -119,8 +120,8 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use ui::{
     account_control_css, account_control_js, account_intelligence_css, account_intelligence_js,
-    app_css, app_js, browser_control_css, browser_control_js, index as ui_index,
-    model_groups_css, model_groups_js, trace_console_css, trace_console_js,
+    app_css, app_js, browser_control_css, browser_control_js, index as ui_index, model_groups_css,
+    model_groups_js, trace_console_css, trace_console_js,
 };
 use usage_api::{get_account_usage, get_usage, reset_account_quota};
 
@@ -145,12 +146,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let live_config = LiveConfig::new(config.clone());
     let gateway_api_key = Arc::new(config.gateway_api_key()?);
     let client_policies = Arc::new(
-        ClientPolicyStore::connect(
-            config.clone(),
-            live_config.clone(),
-            gateway_api_key.clone(),
-        )
-        .await?,
+        ClientPolicyStore::connect(config.clone(), live_config.clone(), gateway_api_key.clone())
+            .await?,
     );
 
     let catalog = Arc::new(ModelCatalog::connect(live_config.clone()).await?);
@@ -165,7 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     quota_usage_runtime::install(quota_usage)
         .map_err(|_| "quota usage store was already initialized")?;
 
-    let browser_sessions = Arc::new(BrowserSessionStore::connect(config.clone(), browser_config).await?);
+    let browser_sessions =
+        Arc::new(BrowserSessionStore::connect(config.clone(), browser_config).await?);
     let browser_session_count = browser_sessions.summary().await?.sessions.len();
     let browser_auth_vault = Arc::new(BrowserAuthVault::open(&browser_auth_vault_root)?);
     browser_auth_runtime::install(browser_auth_vault.clone())
@@ -186,8 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     browser_provider_runtime::install(browser_providers.clone())
         .map_err(|_| "browser provider registry was already initialized")?;
 
-    let startup_browserless_idle =
-        browser_providers.browserless_idle_session_ids(config.as_ref());
+    let startup_browserless_idle = browser_providers.browserless_idle_session_ids(config.as_ref());
     let startup_browser_reconcile = chromium_driver
         .reconcile_all_excluding(&startup_browserless_idle)
         .await;
@@ -226,7 +223,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "browser sessions recovered automatically"
                     );
                 }
-                for session in summary.sessions.iter().filter(|session| session.error.is_some()) {
+                for session in summary
+                    .sessions
+                    .iter()
+                    .filter(|session| session.error.is_some())
+                {
                     warn!(
                         session_id = %session.session_id,
                         action = %session.action,
@@ -238,7 +239,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     if browser_provider_bindings > 0 {
-        info!(browser_provider_bindings, "browser provider account bindings enabled");
+        info!(
+            browser_provider_bindings,
+            "browser provider account bindings enabled"
+        );
+    }
+
+    let enabled_accounts = config
+        .accounts
+        .iter()
+        .filter(|account| account.enabled)
+        .collect::<Vec<_>>();
+
+    if !enabled_accounts.is_empty() {
+        let has_available_models = match catalog.models().await {
+            Ok(models) => models.iter().any(|m| {
+                m.fallback_eligible
+                    || (m.enabled
+                        && m.accounts
+                            .iter()
+                            .any(|a| a.enabled && a.availability == "available"))
+            }),
+            Err(_) => false,
+        };
+
+        if !has_available_models {
+            info!("no available models found on startup; refreshing enabled accounts");
+            for account in enabled_accounts {
+                match catalog.refresh_account(&account.id).await {
+                    Ok(result) => {
+                        info!(
+                            account_id = %account.id,
+                            discovered_models = result.discovered_models,
+                            "startup model refresh succeeded"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            account_id = %account.id,
+                            %error,
+                            "startup model refresh failed"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let gateway = Arc::new(Gateway::new(
@@ -249,7 +294,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     match gateway.restore_adaptive_from_traces().await {
         Ok(restored) if restored > 0 => {
-            info!(restored, "restored adaptive route samples from execution trace");
+            info!(
+                restored,
+                "restored adaptive route samples from execution trace"
+            );
         }
         Ok(_) => {}
         Err(error) => {
@@ -267,9 +315,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let legacy_memories = backfill_legacy_memories(config.as_ref()).await?;
     if legacy_memories > 0 {
-        info!(legacy_memories, "backfilled legacy context checkpoints into structured memory");
+        info!(
+            legacy_memories,
+            "backfilled legacy context checkpoints into structured memory"
+        );
     }
-    context_runtime::install(context_engine).map_err(|_| "context engine was already initialized")?;
+    context_runtime::install(context_engine)
+        .map_err(|_| "context engine was already initialized")?;
 
     let memory_provenance = Arc::new(MemoryProvenanceStore::connect(config.clone()).await?);
     memory_provenance_runtime::install(memory_provenance)
@@ -300,7 +352,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui/app.js", get(app_js))
         .route("/ui/account-control.css", get(account_control_css))
         .route("/ui/account-control.js", get(account_control_js))
-        .route("/ui/account-intelligence.css", get(account_intelligence_css))
+        .route(
+            "/ui/account-intelligence.css",
+            get(account_intelligence_css),
+        )
         .route("/ui/account-intelligence.js", get(account_intelligence_js))
         .route("/ui/browser-control.css", get(browser_control_css))
         .route("/ui/browser-control.js", get(browser_control_js))
@@ -320,17 +375,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/files/{file_id}", get(get_file).delete(delete_file))
         .route("/v1/files/{file_id}/content", get(get_file_content))
         .route("/v1/threads", get(list_threads).post(create_thread))
-        .route("/v1/threads/{thread_id}", get(get_thread).delete(delete_thread))
-        .route("/v1/threads/{thread_id}/messages", post(send_thread_message))
+        .route(
+            "/v1/threads/{thread_id}",
+            get(get_thread).delete(delete_thread),
+        )
+        .route(
+            "/v1/threads/{thread_id}/messages",
+            post(send_thread_message),
+        )
         .route("/v1/threads/{thread_id}/context", get(get_thread_context))
         .route("/v1/threads/{thread_id}/memory", get(get_thread_memory))
-        .route("/v1/threads/{thread_id}/memory/pins", post(add_thread_memory_pin))
+        .route(
+            "/v1/threads/{thread_id}/memory/pins",
+            post(add_thread_memory_pin),
+        )
         .route(
             "/v1/threads/{thread_id}/memory/items/{item_key}",
             axum::routing::patch(update_thread_memory_item),
         )
-        .route("/v1/threads/{thread_id}/retrieve", post(inspect_thread_retrieval))
-        .route("/v1/threads/{thread_id}/compact", post(compact_thread_context))
+        .route(
+            "/v1/threads/{thread_id}/retrieve",
+            post(inspect_thread_retrieval),
+        )
+        .route(
+            "/v1/threads/{thread_id}/compact",
+            post(compact_thread_context),
+        )
         .route("/_llmgateway/health", get(health))
         .route("/_llmgateway/models", get(admin_models))
         .route(
@@ -340,12 +410,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_llmgateway/accounts", get(admin_accounts))
         .route(
             "/_llmgateway/accounts/{account_id}",
-            axum::routing::patch(set_account),
+            axum::routing::patch(set_account).delete(delete_account),
         )
-        .route("/_llmgateway/account-intelligence", get(account_intelligence))
+        .route(
+            "/_llmgateway/account-intelligence",
+            get(account_intelligence),
+        )
         .route("/_llmgateway/clients", get(list_client_policies))
         .route("/_llmgateway/routes/explain", post(explain_routes))
-        .route("/_llmgateway/model-groups", get(list_model_groups).post(create_model_group))
+        .route(
+            "/_llmgateway/model-groups",
+            get(list_model_groups).post(create_model_group),
+        )
         .route(
             "/_llmgateway/model-groups/{group_id}",
             axum::routing::put(update_model_group)

@@ -108,7 +108,11 @@ fn normalize_items(items: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for item in items {
-        let item = item.trim().trim_start_matches(['-', '*', '•']).trim().to_string();
+        let item = item
+            .trim()
+            .trim_start_matches(['-', '*', '•'])
+            .trim()
+            .to_string();
         if item.is_empty() {
             continue;
         }

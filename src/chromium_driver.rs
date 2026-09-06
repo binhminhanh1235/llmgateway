@@ -86,7 +86,9 @@ pub enum ChromiumDriverError {
     SessionDisabled(String),
     #[error("browser session error: {0}")]
     BrowserSession(#[from] BrowserSessionError),
-    #[error("chromium executable was not found; set chromium.executable or install Chrome/Chromium")]
+    #[error(
+        "chromium executable was not found; set chromium.executable or install Chrome/Chromium"
+    )]
     ExecutableNotFound,
     #[error("chromium process for session '{0}' is already running")]
     AlreadyRunning(String),
@@ -271,7 +273,10 @@ impl ChromiumDriver {
             .clone()
     }
 
-    pub async fn launch(&self, session_id: &str) -> Result<ChromiumLaunchView, ChromiumDriverError> {
+    pub async fn launch(
+        &self,
+        session_id: &str,
+    ) -> Result<ChromiumLaunchView, ChromiumDriverError> {
         let driver_session = self.driver_session(session_id)?;
         if !driver_session.enabled {
             return Err(ChromiumDriverError::SessionDisabled(session_id.to_string()));
@@ -378,7 +383,10 @@ impl ChromiumDriver {
             Ok(port) => port,
             Err(error) => {
                 let _ = self.stop(session_id).await;
-                let _ = self.sessions.mark_failed(session_id, &error.to_string()).await;
+                let _ = self
+                    .sessions
+                    .mark_failed(session_id, &error.to_string())
+                    .await;
                 return Err(error);
             }
         };
@@ -392,7 +400,10 @@ impl ChromiumDriver {
 
         if let Err(error) = write_debugger_port(&devtools_file, debugger_port) {
             let _ = self.stop(session_id).await;
-            let _ = self.sessions.mark_failed(session_id, &error.to_string()).await;
+            let _ = self
+                .sessions
+                .mark_failed(session_id, &error.to_string())
+                .await;
             return Err(error);
         }
 
@@ -407,7 +418,10 @@ impl ChromiumDriver {
         })
     }
 
-    pub async fn status(&self, session_id: &str) -> Result<ChromiumStatusView, ChromiumDriverError> {
+    pub async fn status(
+        &self,
+        session_id: &str,
+    ) -> Result<ChromiumStatusView, ChromiumDriverError> {
         self.driver_session(session_id)?;
         let session = self.sessions.session(session_id).await?;
         self.remove_finished_process(session_id).await;
@@ -454,7 +468,10 @@ impl ChromiumDriver {
         })
     }
 
-    pub async fn verify(&self, session_id: &str) -> Result<ChromiumVerifyView, ChromiumDriverError> {
+    pub async fn verify(
+        &self,
+        session_id: &str,
+    ) -> Result<ChromiumVerifyView, ChromiumDriverError> {
         let status = self.status(session_id).await?;
         let authenticated = status.ready_match.is_some();
         let session = self.sessions.session(session_id).await?;
@@ -751,7 +768,12 @@ impl ChromiumDriver {
             };
         }
 
-        let session_ids = self.config_snapshot().sessions.keys().cloned().collect::<Vec<_>>();
+        let session_ids = self
+            .config_snapshot()
+            .sessions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         let mut results = Vec::with_capacity(session_ids.len());
         for session_id in session_ids {
             if browserless_idle_sessions.contains(&session_id) {
@@ -764,7 +786,10 @@ impl ChromiumDriver {
         ChromiumReconcileSummary {
             checked: results.len(),
             ready: results.iter().filter(|item| item.ready).count(),
-            recovered: results.iter().filter(|item| item.action == "recovered").count(),
+            recovered: results
+                .iter()
+                .filter(|item| item.action == "recovered")
+                .count(),
             attention: results
                 .iter()
                 .filter(|item| {
@@ -866,7 +891,10 @@ impl ChromiumDriver {
         let mut status = match self.status(session_id).await {
             Ok(status) => status,
             Err(error) => {
-                let _ = self.sessions.mark_failed(session_id, &error.to_string()).await;
+                let _ = self
+                    .sessions
+                    .mark_failed(session_id, &error.to_string())
+                    .await;
                 return ChromiumReconcileView {
                     session_id: session_id.to_string(),
                     action: "status_error".into(),
@@ -889,7 +917,10 @@ impl ChromiumDriver {
             if !self.config_snapshot().auto_recover {
                 let current = self
                     .sessions
-                    .mark_degraded(session_id, "Chromium process is running but CDP is unreachable")
+                    .mark_degraded(
+                        session_id,
+                        "Chromium process is running but CDP is unreachable",
+                    )
                     .await
                     .unwrap_or(session.clone());
                 return ChromiumReconcileView {
@@ -1047,7 +1078,10 @@ impl ChromiumDriver {
         if let Err(error) = self.launch(session_id).await {
             let current = self
                 .sessions
-                .mark_failed(session_id, &format!("Automatic browser recovery failed: {error}"))
+                .mark_failed(
+                    session_id,
+                    &format!("Automatic browser recovery failed: {error}"),
+                )
                 .await
                 .unwrap_or(session.clone());
             return ChromiumReconcileView {
@@ -1060,12 +1094,8 @@ impl ChromiumDriver {
             };
         }
 
-        let wait = Duration::from_secs(
-            self.config_snapshot()
-                .startup_timeout_seconds
-                .min(5)
-                .max(1),
-        );
+        let wait =
+            Duration::from_secs(self.config_snapshot().startup_timeout_seconds.min(5).max(1));
         let deadline = Instant::now() + wait;
         loop {
             match self.verify(session_id).await {
@@ -1088,7 +1118,10 @@ impl ChromiumDriver {
                 Err(error) => {
                     let current = self
                         .sessions
-                        .mark_failed(session_id, &format!("Automatic verification failed: {error}"))
+                        .mark_failed(
+                            session_id,
+                            &format!("Automatic verification failed: {error}"),
+                        )
                         .await
                         .unwrap_or(session.clone());
                     return ChromiumReconcileView {
@@ -1153,11 +1186,7 @@ impl ChromiumDriver {
         Ok(None)
     }
 
-    async fn probe_debugger_port(
-        &self,
-        devtools_file: &Path,
-        requested_port: u16,
-    ) -> Option<u16> {
+    async fn probe_debugger_port(&self, devtools_file: &Path, requested_port: u16) -> Option<u16> {
         if self.devtools_pages(requested_port).await.is_ok() {
             return Some(requested_port);
         }
@@ -1238,7 +1267,10 @@ impl ChromiumDriver {
         }
     }
 
-    async fn devtools_targets(&self, port: u16) -> Result<Vec<DevToolsTarget>, ChromiumDriverError> {
+    async fn devtools_targets(
+        &self,
+        port: u16,
+    ) -> Result<Vec<DevToolsTarget>, ChromiumDriverError> {
         let response = self
             .client
             .get(format!("http://127.0.0.1:{port}/json/list"))
@@ -1257,7 +1289,10 @@ impl ChromiumDriver {
             .map_err(|error| ChromiumDriverError::DevToolsResponse(error.to_string()))
     }
 
-    async fn devtools_pages(&self, port: u16) -> Result<Vec<ChromiumPageView>, ChromiumDriverError> {
+    async fn devtools_pages(
+        &self,
+        port: u16,
+    ) -> Result<Vec<ChromiumPageView>, ChromiumDriverError> {
         Ok(self
             .devtools_targets(port)
             .await?
@@ -1352,8 +1387,8 @@ fn validate_ready_prefix(session_id: &str, prefix: &str) -> Result<(), ChromiumD
             "chromium session '{session_id}' has invalid ready_url_prefix '{prefix}': {error}"
         ))
     })?;
-    let local_http = url.scheme() == "http"
-        && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
+    let local_http =
+        url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
     if url.scheme() != "https" && !local_http {
         return Err(ChromiumDriverError::InvalidConfig(format!(
             "chromium session '{session_id}' ready_url_prefix must use HTTPS (localhost HTTP is allowed for tests)"
@@ -1428,7 +1463,6 @@ fn diagnostic_stderr(stderr: &str) -> String {
     }
 }
 
-
 fn resolve_executable(configured: Option<&str>) -> Result<String, ChromiumDriverError> {
     if let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) {
         if let Some(path) = find_executable(configured) {
@@ -1461,9 +1495,13 @@ fn resolve_executable(configured: Option<&str>) -> Result<String, ChromiumDriver
 
     #[cfg(target_os = "windows")]
     {
-        for root in [env::var_os("PROGRAMFILES"), env::var_os("PROGRAMFILES(X86)"), env::var_os("LOCALAPPDATA")]
-            .into_iter()
-            .flatten()
+        for root in [
+            env::var_os("PROGRAMFILES"),
+            env::var_os("PROGRAMFILES(X86)"),
+            env::var_os("LOCALAPPDATA"),
+        ]
+        .into_iter()
+        .flatten()
         {
             for suffix in [
                 "Google/Chrome/Application/chrome.exe",

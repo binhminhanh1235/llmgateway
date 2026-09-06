@@ -143,8 +143,7 @@ pub fn route_fit(
     }
 
     if let Some(window) = route.context_window {
-        let sufficient =
-            window >= profile.required_context_tokens.min(i64::MAX as usize) as i64;
+        let sufficient = window >= profile.required_context_tokens.min(i64::MAX as usize) as i64;
         snapshot.context_sufficient = Some(sufficient);
         if !sufficient {
             return TaskRouteFit {
@@ -189,16 +188,14 @@ pub fn route_fit(
     }
 
     if profile.simple_chat {
-        if let Some(capability) = first_matching_capability(
-            &capabilities,
-            &["cheap", "low-cost", "fast", "simple-chat"],
-        ) {
+        if let Some(capability) =
+            first_matching_capability(&capabilities, &["cheap", "low-cost", "fast", "simple-chat"])
+        {
             raw_adjustment = raw_adjustment.saturating_sub(max_bonus);
             push_unique(&mut snapshot.matched_capabilities, capability);
         }
         if first_matching_capability(&capabilities, &["premium", "expensive"]).is_some() {
-            raw_adjustment =
-                raw_adjustment.saturating_add((mismatch_penalty / 2).max(1));
+            raw_adjustment = raw_adjustment.saturating_add((mismatch_penalty / 2).max(1));
         }
     }
 
@@ -340,10 +337,7 @@ fn normalized_capabilities(values: &[String]) -> HashSet<String> {
         .collect()
 }
 
-fn first_matching_capability(
-    capabilities: &HashSet<String>,
-    expected: &[&str],
-) -> Option<String> {
+fn first_matching_capability(capabilities: &HashSet<String>, expected: &[&str]) -> Option<String> {
     expected
         .iter()
         .find(|candidate| capabilities.contains(**candidate))
@@ -408,7 +402,10 @@ mod tests {
             model: "model".into(),
             priority: 10,
             enabled: true,
-            capabilities: capabilities.iter().map(|value| (*value).to_string()).collect(),
+            capabilities: capabilities
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
             context_window,
         }
     }

@@ -1,8 +1,8 @@
 use crate::{
     compat::{anthropic, responses},
     multimodal::{
-        validate_attachment_execution, InputContent, Modality, MultimodalError,
-        MultimodalMessage, MultimodalRequest, ToolCall,
+        validate_attachment_execution, InputContent, Modality, MultimodalError, MultimodalMessage,
+        MultimodalRequest, ToolCall,
     },
 };
 use serde_json::Value;
@@ -27,9 +27,7 @@ pub fn normalize_chat_request(
     normalize_current_execution(body.clone(), requested_model.to_string())
 }
 
-pub fn normalize_responses_request(
-    body: &Value,
-) -> Result<NormalizedTextRequest, MultimodalError> {
+pub fn normalize_responses_request(body: &Value) -> Result<NormalizedTextRequest, MultimodalError> {
     reject_requested_output_modalities(body)?;
     reject_responses_unsupported_inputs(body)?;
     let (requested_model, execution) =
@@ -37,9 +35,7 @@ pub fn normalize_responses_request(
     normalize_current_execution(execution, requested_model)
 }
 
-pub fn normalize_anthropic_request(
-    body: &Value,
-) -> Result<NormalizedTextRequest, MultimodalError> {
+pub fn normalize_anthropic_request(body: &Value) -> Result<NormalizedTextRequest, MultimodalError> {
     reject_anthropic_non_text_input(body)?;
     let (requested_model, execution) =
         anthropic::to_openai_request(body).map_err(MultimodalError::InvalidRequest)?;
@@ -302,9 +298,7 @@ fn reject_responses_unsupported_inputs(body: &Value) -> Result<(), MultimodalErr
 fn reject_unsupported_responses_kind(kind: &str) -> Result<(), MultimodalError> {
     match kind {
         "file" | "input_file" | "document" => Ok(()),
-        "audio" | "input_audio" => Err(
-            MultimodalError::UnsupportedInputModality(Modality::Audio),
-        ),
+        "audio" | "input_audio" => Err(MultimodalError::UnsupportedInputModality(Modality::Audio)),
         _ => Ok(()),
     }
 }
@@ -333,19 +327,13 @@ fn scan_anthropic_content(value: &Value) -> Result<(), MultimodalError> {
         };
         match kind {
             "image" => {
-                return Err(MultimodalError::UnsupportedInputModality(
-                    Modality::Image,
-                ));
+                return Err(MultimodalError::UnsupportedInputModality(Modality::Image));
             }
             "document" | "file" => {
-                return Err(MultimodalError::UnsupportedInputModality(
-                    Modality::File,
-                ));
+                return Err(MultimodalError::UnsupportedInputModality(Modality::File));
             }
             "audio" => {
-                return Err(MultimodalError::UnsupportedInputModality(
-                    Modality::Audio,
-                ));
+                return Err(MultimodalError::UnsupportedInputModality(Modality::Audio));
             }
             _ => {}
         }
@@ -411,8 +399,14 @@ mod tests {
             "input":"hello"
         }))
         .unwrap();
-        assert_eq!(text_signature(&chat.canonical), text_signature(&responses.canonical));
-        assert_eq!(chat.canonical.output_modalities, responses.canonical.output_modalities);
+        assert_eq!(
+            text_signature(&chat.canonical),
+            text_signature(&responses.canonical)
+        );
+        assert_eq!(
+            chat.canonical.output_modalities,
+            responses.canonical.output_modalities
+        );
     }
 
     #[test]

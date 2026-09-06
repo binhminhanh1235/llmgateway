@@ -4,9 +4,7 @@ use thiserror::Error;
 
 pub const MULTIMODAL_SCHEMA_VERSION: u32 = 1;
 
-#[derive(
-    Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord,
-)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Modality {
     Text,
@@ -207,7 +205,12 @@ impl ModelCapabilities {
         if has(&["file", "files", "file_input", "document", "documents"]) {
             input_modalities.push(Modality::File);
         }
-        if has(&["audio", "audio_input", "transcription", "audio_transcription"]) {
+        if has(&[
+            "audio",
+            "audio_input",
+            "transcription",
+            "audio_transcription",
+        ]) {
             input_modalities.push(Modality::Audio);
         }
 
@@ -292,25 +295,16 @@ pub fn canonical_output_modalities() -> Vec<Modality> {
     ]
 }
 
-pub fn validate_foundation_execution(
-    request: &MultimodalRequest,
-) -> Result<(), MultimodalError> {
+pub fn validate_foundation_execution(request: &MultimodalRequest) -> Result<(), MultimodalError> {
     validate_execution_modalities(request, &[Modality::Text])
 }
 
-pub fn validate_vision_execution(
-    request: &MultimodalRequest,
-) -> Result<(), MultimodalError> {
+pub fn validate_vision_execution(request: &MultimodalRequest) -> Result<(), MultimodalError> {
     validate_execution_modalities(request, &[Modality::Text, Modality::Image])
 }
 
-pub fn validate_attachment_execution(
-    request: &MultimodalRequest,
-) -> Result<(), MultimodalError> {
-    validate_execution_modalities(
-        request,
-        &[Modality::Text, Modality::Image, Modality::File],
-    )
+pub fn validate_attachment_execution(request: &MultimodalRequest) -> Result<(), MultimodalError> {
+    validate_execution_modalities(request, &[Modality::Text, Modality::Image, Modality::File])
 }
 
 fn validate_execution_modalities(
@@ -405,9 +399,9 @@ mod tests {
         assert!(capabilities
             .supported_mime_types
             .contains(&"application/pdf".to_string()));
-        assert!(capabilities
-            .supported_mime_types
-            .contains(&"application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()));
+        assert!(capabilities.supported_mime_types.contains(
+            &"application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
+        ));
         assert_eq!(capabilities.max_attachment_count, Some(8));
         assert_eq!(
             capabilities.max_attachment_size_bytes,

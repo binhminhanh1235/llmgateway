@@ -1,14 +1,17 @@
 use crate::{
     config::{AccountConfig, AppConfig},
     conversation::StoredMessage,
-    semantic_retrieval::{RetrievedChunk, RetrievalResult},
+    semantic_retrieval::{RetrievalResult, RetrievedChunk},
 };
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION},
     Client, StatusCode,
 };
 use serde_json::{json, Value};
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, Row, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    Row, SqlitePool,
+};
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -312,14 +315,12 @@ impl EmbeddingRetriever {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let account = self
-            .config
-            .account(&self.account_id)
-            .ok_or_else(|| EmbeddingError::InvalidConfig(format!("unknown account '{}'", self.account_id)))?;
-        let provider = self
-            .config
-            .provider(&account.provider)
-            .ok_or_else(|| EmbeddingError::InvalidConfig(format!("unknown provider '{}'", account.provider)))?;
+        let account = self.config.account(&self.account_id).ok_or_else(|| {
+            EmbeddingError::InvalidConfig(format!("unknown account '{}'", self.account_id))
+        })?;
+        let provider = self.config.provider(&account.provider).ok_or_else(|| {
+            EmbeddingError::InvalidConfig(format!("unknown provider '{}'", account.provider))
+        })?;
         let key = env::var(&account.api_key_env)
             .map_err(|_| EmbeddingError::MissingCredential(account.api_key_env.clone()))?;
         let url = format!("{}/embeddings", provider.base_url.trim_end_matches('/'));
@@ -349,7 +350,9 @@ impl EmbeddingRetriever {
             let data = payload
                 .get("data")
                 .and_then(Value::as_array)
-                .ok_or_else(|| EmbeddingError::InvalidResponse("expected embeddings data array".into()))?;
+                .ok_or_else(|| {
+                    EmbeddingError::InvalidResponse("expected embeddings data array".into())
+                })?;
             let mut ordered = data
                 .iter()
                 .enumerate()
@@ -362,11 +365,15 @@ impl EmbeddingRetriever {
                     let vector = item
                         .get("embedding")
                         .and_then(Value::as_array)
-                        .ok_or_else(|| EmbeddingError::InvalidResponse("embedding vector missing".into()))?
+                        .ok_or_else(|| {
+                            EmbeddingError::InvalidResponse("embedding vector missing".into())
+                        })?
                         .iter()
                         .map(|value| {
                             value.as_f64().ok_or_else(|| {
-                                EmbeddingError::InvalidResponse("embedding contained non-number".into())
+                                EmbeddingError::InvalidResponse(
+                                    "embedding contained non-number".into(),
+                                )
                             })
                         })
                         .collect::<Result<Vec<_>, _>>()?;
@@ -398,7 +405,10 @@ fn empty_result() -> RetrievalResult {
 fn conversation_chunks(messages: &[StoredMessage], through_ordinal: i64) -> Vec<HistoricalChunk> {
     let mut chunks = Vec::new();
     let mut current: Vec<&StoredMessage> = Vec::new();
-    for message in messages.iter().filter(|message| message.ordinal <= through_ordinal) {
+    for message in messages
+        .iter()
+        .filter(|message| message.ordinal <= through_ordinal)
+    {
         let role = message
             .message
             .get("role")
@@ -417,8 +427,12 @@ fn conversation_chunks(messages: &[StoredMessage], through_ordinal: i64) -> Vec<
 }
 
 fn push_chunk(chunks: &mut Vec<HistoricalChunk>, messages: &[&StoredMessage]) {
-    let Some(first) = messages.first() else { return; };
-    let Some(last) = messages.last() else { return; };
+    let Some(first) = messages.first() else {
+        return;
+    };
+    let Some(last) = messages.last() else {
+        return;
+    };
     let text = messages
         .iter()
         .map(|message| {
@@ -511,7 +525,10 @@ fn message_text(message: &Value) -> String {
             .filter_map(|part| part.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n"),
-        _ => message.get("tool_calls").map(Value::to_string).unwrap_or_default(),
+        _ => message
+            .get("tool_calls")
+            .map(Value::to_string)
+            .unwrap_or_default(),
     }
 }
 
@@ -533,7 +550,10 @@ fn truncate_to_token_budget(text: &str, max_tokens: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let mut truncated = text.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut truncated = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     truncated.push('…');
     truncated
 }
@@ -543,7 +563,10 @@ fn preview(text: &str, max_chars: usize) -> String {
     if compact.chars().count() <= max_chars {
         return compact;
     }
-    let mut value = compact.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut value = compact
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     value.push('…');
     value
 }

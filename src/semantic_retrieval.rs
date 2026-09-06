@@ -289,18 +289,16 @@ fn bigrams(terms: &[String]) -> HashSet<String> {
 
 fn tokenize(text: &str) -> Vec<String> {
     const STOP_WORDS: &[&str] = &[
-        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "do",
-        "does", "for", "from", "had", "has", "have", "how", "i", "if", "in", "is", "it",
-        "its", "me", "my", "of", "on", "or", "our", "so", "that", "the", "their", "this",
-        "to", "was", "we", "were", "what", "when", "where", "which", "who", "why", "will",
-        "with", "you", "your", "mình", "cho", "của", "là", "và", "với", "có", "những",
-        "này", "đó", "thì", "được", "hãy", "về", "một", "các", "trong", "khi", "nào",
+        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "do", "does", "for",
+        "from", "had", "has", "have", "how", "i", "if", "in", "is", "it", "its", "me", "my", "of",
+        "on", "or", "our", "so", "that", "the", "their", "this", "to", "was", "we", "were", "what",
+        "when", "where", "which", "who", "why", "will", "with", "you", "your", "mình", "cho",
+        "của", "là", "và", "với", "có", "những", "này", "đó", "thì", "được", "hãy", "về", "một",
+        "các", "trong", "khi", "nào",
     ];
     let stop = STOP_WORDS.iter().copied().collect::<HashSet<_>>();
     text.to_lowercase()
-        .split(|ch: char| {
-            !ch.is_alphanumeric() && ch != '_' && ch != '-' && ch != '.' && ch != '/'
-        })
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-' && ch != '.' && ch != '/')
         .map(|term| term.trim_matches(|ch: char| ch == '.' || ch == '/' || ch == '-'))
         .filter(|term| term.chars().count() >= 2 && !stop.contains(*term))
         .map(ToString::to_string)
@@ -359,8 +357,7 @@ fn preview(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        augment_messages_with_retrieval, estimate_json_messages_tokens,
-        retrieve_relevant_history,
+        augment_messages_with_retrieval, estimate_json_messages_tokens, retrieve_relevant_history,
     };
     use crate::conversation::StoredMessage;
     use serde_json::{json, Value};
@@ -422,10 +419,7 @@ mod tests {
         let history = vec![stored(1, "user", "invoice optimistic locking HTTP 409")];
         let query = json!({"role":"user","content":"invoice locking conflict"});
         let retrieval = retrieve_relevant_history(&history, 1, &query, 1, 200, 0.1);
-        let mut messages = vec![
-            json!({"role":"system","content":"durable memory"}),
-            query,
-        ];
+        let mut messages = vec![json!({"role":"system","content":"durable memory"}), query];
         let before = estimate_json_messages_tokens(&messages);
         augment_messages_with_retrieval(&mut messages, &retrieval);
         assert_eq!(messages.len(), 2);

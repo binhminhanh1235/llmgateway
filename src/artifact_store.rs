@@ -69,7 +69,10 @@ impl ArtifactStore {
         Self::connect_parts(&config.storage.database_url, config.artifacts.clone()).await
     }
 
-    async fn connect_parts(database_url: &str, config: ArtifactConfig) -> Result<Self, ArtifactError> {
+    async fn connect_parts(
+        database_url: &str,
+        config: ArtifactConfig,
+    ) -> Result<Self, ArtifactError> {
         ensure_sqlite_parent(database_url)?;
         tokio::fs::create_dir_all(&config.root).await?;
         tokio::fs::create_dir_all(Path::new(&config.root).join("blobs")).await?;
@@ -191,8 +194,7 @@ impl ArtifactStore {
         }
 
         if tokio::fs::metadata(&absolute_path).await.is_err() {
-            let temp = Path::new(&self.config.root)
-                .join(format!(".upload-{}", Uuid::new_v4()));
+            let temp = Path::new(&self.config.root).join(format!(".upload-{}", Uuid::new_v4()));
             tokio::fs::write(&temp, bytes).await?;
             match tokio::fs::rename(&temp, &absolute_path).await {
                 Ok(()) => {}
@@ -239,7 +241,8 @@ impl ArtifactStore {
         .execute(&self.pool)
         .await?;
 
-        self.get(&id, owner_client_id, owner_client_id.is_none()).await
+        self.get(&id, owner_client_id, owner_client_id.is_none())
+            .await
     }
 
     pub async fn get(
@@ -301,12 +304,11 @@ impl ArtifactStore {
     ) -> Result<(), ArtifactError> {
         let record = self.get(id, owner_client_id, admin).await?;
         let mut tx = self.pool.begin().await?;
-        let references: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM artifact_references WHERE artifact_id = ?",
-        )
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
+        let references: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_references WHERE artifact_id = ?")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
         if references > 0 {
             return Err(ArtifactError::InUse {
                 id: id.to_string(),
@@ -335,12 +337,11 @@ impl ArtifactStore {
         .fetch_one(&mut *tx)
         .await?;
         if active_with_blob == 0 {
-            let relative: Option<String> = sqlx::query_scalar(
-                "SELECT relative_path FROM artifact_blobs WHERE sha256 = ?",
-            )
-            .bind(&record.sha256)
-            .fetch_optional(&mut *tx)
-            .await?;
+            let relative: Option<String> =
+                sqlx::query_scalar("SELECT relative_path FROM artifact_blobs WHERE sha256 = ?")
+                    .bind(&record.sha256)
+                    .fetch_optional(&mut *tx)
+                    .await?;
             if let Some(relative) = relative {
                 let path = self.safe_blob_path(&relative)?;
                 match tokio::fs::remove_file(path).await {
@@ -474,7 +475,10 @@ impl ArtifactStore {
         metadata_json: Option<&str>,
     ) -> Result<bool, ArtifactError> {
         self.get(artifact_id, None, true).await?;
-        if let Some(existing) = self.provider_binding(artifact_id, provider, account_id).await? {
+        if let Some(existing) = self
+            .provider_binding(artifact_id, provider, account_id)
+            .await?
+        {
             self.upsert_provider_binding(
                 artifact_id,
                 provider,
@@ -562,7 +566,9 @@ fn sanitize_filename(filename: &str) -> Result<String, ArtifactError> {
     let normalized = filename.replace('\\', "/");
     let basename = normalized.rsplit('/').next().unwrap_or("").trim();
     if basename.is_empty() || basename == "." || basename == ".." {
-        return Err(ArtifactError::Invalid("filename must contain a safe basename".into()));
+        return Err(ArtifactError::Invalid(
+            "filename must contain a safe basename".into(),
+        ));
     }
     let cleaned = basename
         .chars()
@@ -570,7 +576,9 @@ fn sanitize_filename(filename: &str) -> Result<String, ArtifactError> {
         .take(255)
         .collect::<String>();
     if cleaned.is_empty() {
-        return Err(ArtifactError::Invalid("filename contains no safe characters".into()));
+        return Err(ArtifactError::Invalid(
+            "filename contains no safe characters".into(),
+        ));
     }
     Ok(cleaned)
 }
@@ -581,7 +589,14 @@ fn validate_mime(
     config: &ArtifactConfig,
 ) -> Result<String, ArtifactError> {
     let declared = declared
-        .map(|value| value.split(';').next().unwrap_or(value).trim().to_ascii_lowercase())
+        .map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .to_ascii_lowercase()
+        })
         .filter(|value| !value.is_empty());
     let detected = sniff_mime(bytes, declared.as_deref());
 
@@ -772,13 +787,29 @@ mod tests {
         let (root, url) = temp_paths("artifact-dedup");
         std::fs::create_dir_all(&root).unwrap();
         let cfg = config(&root);
-        let store = ArtifactStore::connect_parts(&url, cfg.clone()).await.unwrap();
+        let store = ArtifactStore::connect_parts(&url, cfg.clone())
+            .await
+            .unwrap();
         let a = store
-            .store_bytes(Some("client-a"), "a.txt", Some("text/plain"), "assistants", "test", b"same")
+            .store_bytes(
+                Some("client-a"),
+                "a.txt",
+                Some("text/plain"),
+                "assistants",
+                "test",
+                b"same",
+            )
             .await
             .unwrap();
         let b = store
-            .store_bytes(Some("client-a"), "b.txt", Some("text/plain"), "assistants", "test", b"same")
+            .store_bytes(
+                Some("client-a"),
+                "b.txt",
+                Some("text/plain"),
+                "assistants",
+                "test",
+                b"same",
+            )
             .await
             .unwrap();
         assert_ne!(a.id, b.id);
@@ -805,9 +836,18 @@ mod tests {
     async fn owner_isolation_reference_guard_and_binding_cleanup_are_deterministic() {
         let (root, url) = temp_paths("artifact-security");
         std::fs::create_dir_all(&root).unwrap();
-        let store = ArtifactStore::connect_parts(&url, config(&root)).await.unwrap();
+        let store = ArtifactStore::connect_parts(&url, config(&root))
+            .await
+            .unwrap();
         let artifact = store
-            .store_bytes(Some("client-a"), "safe.txt", Some("text/plain"), "assistants", "test", b"safe")
+            .store_bytes(
+                Some("client-a"),
+                "safe.txt",
+                Some("text/plain"),
+                "assistants",
+                "test",
+                b"safe",
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -820,7 +860,11 @@ mod tests {
             .await
             .unwrap();
         store
-            .sync_references("thread_message", "message-1", std::slice::from_ref(&artifact.id))
+            .sync_references(
+                "thread_message",
+                "message-1",
+                std::slice::from_ref(&artifact.id),
+            )
             .await
             .unwrap();
         assert!(matches!(
@@ -832,7 +876,10 @@ mod tests {
             .sync_references("thread_message", "message-1", &[])
             .await
             .unwrap();
-        store.delete(&artifact.id, Some("client-a"), false).await.unwrap();
+        store
+            .delete(&artifact.id, Some("client-a"), false)
+            .await
+            .unwrap();
         assert!(store
             .provider_binding(&artifact.id, "fake", "account-a")
             .await
@@ -849,9 +896,18 @@ mod tests {
     async fn provider_bindings_are_reused_only_within_provider_account_affinity() {
         let (root, url) = temp_paths("artifact-provider-bindings");
         std::fs::create_dir_all(&root).unwrap();
-        let store = ArtifactStore::connect_parts(&url, config(&root)).await.unwrap();
+        let store = ArtifactStore::connect_parts(&url, config(&root))
+            .await
+            .unwrap();
         let artifact = store
-            .store_bytes(None, "report.pdf", Some("application/pdf"), "assistants", "test", b"%PDF-1.7\n")
+            .store_bytes(
+                None,
+                "report.pdf",
+                Some("application/pdf"),
+                "assistants",
+                "test",
+                b"%PDF-1.7\n",
+            )
             .await
             .unwrap();
 
@@ -932,19 +988,40 @@ mod tests {
 
         assert!(matches!(
             store
-                .store_bytes(None, "big.txt", Some("text/plain"), "assistants", "test", b"12345")
+                .store_bytes(
+                    None,
+                    "big.txt",
+                    Some("text/plain"),
+                    "assistants",
+                    "test",
+                    b"12345"
+                )
                 .await,
             Err(ArtifactError::TooLarge { .. })
         ));
         assert!(matches!(
             store
-                .store_bytes(None, "fake.png", Some("image/png"), "assistants", "test", b"%PDF")
+                .store_bytes(
+                    None,
+                    "fake.png",
+                    Some("image/png"),
+                    "assistants",
+                    "test",
+                    b"%PDF"
+                )
                 .await,
             Err(ArtifactError::MimeMismatch { .. })
         ));
         assert!(matches!(
             store
-                .store_bytes(None, "app.exe", Some("application/octet-stream"), "assistants", "test", b"MZ00")
+                .store_bytes(
+                    None,
+                    "app.exe",
+                    Some("application/octet-stream"),
+                    "assistants",
+                    "test",
+                    b"MZ00"
+                )
                 .await,
             Err(ArtifactError::MimeDenied(_))
         ));

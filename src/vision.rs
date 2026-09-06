@@ -111,7 +111,11 @@ pub async fn materialize_image_inputs(
         ensure_image(&record)?;
         replacements.insert(
             format!("{ARTIFACT_IMAGE_SCHEME}{id}"),
-            format!("data:{};base64,{}", record.mime_type, STANDARD.encode(bytes)),
+            format!(
+                "data:{};base64,{}",
+                record.mime_type,
+                STANDARD.encode(bytes)
+            ),
         );
     }
     rewrite_artifact_urls(&mut materialized, &replacements);
@@ -183,9 +187,7 @@ fn collect_image_sources(value: &Value, out: &mut BTreeSet<ImageSource>) {
                             source.get("media_type").and_then(Value::as_str),
                             source.get("data").and_then(Value::as_str),
                         ) {
-                            out.insert(ImageSource::Url(format!(
-                                "data:{mime};base64,{data}"
-                            )));
+                            out.insert(ImageSource::Url(format!("data:{mime};base64,{data}")));
                         }
                     }
                 }
@@ -217,14 +219,14 @@ fn rewrite_image_sources(value: &mut Value, replacements: &BTreeMap<String, Stri
                     .get("url")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                let nested_url = object
-                    .get("image_url")
-                    .and_then(|image_url| {
+                let nested_url = object.get("image_url").and_then(|image_url| {
+                    image_url.as_str().map(str::to_string).or_else(|| {
                         image_url
-                            .as_str()
+                            .get("url")
+                            .and_then(Value::as_str)
                             .map(str::to_string)
-                            .or_else(|| image_url.get("url").and_then(Value::as_str).map(str::to_string))
-                    });
+                    })
+                });
                 let source_data = object.get("source").and_then(|source| {
                     if source.get("type").and_then(Value::as_str) != Some("base64") {
                         return None;
@@ -247,10 +249,7 @@ fn rewrite_image_sources(value: &mut Value, replacements: &BTreeMap<String, Stri
                     object.remove("source");
                     object.remove("url");
                     object.insert("type".into(), Value::String("image_url".into()));
-                    object.insert(
-                        "image_url".into(),
-                        serde_json::json!({"url":uri}),
-                    );
+                    object.insert("image_url".into(), serde_json::json!({"url":uri}));
                 }
             }
             for child in object.values_mut() {
@@ -289,9 +288,7 @@ fn collect_artifact_image_ids(value: &Value, out: &mut BTreeSet<String>) {
                 if let Some(image_url) = object.get("image_url") {
                     if let Some(raw) = image_url.as_str() {
                         collect_uri(raw);
-                    } else if let Some(raw) =
-                        image_url.get("url").and_then(Value::as_str)
-                    {
+                    } else if let Some(raw) = image_url.get("url").and_then(Value::as_str) {
                         collect_uri(raw);
                     }
                 }
@@ -377,10 +374,7 @@ fn image_extension(mime: &str) -> &'static str {
 }
 
 fn normalize_capability(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', ' '], "_")
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
 fn truncate(value: &str, limit: usize) -> String {
@@ -434,10 +428,7 @@ mod tests {
                 ]
             }]
         });
-        assert_eq!(
-            image_artifact_ids(&body),
-            vec!["file_image".to_string()]
-        );
+        assert_eq!(image_artifact_ids(&body), vec!["file_image".to_string()]);
     }
 
     #[test]

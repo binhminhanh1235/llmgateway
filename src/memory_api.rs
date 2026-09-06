@@ -39,19 +39,23 @@ pub async fn get_thread_memory(
 
     let engine = match context_runtime::get() {
         Some(engine) => engine,
-        None => return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "memory_engine_error",
-            "context engine is not initialized",
-        ),
+        None => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_engine_error",
+                "context engine is not initialized",
+            )
+        }
     };
     let provenance = match memory_provenance_runtime::get() {
         Some(store) => store,
-        None => return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "memory_provenance_error",
-            "memory provenance store is not initialized",
-        ),
+        None => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_provenance_error",
+                "memory provenance store is not initialized",
+            )
+        }
     };
 
     match engine.status(&thread_id, None).await {
@@ -95,11 +99,13 @@ pub async fn add_thread_memory_pin(
     }
     let store = match memory_provenance_runtime::get() {
         Some(store) => store,
-        None => return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "memory_provenance_error",
-            "memory provenance store is not initialized",
-        ),
+        None => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_provenance_error",
+                "memory provenance store is not initialized",
+            )
+        }
     };
     match store
         .add_manual_pin(&thread_id, &body.category, &body.value, body.confidence)
@@ -121,11 +127,13 @@ pub async fn update_thread_memory_item(
     }
     let store = match memory_provenance_runtime::get() {
         Some(store) => store,
-        None => return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "memory_provenance_error",
-            "memory provenance store is not initialized",
-        ),
+        None => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_provenance_error",
+                "memory provenance store is not initialized",
+            )
+        }
     };
     match store.set_pinned(&thread_id, &item_key, body.pinned).await {
         Ok(item) => json_response(StatusCode::OK, json!({"item":item}), None),
@@ -136,11 +144,17 @@ pub async fn update_thread_memory_item(
 fn provenance_error(error: MemoryProvenanceError) -> Response<Body> {
     match error {
         MemoryProvenanceError::InvalidCategory(_) | MemoryProvenanceError::InvalidConfidence(_) => {
-            json_error(StatusCode::BAD_REQUEST, "invalid_memory_item", &error.to_string())
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_memory_item",
+                &error.to_string(),
+            )
         }
-        MemoryProvenanceError::ItemNotFound(_) => {
-            json_error(StatusCode::NOT_FOUND, "memory_item_not_found", &error.to_string())
-        }
+        MemoryProvenanceError::ItemNotFound(_) => json_error(
+            StatusCode::NOT_FOUND,
+            "memory_item_not_found",
+            &error.to_string(),
+        ),
         MemoryProvenanceError::Database(_) | MemoryProvenanceError::Io(_) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "memory_provenance_error",
@@ -151,7 +165,8 @@ fn provenance_error(error: MemoryProvenanceError) -> Response<Body> {
 
 fn conversation_error(error: ConversationError) -> Response<Body> {
     match error {
-        ConversationError::ThreadNotFound(message) | ConversationError::ResponseNotFound(message) => {
+        ConversationError::ThreadNotFound(message)
+        | ConversationError::ResponseNotFound(message) => {
             json_error(StatusCode::NOT_FOUND, "not_found_error", &message)
         }
         ConversationError::InvalidJson(message) => json_error(
@@ -172,4 +187,6 @@ fn conversation_error(error: ConversationError) -> Response<Body> {
     }
 }
 
-fn default_manual_confidence() -> f64 { 1.0 }
+fn default_manual_confidence() -> f64 {
+    1.0
+}

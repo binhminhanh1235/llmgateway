@@ -330,6 +330,53 @@ async function testDeepSeek() {
   assert.equal(probe.code, "wrong_page");
 }
 
+async function testMiMo() {
+  const input = new FakeTextAreaElement();
+  const response = new FakeElement("");
+  const send = new FakeElement("Send");
+  const nodes = {
+    "textarea[placeholder*='Ask me anything' i]": input,
+    "button[type='submit']": send,
+  };
+  send.onClick = () => {
+    response.innerText = "mimo-browser-ok";
+    response.textContent = response.innerText;
+    nodes["[data-role='assistant']"] = response;
+  };
+
+  installPage({ host: "aistudio.xiaomimimo.com", path: "/#/c", nodes });
+  let adapter = loadAdapter("adapters/mimo-web.js");
+  assert.equal(adapter.meta.contract_version, 1);
+  assert.equal(adapter.meta.id, "mimo-web");
+  assert.equal(adapter.meta.provider, "mimo");
+  let probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, true, probe.message);
+  assert.equal(probe.page_signature, "mimo-composer-v1");
+
+  const result = await adapter.chat({
+    model: "mimo-web-default",
+    stream: false,
+    messages: [{ role: "user", content: "Reply once" }]
+  }, { response_timeout_ms: 2200 });
+  assert.equal(result.body.choices[0].message.content, "mimo-browser-ok");
+
+  installPage({
+    host: "aistudio.xiaomimimo.com",
+    path: "/#/c",
+    nodes: { "input[type='password']": new FakeElement("Password") }
+  });
+  adapter = loadAdapter("adapters/mimo-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "login_required");
+
+  installPage({ host: "example.test", path: "/", nodes: {} });
+  adapter = loadAdapter("adapters/mimo-web.js");
+  probe = await adapter.probe({ probe_timeout_ms: 20 });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.code, "wrong_page");
+}
+
 async function testQwenReactComposerSubmit() {
   const input = new FakeTextAreaElement();
   const response = new FakeElement("");
@@ -1391,6 +1438,7 @@ await testChatGPTProseMirrorStateSyncBeforeSubmit();
 await testChatGPTEnterFallbackAvoidsHiddenGetForm();
 await testQwen();
 await testDeepSeek();
+await testMiMo();
 await testQwenReactComposerSubmit();
 await testQwenEnterFallbackWithoutSendControl();
 await testVisionAttachmentUploadBeforeSubmit();
@@ -1412,4 +1460,4 @@ await testGeminiStreamCancellation();
 await testGeminiFreshThreadForcesNewChat();
 await testGeminiReopenWaitsForStableHistoryAndIgnoresRerenderedOldTurns();
 await testMidRequestLoginExpiry();
-console.log("built-in Gemini/ChatGPT/Qwen/DeepSeek fake-page adapter fixtures passed");
+console.log("built-in Gemini/ChatGPT/Qwen/DeepSeek/MiMo fake-page adapter fixtures passed");

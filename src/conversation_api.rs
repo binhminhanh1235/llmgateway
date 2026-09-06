@@ -1,11 +1,13 @@
 use crate::{
-    api::{authorize, gateway_error, json_error, json_response, response_with_route, vision_error, AppState},
+    api::{
+        authorize, gateway_error, json_error, json_response, response_with_route, vision_error,
+        AppState,
+    },
+    browser_provider_runtime,
     context_engine::{ContextError, PreparedContext},
     context_runtime,
-    browser_provider_runtime,
     conversation::{openai_stream_with_capture, ConversationError},
-    embedding_runtime,
-    file_attachments,
+    embedding_runtime, file_attachments,
     gateway::GatewayError,
     memory_provenance::{inject_pinned_memory, MemoryProvenanceError},
     memory_provenance_runtime,
@@ -70,23 +72,14 @@ pub async fn create_thread(
 
     if let Some(messages) = body.messages {
         for mut message in messages {
-            if let Err(error) = vision::resolve_image_inputs(
-                &mut message,
-                &state.artifacts,
-                None,
-                true,
-            )
-            .await
+            if let Err(error) =
+                vision::resolve_image_inputs(&mut message, &state.artifacts, None, true).await
             {
                 return vision_error(error);
             }
-            if let Err(error) = file_attachments::resolve_file_inputs(
-                &mut message,
-                &state.artifacts,
-                None,
-                true,
-            )
-            .await
+            if let Err(error) =
+                file_attachments::resolve_file_inputs(&mut message, &state.artifacts, None, true)
+                    .await
             {
                 return crate::api::file_attachment_error(error);
             }
@@ -109,10 +102,7 @@ pub async fn create_thread(
     }
 }
 
-pub async fn list_threads(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response<Body> {
+pub async fn list_threads(State(state): State<AppState>, headers: HeaderMap) -> Response<Body> {
     if let Err(response) = authorize(&headers, &state.gateway_api_key) {
         return response;
     }
@@ -252,23 +242,13 @@ pub async fn send_thread_message(
     };
 
     let mut user_message = json!({"role":"user","content":body.content});
-    if let Err(error) = vision::resolve_image_inputs(
-        &mut user_message,
-        &state.artifacts,
-        None,
-        true,
-    )
-    .await
+    if let Err(error) =
+        vision::resolve_image_inputs(&mut user_message, &state.artifacts, None, true).await
     {
         return vision_error(error);
     }
-    if let Err(error) = file_attachments::resolve_file_inputs(
-        &mut user_message,
-        &state.artifacts,
-        None,
-        true,
-    )
-    .await
+    if let Err(error) =
+        file_attachments::resolve_file_inputs(&mut user_message, &state.artifacts, None, true).await
     {
         return crate::api::file_attachment_error(error);
     }
@@ -295,11 +275,8 @@ pub async fn send_thread_message(
         }
         match store.pinned_prompt(&thread_id).await {
             Ok(Some(prompt)) => {
-                prepared.estimated_prepared_tokens = inject_pinned_memory(
-                    &mut prepared.messages,
-                    &prompt,
-                    prepared.budget_tokens,
-                );
+                prepared.estimated_prepared_tokens =
+                    inject_pinned_memory(&mut prepared.messages, &prompt, prepared.budget_tokens);
                 pinned_memory = true;
             }
             Ok(None) => {}
@@ -335,39 +312,40 @@ pub async fn send_thread_message(
                         state.gateway.config.context.retrieval_min_score,
                     )
                 };
-                let retrieval: RetrievalResult =
-                    if state.gateway.config.context.retrieval_backend == "hybrid" {
-                        match embedding_runtime::get() {
-                            Some(retriever) => match retriever
-                                .retrieve(
-                                    &thread_id,
-                                    &detail.messages,
-                                    checkpoint.through_ordinal,
-                                    &user_message,
-                                    state.gateway.config.context.retrieval_max_chunks,
-                                    retrieval_budget,
-                                    state.gateway.config.context.retrieval_min_score,
-                                )
-                                .await
-                            {
-                                Ok(result) => {
-                                    retrieval_backend = "hybrid";
-                                    result
-                                }
-                                Err(error) => {
-                                    warn!(%thread_id, %error, "hybrid retrieval failed; falling back to lexical retrieval");
-                                    retrieval_backend = "local-fallback";
-                                    local()
-                                }
-                            },
-                            None => {
+                let retrieval: RetrievalResult = if state.gateway.config.context.retrieval_backend
+                    == "hybrid"
+                {
+                    match embedding_runtime::get() {
+                        Some(retriever) => match retriever
+                            .retrieve(
+                                &thread_id,
+                                &detail.messages,
+                                checkpoint.through_ordinal,
+                                &user_message,
+                                state.gateway.config.context.retrieval_max_chunks,
+                                retrieval_budget,
+                                state.gateway.config.context.retrieval_min_score,
+                            )
+                            .await
+                        {
+                            Ok(result) => {
+                                retrieval_backend = "hybrid";
+                                result
+                            }
+                            Err(error) => {
+                                warn!(%thread_id, %error, "hybrid retrieval failed; falling back to lexical retrieval");
                                 retrieval_backend = "local-fallback";
                                 local()
                             }
+                        },
+                        None => {
+                            retrieval_backend = "local-fallback";
+                            local()
                         }
-                    } else {
-                        local()
-                    };
+                    }
+                } else {
+                    local()
+                };
 
                 if !retrieval.chunks.is_empty() {
                     let mut augmented = prepared.messages.clone();
@@ -388,28 +366,19 @@ pub async fn send_thread_message(
         "messages":prepared.messages,
         "stream":body.stream
     });
-    let request = match vision::materialize_image_inputs(
-        &stable_request,
-        &state.artifacts,
-        None,
-        true,
-    )
-    .await
-    {
-        Ok(request) => request,
-        Err(error) => return vision_error(error),
-    };
-    let request = match file_attachments::materialize_file_inputs(
-        &request,
-        &state.artifacts,
-        None,
-        true,
-    )
-    .await
-    {
-        Ok(request) => request,
-        Err(error) => return crate::api::file_attachment_error(error),
-    };
+    let request =
+        match vision::materialize_image_inputs(&stable_request, &state.artifacts, None, true).await
+        {
+            Ok(request) => request,
+            Err(error) => return vision_error(error),
+        };
+    let request =
+        match file_attachments::materialize_file_inputs(&request, &state.artifacts, None, true)
+            .await
+        {
+            Ok(request) => request,
+            Err(error) => return crate::api::file_attachment_error(error),
+        };
 
     let routed = match state
         .gateway
@@ -430,23 +399,26 @@ pub async fn send_thread_message(
     let route_id = routed.route.id.clone();
     let provider_affinity = {
         let config = state.gateway.config_snapshot();
-        config
-            .account(&routed.route.account)
-            .and_then(|account| {
-                config
-                    .provider(&account.provider)
-                    .filter(|provider| {
-                        browser_provider_runtime::get().is_some_and(|registry| {
-                            registry.supports_native_conversation_affinity(&provider.kind)
-                        })
+        config.account(&routed.route.account).and_then(|account| {
+            config
+                .provider(&account.provider)
+                .filter(|provider| {
+                    browser_provider_runtime::get().is_some_and(|registry| {
+                        registry.supports_native_conversation_affinity(&provider.kind)
                     })
-                    .map(|provider| (provider.id.clone(), account.id.clone()))
-            })
+                })
+                .map(|provider| (provider.id.clone(), account.id.clone()))
+        })
     };
 
     if let Err(error) = state
         .conversations
-        .append_message(&thread_id, &user_message, Some(&requested_model), Some(&route_id))
+        .append_message(
+            &thread_id,
+            &user_message,
+            Some(&requested_model),
+            Some(&route_id),
+        )
         .await
     {
         return conversation_error(error);
@@ -601,7 +573,11 @@ fn with_context_headers(
     retrieval_backend: &str,
     pinned_memory: bool,
 ) -> Response<Body> {
-    let state = if prepared.compressed { "compressed" } else { "full" };
+    let state = if prepared.compressed {
+        "compressed"
+    } else {
+        "full"
+    };
     if let Ok(value) = HeaderValue::from_str(state) {
         response.headers_mut().insert("x-llmgateway-context", value);
     }
@@ -647,11 +623,17 @@ fn with_context_headers(
 fn memory_provenance_error(error: MemoryProvenanceError) -> Response<Body> {
     match error {
         MemoryProvenanceError::InvalidCategory(_) | MemoryProvenanceError::InvalidConfidence(_) => {
-            json_error(StatusCode::BAD_REQUEST, "invalid_memory_item", &error.to_string())
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_memory_item",
+                &error.to_string(),
+            )
         }
-        MemoryProvenanceError::ItemNotFound(_) => {
-            json_error(StatusCode::NOT_FOUND, "memory_item_not_found", &error.to_string())
-        }
+        MemoryProvenanceError::ItemNotFound(_) => json_error(
+            StatusCode::NOT_FOUND,
+            "memory_item_not_found",
+            &error.to_string(),
+        ),
         MemoryProvenanceError::Database(_) | MemoryProvenanceError::Io(_) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "memory_provenance_error",
@@ -689,7 +671,8 @@ fn context_error(error: ContextError) -> Response<Body> {
 
 fn conversation_error(error: ConversationError) -> Response<Body> {
     match error {
-        ConversationError::ThreadNotFound(message) | ConversationError::ResponseNotFound(message) => {
+        ConversationError::ThreadNotFound(message)
+        | ConversationError::ResponseNotFound(message) => {
             json_error(StatusCode::NOT_FOUND, "not_found_error", &message)
         }
         ConversationError::InvalidJson(message) => json_error(
@@ -710,7 +693,6 @@ fn conversation_error(error: ConversationError) -> Response<Body> {
     }
 }
 
-
 #[cfg(test)]
 mod native_affinity_tests {
     #[test]
@@ -721,6 +703,7 @@ mod native_affinity_tests {
         assert!(registry.supports_native_conversation_affinity("browser-chatgpt"));
         assert!(registry.supports_native_conversation_affinity("browser-qwen"));
         assert!(registry.supports_native_conversation_affinity("browser-deepseek"));
+        assert!(registry.supports_native_conversation_affinity("browser-mimo"));
         assert!(!registry.supports_native_conversation_affinity("browser-cdp"));
         assert!(!registry.supports_native_conversation_affinity("openai-compatible"));
     }

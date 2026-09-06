@@ -215,6 +215,8 @@ pub enum GatewayError {
     BrowserTransport(String),
     #[error("browser adapter incompatible: {0}")]
     BrowserAdapterIncompatible(String),
+    #[error("{0}")]
+    ModelBindingConflict(String),
     #[error("browser model unavailable: {0}")]
     BrowserModelUnavailable(String),
     #[error("model_recipe_stale: {0}")]
@@ -287,9 +289,7 @@ impl Gateway {
         let request_preference = body
             .get("llmgateway_execution_preference")
             .and_then(Value::as_str);
-        let request_api_fallback = body
-            .get("llmgateway_api_fallback")
-            .and_then(Value::as_bool);
+        let request_api_fallback = body.get("llmgateway_api_fallback").and_then(Value::as_bool);
 
         if request_preference.is_none() && request_api_fallback.is_none() {
             return Ok(client_config);
@@ -498,7 +498,8 @@ impl Gateway {
         if file_attachments::request_has_file(body) {
             let eligible_before_files = routes.len();
             routes.retain(|route| {
-                let route_declares_file = file_attachments::route_supports_file(&route.capabilities);
+                let route_declares_file =
+                    file_attachments::route_supports_file(&route.capabilities);
                 let Some(account) = config.account(&route.account) else {
                     return false;
                 };
@@ -755,6 +756,7 @@ impl Gateway {
                         GatewayError::BrowserAdapterIncompatible(_) => {
                             "browser_adapter_incompatible"
                         }
+                        GatewayError::ModelBindingConflict(_) => "model_binding_conflict",
                         GatewayError::BrowserModelUnavailable(_) => "browser_model_unavailable",
                         GatewayError::BrowserModelRecipeStale(_) => "model_recipe_stale",
                         _ => "transport_error",
@@ -1058,8 +1060,19 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
         BrowserProviderError::SessionUnavailable { .. } => {
             GatewayError::BrowserSessionUnavailable(error.to_string())
         }
-        BrowserProviderError::AdapterIncompatible { .. } => {
-            GatewayError::BrowserAdapterIncompatible(error.to_string())
+        BrowserProviderError::AdapterIncompatible {
+            account_id,
+            code,
+            message,
+        } => {
+            let rendered = format!(
+                "browser adapter incompatible for account '{account_id}' ({code}): {message}"
+            );
+            if code == "model_binding_conflict" {
+                GatewayError::ModelBindingConflict(rendered)
+            } else {
+                GatewayError::BrowserAdapterIncompatible(rendered)
+            }
         }
         BrowserProviderError::ModelUnavailable { .. } => {
             GatewayError::BrowserModelUnavailable(error.to_string())
@@ -1137,11 +1150,12 @@ fn no_route_message(trace: &RouteDecisionTrace) -> String {
 }
 
 fn is_model_binding_conflict(error: &GatewayError) -> bool {
-    matches!(
-        error,
-        GatewayError::BrowserTransport(msg)
-            if msg.contains("native conversation is already bound to model")
-    )
+    matches!(error, GatewayError::ModelBindingConflict(_))
+        || matches!(
+            error,
+            GatewayError::BrowserTransport(msg)
+                if msg.contains("native conversation is already bound to model")
+        )
 }
 
 fn route_failure_policy(error: &GatewayError) -> Option<(i64, bool)> {
@@ -1164,8 +1178,7 @@ fn route_failure_policy(error: &GatewayError) -> Option<(i64, bool)> {
 }
 
 fn is_retryable_attempt_error(error: &GatewayError) -> bool {
-    !matches!(error, GatewayError::BrowserModelRecipeStale(_))
-        && !is_model_binding_conflict(error)
+    !matches!(error, GatewayError::BrowserModelRecipeStale(_)) && !is_model_binding_conflict(error)
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -1224,7 +1237,10 @@ mod client_policy_tests {
 
     #[test]
     fn legacy_execution_preference_aliases_normalize_before_permission_checks() {
-        assert_eq!(normalize_execution_policy("browser-first"), "prefer-browser");
+        assert_eq!(
+            normalize_execution_policy("browser-first"),
+            "prefer-browser"
+        );
         assert_eq!(normalize_execution_policy("api-first"), "prefer-api");
         assert_eq!(normalize_execution_policy("balanced"), "balanced");
     }
@@ -1261,6 +1277,12 @@ mod stream_trace_tests {
             assert!(!is_retryable_attempt_error(&conflict));
             assert_eq!(route_failure_policy(&conflict), None);
         }
+
+        let stable_conflict = GatewayError::ModelBindingConflict(
+            "model_binding_conflict: MiMo conversation is bound to mimo-v2.5-pro".into(),
+        );
+        assert!(!is_retryable_attempt_error(&stable_conflict));
+        assert_eq!(route_failure_policy(&stable_conflict), None);
 
         assert_eq!(
             route_failure_policy(&GatewayError::BrowserTransport("network".into())),

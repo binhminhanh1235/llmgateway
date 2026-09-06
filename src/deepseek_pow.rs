@@ -15,8 +15,7 @@ const COMPLETION_PATH: &str = "/api/v0/chat/completion";
 static POW_SLOTS: Semaphore = Semaphore::const_new(2);
 
 const ROTATION_OFFSETS: [u32; 25] = [
-    0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61,
-    56, 14,
+    0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14,
 ];
 
 const ROUND_CONSTANTS: [u64; 24] = [
@@ -198,8 +197,7 @@ fn keccak_p1600_23(state: &mut [u64; 25]) {
 
     for round in (ROUND_CONSTANTS.len() - ROUNDS)..ROUND_CONSTANTS.len() {
         for x in 0..5 {
-            column[x] =
-                state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
+            column[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
         }
         for x in 0..5 {
             mix[x] = column[(x + 4) % 5] ^ column[(x + 1) % 5].rotate_left(1);
@@ -215,16 +213,15 @@ fn keccak_p1600_23(state: &mut [u64; 25]) {
                 let lane = x + 5 * y;
                 let dest_x = y;
                 let dest_y = (2 * x + 3 * y) % 5;
-                rho_pi[dest_x + 5 * dest_y] =
-                    state[lane].rotate_left(ROTATION_OFFSETS[lane]);
+                rho_pi[dest_x + 5 * dest_y] = state[lane].rotate_left(ROTATION_OFFSETS[lane]);
             }
         }
 
         for y in 0..5 {
             let row = 5 * y;
             for x in 0..5 {
-                state[row + x] = rho_pi[row + x]
-                    ^ ((!rho_pi[row + (x + 1) % 5]) & rho_pi[row + (x + 2) % 5]);
+                state[row + x] =
+                    rho_pi[row + x] ^ ((!rho_pi[row + (x + 1) % 5]) & rho_pi[row + (x + 2) % 5]);
             }
         }
         state[0] ^= ROUND_CONSTANTS[round];
@@ -264,9 +261,7 @@ mod tests {
     fn solver_finds_known_nonzero_nonce() {
         let challenge = DeepSeekPowChallenge {
             algorithm: "DeepSeekHashV1".into(),
-            challenge:
-                "2ffed26ea9e1d6f4bbe49a266d98fe04ad9a5ad4c6d765862de8d18c513c3815"
-                    .into(),
+            challenge: "2ffed26ea9e1d6f4bbe49a266d98fe04ad9a5ad4c6d765862de8d18c513c3815".into(),
             salt: "vector".into(),
             signature: "test-signature".into(),
             difficulty: 4,

@@ -1,7 +1,10 @@
 use crate::{config::AppConfig, structured_memory::StructuredMemorySnapshot};
 use serde::Serialize;
 use serde_json::{json, Value};
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, Row, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    Row, SqlitePool,
+};
 use std::{path::Path, str::FromStr, sync::Arc};
 use thiserror::Error;
 
@@ -48,7 +51,10 @@ impl MemoryProvenanceStore {
         let options = SqliteConnectOptions::from_str(&config.storage.database_url)?
             .create_if_missing(true)
             .foreign_keys(true);
-        let pool = SqlitePoolOptions::new().max_connections(5).connect_with(options).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(options)
+            .await?;
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
@@ -136,7 +142,10 @@ impl MemoryProvenanceStore {
         self.list_items(&snapshot.thread_id).await
     }
 
-    pub async fn list_items(&self, thread_id: &str) -> Result<Vec<MemoryItemMetadata>, MemoryProvenanceError> {
+    pub async fn list_items(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<MemoryItemMetadata>, MemoryProvenanceError> {
         let rows = sqlx::query(
             "SELECT thread_id, item_key, category, value, confidence, pinned, active,
                     source_kind, first_seen_ordinal, last_seen_ordinal, model, route_id,
@@ -205,21 +214,36 @@ impl MemoryProvenanceStore {
         self.item(thread_id, item_key).await
     }
 
-    pub async fn pinned_prompt(&self, thread_id: &str) -> Result<Option<String>, MemoryProvenanceError> {
-        let items = self.list_items(thread_id).await?
-            .into_iter().filter(|item| item.pinned && item.active).collect::<Vec<_>>();
-        if items.is_empty() { return Ok(None); }
-        let mut out = String::from(
-            "Pinned llmgateway memory. These are durable user-approved items. "
-        );
+    pub async fn pinned_prompt(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<String>, MemoryProvenanceError> {
+        let items = self
+            .list_items(thread_id)
+            .await?
+            .into_iter()
+            .filter(|item| item.pinned && item.active)
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            return Ok(None);
+        }
+        let mut out =
+            String::from("Pinned llmgateway memory. These are durable user-approved items. ");
         out.push_str("If checkpoint memory or retrieved history conflicts with a pinned item, the pinned item wins.\n");
         for item in items {
-            out.push_str(&format!("- [{}] {} (confidence {:.2}, key {})\n", item.category, item.value, item.confidence, item.item_key));
+            out.push_str(&format!(
+                "- [{}] {} (confidence {:.2}, key {})\n",
+                item.category, item.value, item.confidence, item.item_key
+            ));
         }
         Ok(Some(out))
     }
 
-    async fn item(&self, thread_id: &str, item_key: &str) -> Result<MemoryItemMetadata, MemoryProvenanceError> {
+    async fn item(
+        &self,
+        thread_id: &str,
+        item_key: &str,
+    ) -> Result<MemoryItemMetadata, MemoryProvenanceError> {
         let row = sqlx::query(
             "SELECT thread_id, item_key, category, value, confidence, pinned, active,
                     source_kind, first_seen_ordinal, last_seen_ordinal, model, route_id,
@@ -235,11 +259,20 @@ impl MemoryProvenanceStore {
     }
 }
 
-pub fn inject_pinned_memory(messages: &mut Vec<Value>, prompt: &str, budget_tokens: usize) -> usize {
-    if prompt.trim().is_empty() { return estimate_messages_tokens(messages); }
+pub fn inject_pinned_memory(
+    messages: &mut Vec<Value>,
+    prompt: &str,
+    budget_tokens: usize,
+) -> usize {
+    if prompt.trim().is_empty() {
+        return estimate_messages_tokens(messages);
+    }
     if let Some(first) = messages.first_mut() {
         if first.get("role").and_then(Value::as_str) == Some("system") {
-            let existing = first.get("content").and_then(Value::as_str).unwrap_or_default();
+            let existing = first
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             first["content"] = Value::String(format!("{existing}\n\n{prompt}"));
         } else {
             messages.insert(0, json!({"role":"system","content":prompt}));
@@ -252,10 +285,17 @@ pub fn inject_pinned_memory(messages: &mut Vec<Value>, prompt: &str, budget_toke
 }
 
 fn fit_messages_to_budget(messages: &mut Vec<Value>, budget: usize) {
-    if estimate_messages_tokens(messages) <= budget { return; }
+    if estimate_messages_tokens(messages) <= budget {
+        return;
+    }
     let mut prefix = Vec::new();
     let mut start = 0usize;
-    if messages.first().and_then(|m| m.get("role")).and_then(Value::as_str) == Some("system") {
+    if messages
+        .first()
+        .and_then(|m| m.get("role"))
+        .and_then(Value::as_str)
+        == Some("system")
+    {
         prefix.push(messages[0].clone());
         start = 1;
     }
@@ -275,7 +315,9 @@ fn fit_messages_to_budget(messages: &mut Vec<Value>, budget: usize) {
         }
     }
     selected.reverse();
-    for group in selected { prefix.extend(group); }
+    for group in selected {
+        prefix.extend(group);
+    }
     *messages = prefix;
 }
 
@@ -290,7 +332,9 @@ fn atomic_message_groups(messages: &[Value]) -> Vec<Vec<Value>> {
                 group.push(messages[index].clone());
                 index += 1;
             }
-        } else { index += 1; }
+        } else {
+            index += 1;
+        }
         groups.push(group);
     }
     groups
@@ -298,59 +342,111 @@ fn atomic_message_groups(messages: &[Value]) -> Vec<Vec<Value>> {
 
 fn has_tool_calls(message: &Value) -> bool {
     message.get("role").and_then(Value::as_str) == Some("assistant")
-        && message.get("tool_calls").and_then(Value::as_array).is_some_and(|calls| !calls.is_empty())
+        && message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty())
 }
-fn is_tool_result(message: &Value) -> bool { message.get("role").and_then(Value::as_str) == Some("tool") }
+fn is_tool_result(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("tool")
+}
 fn estimate_messages_tokens(messages: &[Value]) -> usize {
-    messages.iter().map(|m| m.to_string().chars().count().div_ceil(4).max(1).saturating_add(4)).sum::<usize>()
+    messages
+        .iter()
+        .map(|m| {
+            m.to_string()
+                .chars()
+                .count()
+                .div_ceil(4)
+                .max(1)
+                .saturating_add(4)
+        })
+        .sum::<usize>()
         .saturating_add(messages.len() * 4)
 }
 
 fn snapshot_items(snapshot: &StructuredMemorySnapshot) -> Vec<(&'static str, &str)> {
     let memory = &snapshot.memory;
     let mut result = Vec::new();
-    for value in &memory.facts { result.push(("fact", value.as_str())); }
-    for value in &memory.decisions { result.push(("decision", value.as_str())); }
-    for value in &memory.constraints { result.push(("constraint", value.as_str())); }
-    for value in &memory.user_preferences { result.push(("user_preference", value.as_str())); }
-    for value in &memory.entities { result.push(("entity", value.as_str())); }
-    for value in &memory.code_context { result.push(("code_context", value.as_str())); }
-    for value in &memory.open_questions { result.push(("open_question", value.as_str())); }
+    for value in &memory.facts {
+        result.push(("fact", value.as_str()));
+    }
+    for value in &memory.decisions {
+        result.push(("decision", value.as_str()));
+    }
+    for value in &memory.constraints {
+        result.push(("constraint", value.as_str()));
+    }
+    for value in &memory.user_preferences {
+        result.push(("user_preference", value.as_str()));
+    }
+    for value in &memory.entities {
+        result.push(("entity", value.as_str()));
+    }
+    for value in &memory.code_context {
+        result.push(("code_context", value.as_str()));
+    }
+    for value in &memory.open_questions {
+        result.push(("open_question", value.as_str()));
+    }
     result
 }
 
 fn validate_category(category: &str) -> Result<(), MemoryProvenanceError> {
     match category {
-        "fact" | "decision" | "constraint" | "user_preference" | "entity" | "code_context" | "open_question" => Ok(()),
+        "fact" | "decision" | "constraint" | "user_preference" | "entity" | "code_context"
+        | "open_question" => Ok(()),
         other => Err(MemoryProvenanceError::InvalidCategory(other.to_string())),
     }
 }
 fn validate_confidence(confidence: f64) -> Result<(), MemoryProvenanceError> {
-    if confidence.is_finite() && (0.0..=1.0).contains(&confidence) { Ok(()) }
-    else { Err(MemoryProvenanceError::InvalidConfidence(confidence)) }
+    if confidence.is_finite() && (0.0..=1.0).contains(&confidence) {
+        Ok(())
+    } else {
+        Err(MemoryProvenanceError::InvalidConfidence(confidence))
+    }
 }
 fn memory_item_key(category: &str, value: &str) -> String {
     let normalized = format!("{}:{}", category, value.trim().to_lowercase());
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in normalized.as_bytes() { hash ^= u64::from(*byte); hash = hash.wrapping_mul(0x100000001b3); }
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
     format!("mem_{hash:016x}")
 }
-fn item_from_row(row: sqlx::sqlite::SqliteRow) -> Result<MemoryItemMetadata, MemoryProvenanceError> {
+fn item_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<MemoryItemMetadata, MemoryProvenanceError> {
     Ok(MemoryItemMetadata {
-        thread_id: row.try_get("thread_id")?, item_key: row.try_get("item_key")?,
-        category: row.try_get("category")?, value: row.try_get("value")?, confidence: row.try_get("confidence")?,
-        pinned: row.try_get::<i64,_>("pinned")? != 0, active: row.try_get::<i64,_>("active")? != 0,
-        source_kind: row.try_get("source_kind")?, first_seen_ordinal: row.try_get("first_seen_ordinal")?,
-        last_seen_ordinal: row.try_get("last_seen_ordinal")?, model: row.try_get("model")?, route_id: row.try_get("route_id")?,
-        created_at: row.try_get("created_at")?, updated_at: row.try_get("updated_at")?,
+        thread_id: row.try_get("thread_id")?,
+        item_key: row.try_get("item_key")?,
+        category: row.try_get("category")?,
+        value: row.try_get("value")?,
+        confidence: row.try_get("confidence")?,
+        pinned: row.try_get::<i64, _>("pinned")? != 0,
+        active: row.try_get::<i64, _>("active")? != 0,
+        source_kind: row.try_get("source_kind")?,
+        first_seen_ordinal: row.try_get("first_seen_ordinal")?,
+        last_seen_ordinal: row.try_get("last_seen_ordinal")?,
+        model: row.try_get("model")?,
+        route_id: row.try_get("route_id")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 fn ensure_sqlite_parent(database_url: &str) -> Result<(), std::io::Error> {
-    let Some(path) = database_url.strip_prefix("sqlite://") else { return Ok(()); };
+    let Some(path) = database_url.strip_prefix("sqlite://") else {
+        return Ok(());
+    };
     let path = path.split('?').next().unwrap_or(path);
-    if path == ":memory:" || path.is_empty() { return Ok(()); }
+    if path == ":memory:" || path.is_empty() {
+        return Ok(());
+    }
     if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() { std::fs::create_dir_all(parent)?; }
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
     Ok(())
 }
@@ -362,8 +458,14 @@ mod tests {
 
     #[test]
     fn memory_keys_are_stable_and_category_scoped() {
-        assert_eq!(memory_item_key("fact", "Uses Rust"), memory_item_key("fact", " uses rust "));
-        assert_ne!(memory_item_key("fact", "Uses Rust"), memory_item_key("decision", "Uses Rust"));
+        assert_eq!(
+            memory_item_key("fact", "Uses Rust"),
+            memory_item_key("fact", " uses rust ")
+        );
+        assert_ne!(
+            memory_item_key("fact", "Uses Rust"),
+            memory_item_key("decision", "Uses Rust")
+        );
     }
 
     #[test]
@@ -375,7 +477,10 @@ mod tests {
             json!({"role":"user","content":"current turn"}),
         ];
         let _ = inject_pinned_memory(&mut messages, "PINNED VALUE", 200);
-        assert!(messages[0]["content"].as_str().unwrap().contains("PINNED VALUE"));
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("PINNED VALUE"));
         assert_eq!(messages.last().unwrap()["content"], "current turn");
     }
 }

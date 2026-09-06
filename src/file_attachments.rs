@@ -186,12 +186,7 @@ pub async fn sync_native_provider_bindings(
     let mut summary = ProviderBindingSync::default();
     for artifact_id in file_artifact_ids(body) {
         if store
-            .ensure_provider_binding(
-                &artifact_id,
-                provider,
-                account_id,
-                Some(&metadata),
-            )
+            .ensure_provider_binding(&artifact_id, provider, account_id, Some(&metadata))
             .await?
         {
             summary.reused += 1;
@@ -208,10 +203,7 @@ pub fn execution_strategy(body: &Value) -> Option<&str> {
         .filter(|value| matches!(*value, "native_upload" | "extracted_fallback" | "mixed"))
 }
 
-fn rewrite_materialized_file_inputs(
-    value: &mut Value,
-    replacements: &BTreeMap<String, Value>,
-) {
+fn rewrite_materialized_file_inputs(value: &mut Value, replacements: &BTreeMap<String, Value>) {
     match value {
         Value::Array(items) => {
             for item in items {
@@ -256,7 +248,13 @@ pub fn route_supports_file(capabilities: &[String]) -> bool {
     capabilities.iter().any(|capability| {
         matches!(
             normalize_capability(capability).as_str(),
-            "file" | "files" | "file_input" | "document" | "documents" | "native_file_upload" | "file_upload"
+            "file"
+                | "files"
+                | "file_input"
+                | "document"
+                | "documents"
+                | "native_file_upload"
+                | "file_upload"
         )
     })
 }
@@ -277,10 +275,13 @@ pub fn is_extractable_text_mime(mime: &str) -> bool {
 }
 
 fn ensure_supported_document(record: &ArtifactRecord) -> Result<(), FileAttachmentError> {
-    if is_extractable_text_mime(&record.mime_type) || native_file_mime_supported(&record.mime_type) {
+    if is_extractable_text_mime(&record.mime_type) || native_file_mime_supported(&record.mime_type)
+    {
         Ok(())
     } else {
-        Err(FileAttachmentError::UnsupportedMime(record.mime_type.clone()))
+        Err(FileAttachmentError::UnsupportedMime(
+            record.mime_type.clone(),
+        ))
     }
 }
 
@@ -467,10 +468,7 @@ fn source_key(source: &FileSource) -> String {
 }
 
 fn normalize_capability(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', ' '], "_")
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
 fn truncate(value: &str, limit: usize) -> String {

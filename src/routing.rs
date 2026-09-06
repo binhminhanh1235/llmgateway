@@ -18,7 +18,6 @@ use adaptive_scoring::AdaptiveRouteState;
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use serde_json::Value;
-use task_aware::{classify as classify_task, route_fit as evaluate_task_fit};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -26,6 +25,7 @@ use std::{
         Arc,
     },
 };
+use task_aware::{classify as classify_task, route_fit as evaluate_task_fit};
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -102,7 +102,11 @@ pub struct Router {
 }
 
 impl Router {
-    pub fn new(config: Arc<AppConfig>, live_config: LiveConfig, catalog: Arc<ModelCatalog>) -> Self {
+    pub fn new(
+        config: Arc<AppConfig>,
+        live_config: LiveConfig,
+        catalog: Arc<ModelCatalog>,
+    ) -> Self {
         Self {
             config,
             live_config,
@@ -114,23 +118,28 @@ impl Router {
         }
     }
 
-     pub async fn plan_for_body_with_config(
+    pub async fn plan_for_body_with_config(
         &self,
         config: Arc<AppConfig>,
         requested_model: &str,
         body: Option<&Value>,
     ) -> Vec<RouteConfig> {
-        let evaluation = self.evaluate_with_config(config, requested_model, body).await;
+        let evaluation = self
+            .evaluate_with_config(config, requested_model, body)
+            .await;
         let mut eligible = evaluation
             .candidates
             .into_iter()
             .filter(|candidate| candidate.decision.eligible)
             .collect::<Vec<_>>();
         eligible.sort_by_key(|candidate| candidate.decision.rank.unwrap_or(usize::MAX));
-        eligible.into_iter().map(|candidate| candidate.route).collect()
+        eligible
+            .into_iter()
+            .map(|candidate| candidate.route)
+            .collect()
     }
 
-     pub fn sticky_route_matches_best_task_fit_with_config(
+    pub fn sticky_route_matches_best_task_fit_with_config(
         &self,
         config: &AppConfig,
         requested_model: &str,
@@ -173,7 +182,7 @@ impl Router {
             && preferred_fit.snapshot.adjustment == best_fit.snapshot.adjustment
     }
 
-     pub async fn explain_for_body_with_config(
+    pub async fn explain_for_body_with_config(
         &self,
         config: Arc<AppConfig>,
         requested_model: &str,
@@ -211,9 +220,7 @@ impl Router {
     ) -> RouteEvaluation {
         let resolved_model = config.resolve_model_alias(requested_model).to_string();
         let task = classify_task(body, &config.routing);
-        let candidates = self
-            .candidate_routes(config.clone(), &resolved_model)
-            .await;
+        let candidates = self.candidate_routes(config.clone(), &resolved_model).await;
         let apply_execution_policy = config.virtual_models.contains_key(&resolved_model);
         let group_enabled = config
             .virtual_models
@@ -252,30 +259,26 @@ impl Router {
                 .unwrap_or_default()
                 .snapshot(&config.routing);
             let adaptive_penalty = adaptive.penalty;
-            let browser_fairness_rank = if transport == "browser"
-                && config.routing.browser_fairness_enabled
-            {
-                Some(
-                    browser_success_snapshot
-                        .get(&route.account)
-                        .copied()
-                        .unwrap_or(0),
-                )
-            } else {
-                None
-            };
-            let browser_recovery_penalty = if transport == "browser"
-                && route_health.consecutive_failures > 0
-            {
-                let failures = route_health
-                    .consecutive_failures
-                    .min(i32::MAX as u32) as i32;
-                failures
-                    .saturating_mul(config.routing.browser_recovery_penalty)
-                    .min(config.routing.browser_recovery_max_penalty)
-            } else {
-                0
-            };
+            let browser_fairness_rank =
+                if transport == "browser" && config.routing.browser_fairness_enabled {
+                    Some(
+                        browser_success_snapshot
+                            .get(&route.account)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                } else {
+                    None
+                };
+            let browser_recovery_penalty =
+                if transport == "browser" && route_health.consecutive_failures > 0 {
+                    let failures = route_health.consecutive_failures.min(i32::MAX as u32) as i32;
+                    failures
+                        .saturating_mul(config.routing.browser_recovery_penalty)
+                        .min(config.routing.browser_recovery_max_penalty)
+                } else {
+                    0
+                };
             let policy_reason = self.policy_reason(config.as_ref(), transport).to_string();
             let group_tier_priority = config
                 .virtual_models
@@ -391,9 +394,7 @@ impl Router {
                         if browser_recovery_penalty > 0 {
                             push_unique(&mut warnings, "browser_recovery_probe");
                         }
-                        if transport == "browser"
-                            && config.routing.browser_fairness_enabled
-                        {
+                        if transport == "browser" && config.routing.browser_fairness_enabled {
                             push_unique(&mut warnings, "browser_fairness");
                         }
                         if task_adjustment < 0 {
@@ -425,9 +426,7 @@ impl Router {
                         if browser_recovery_penalty > 0 {
                             push_unique(&mut warnings, "browser_recovery_probe");
                         }
-                        if transport == "browser"
-                            && config.routing.browser_fairness_enabled
-                        {
+                        if transport == "browser" && config.routing.browser_fairness_enabled {
                             push_unique(&mut warnings, "browser_fairness");
                         }
                         if task_adjustment < 0 {
@@ -491,8 +490,7 @@ impl Router {
             })
             .collect::<Vec<_>>();
         ranked_indices.sort_by(|left, right| {
-            let base = (left.1, left.2, left.3, left.4)
-                .cmp(&(right.1, right.2, right.3, right.4));
+            let base = (left.1, left.2, left.3, left.4).cmp(&(right.1, right.2, right.3, right.4));
             if base != std::cmp::Ordering::Equal {
                 return base;
             }
@@ -506,12 +504,7 @@ impl Router {
                     .decision
                     .browser_fairness_rank
                     .unwrap_or(0)
-                    .cmp(
-                        &right_candidate
-                            .decision
-                            .browser_fairness_rank
-                            .unwrap_or(0),
-                    );
+                    .cmp(&right_candidate.decision.browser_fairness_rank.unwrap_or(0));
                 if fairness != std::cmp::Ordering::Equal {
                     return fairness;
                 }
@@ -519,8 +512,7 @@ impl Router {
 
             left.5.cmp(&right.5)
         });
-        for (rank_index, (candidate_index, _, _, _, _, _)) in
-            ranked_indices.into_iter().enumerate()
+        for (rank_index, (candidate_index, _, _, _, _, _)) in ranked_indices.into_iter().enumerate()
         {
             let candidate = &mut evaluated[candidate_index];
             candidate.decision.rank = Some(rank_index + 1);
@@ -565,11 +557,7 @@ impl Router {
         }
     }
 
-    async fn candidate_routes(
-        &self,
-        config: Arc<AppConfig>,
-        resolved: &str,
-    ) -> Vec<RouteConfig> {
+    async fn candidate_routes(&self, config: Arc<AppConfig>, resolved: &str) -> Vec<RouteConfig> {
         if let Some(vm) = config.virtual_models.get(resolved) {
             let route_ids = vm
                 .route_ids()
@@ -649,7 +637,8 @@ impl Router {
 
     pub async fn account_readiness(&self, account_id: &str) -> AccountReadiness {
         let config = self.live_config.snapshot();
-        self.account_readiness_with_config(config.as_ref(), account_id).await
+        self.account_readiness_with_config(config.as_ref(), account_id)
+            .await
     }
 
     async fn account_readiness_with_config(
@@ -713,8 +702,7 @@ impl Router {
                 && provider_filter.is_none_or(|provider| model.provider == provider)
         }) {
             for binding in model.accounts.into_iter().filter(|binding| {
-                binding.enabled
-                    && matches!(binding.availability.as_str(), "available" | "unknown")
+                binding.enabled && matches!(binding.availability.as_str(), "available" | "unknown")
             }) {
                 let Some(account) = config.account(&binding.account_id) else {
                     continue;
@@ -735,7 +723,11 @@ impl Router {
                         configured.context_window = model.context_window;
                     }
                     for capability in &model.capabilities {
-                        if !configured.capabilities.iter().any(|value| value == capability) {
+                        if !configured
+                            .capabilities
+                            .iter()
+                            .any(|value| value == capability)
+                        {
                             configured.capabilities.push(capability.clone());
                         }
                     }
@@ -852,8 +844,8 @@ impl Router {
             let entry = health.entry(route_id.to_string()).or_default();
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
             entry.last_error = Some(error);
-            entry.cooldown_until = (cooldown_secs > 0)
-                .then(|| Utc::now() + Duration::seconds(cooldown_secs));
+            entry.cooldown_until =
+                (cooldown_secs > 0).then(|| Utc::now() + Duration::seconds(cooldown_secs));
         }
         if count_for_adaptive {
             self.adaptive

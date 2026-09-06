@@ -112,7 +112,7 @@
         <div class="browser-empty-icon">◎</div>
         <div>
           <strong>No browser accounts yet</strong>
-          <p>Create a ChatGPT, Gemini, Qwen, or DeepSeek browser account. llmgateway will generate the linked session, provider, route, and isolated profile configuration for you.</p>
+          <p>Create a ChatGPT, Gemini, Qwen, DeepSeek, or Xiaomi MiMo browser account. llmgateway will generate the linked session, provider, route, and isolated profile configuration for you.</p>
           <button type="button" class="browser-primary-action" data-open-browser-wizard>+ Add browser account</button>
         </div>
         <span class="browser-empty-meta">${summary?.profile_root ? `Profiles: ${escapeHtml(summary.profile_root)}` : "Isolated profiles"}</span>
@@ -150,6 +150,7 @@
         <div class="browser-session-actions">
           <button type="button" class="browser-primary-action" data-browser-action="${button.action}" data-session-id="${escapeAttr(session.id)}" ${button.disabled ? "disabled" : ""}>${escapeHtml(button.label)}</button>
           ${account ? `<button type="button" class="browser-secondary-action" data-browser-action="${accountEnabled ? "disable-account" : "enable-account"}" data-session-id="${escapeAttr(session.id)}">${accountEnabled ? "Disable account" : "Enable account"}</button>` : ""}
+          ${account ? `<button type="button" class="browser-secondary-action browser-danger-action" data-browser-action="delete-account" data-session-id="${escapeAttr(session.id)}">Delete account</button>` : ""}
           ${accountEnabled ? `<button type="button" class="browser-secondary-action" data-browser-action="reauth" data-session-id="${escapeAttr(session.id)}">Re-authenticate</button>` : ""}
           ${running && accountEnabled ? `<button type="button" class="browser-secondary-action" data-browser-action="restart" data-session-id="${escapeAttr(session.id)}">Restart browser</button>` : ""}
           ${running ? `<button type="button" class="browser-secondary-action" data-browser-action="stop" data-session-id="${escapeAttr(session.id)}">Stop browser</button>` : ""}
@@ -247,6 +248,7 @@
       { id: "gemini", label: "Gemini Web", default_model_id: "gemini-web-default" },
       { id: "qwen", label: "Qwen Web", default_model_id: "qwen-web-default" },
       { id: "deepseek", label: "DeepSeek Web", default_model_id: "deepseek-web-default" },
+      { id: "mimo", label: "Xiaomi MiMo Web", default_model_id: "mimo-web-default" },
     ];
     const presets = providerPresets.length ? providerPresets : fallback;
     picker.innerHTML = presets.map((preset) => `
@@ -414,6 +416,27 @@
     } finally {
       clearBusy(button);
       await loadBrowserSessions(true);
+    }
+  }
+
+  async function deleteAccount(sessionId, button) {
+    const confirmed = confirm(
+      `Delete account "${sessionId}"? This removes its routes, isolated browser profile, and saved browser authentication material.`
+    );
+    if (!confirmed) return;
+
+    setBusy(button, "Deleting…");
+    try {
+      await request(`/_llmgateway/accounts/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+      });
+      browserToast(`${sessionId} deleted`);
+      window.dispatchEvent(new CustomEvent("llmgateway:accounts-changed"));
+      window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
+      await loadBrowserSessions(true);
+    } catch (error) {
+      browserToast(`Delete failed: ${cleanError(error)}`, true);
+      clearBusy(button);
     }
   }
 
@@ -619,6 +642,7 @@
         case "reset": reset(sessionId, actionButton); break;
         case "disable-account": setAccountEnabled(sessionId, false, actionButton); break;
         case "enable-account": setAccountEnabled(sessionId, true, actionButton); break;
+        case "delete-account": deleteAccount(sessionId, actionButton); break;
         case "reauth": reauthenticate(sessionId, actionButton); break;
         case "restart": restartBrowser(sessionId, actionButton); break;
       }

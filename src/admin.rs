@@ -1,5 +1,8 @@
 use crate::config::AppConfig;
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    SqlitePool,
+};
 use std::{fs, path::Path, str::FromStr};
 use toml_edit::{value, DocumentMut, Item};
 use uuid::Uuid;
@@ -36,13 +39,31 @@ pub async fn set_account_model_enabled(
     .execute(&pool)
     .await
     .map_err(|error| error.to_string())?;
-    pool.close().await;
 
     if result.rows_affected() == 0 {
+        pool.close().await;
         return Err(format!(
             "model '{model_id}' is not registered for account '{account_id}'"
         ));
     }
+
+    sqlx::query(
+        "UPDATE models
+         SET enabled = CASE
+             WHEN EXISTS (
+                 SELECT 1 FROM account_models
+                 WHERE canonical_model_id = ? AND enabled = 1
+             ) THEN 1 ELSE 0 END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE canonical_id = ?",
+    )
+    .bind(model_id)
+    .bind(model_id)
+    .execute(&pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    pool.close().await;
     Ok(())
 }
 
@@ -52,13 +73,11 @@ pub async fn set_model_enabled(
     enabled: bool,
 ) -> Result<u64, String> {
     let pool = catalog_pool(config).await?;
-    let exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM models WHERE canonical_id = ?",
-    )
-    .bind(model_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|error| error.to_string())?;
+    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM models WHERE canonical_id = ?")
+        .bind(model_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|error| error.to_string())?;
     if exists == 0 {
         pool.close().await;
         return Err(format!("unknown model '{model_id}'"));
@@ -72,6 +91,14 @@ pub async fn set_model_enabled(
     .execute(&pool)
     .await
     .map_err(|error| error.to_string())?;
+
+    sqlx::query("UPDATE account_models SET enabled = ? WHERE canonical_model_id = ?")
+        .bind(if enabled { 1_i64 } else { 0_i64 })
+        .bind(model_id)
+        .execute(&pool)
+        .await
+        .map_err(|error| error.to_string())?;
+
     pool.close().await;
     Ok(result.rows_affected())
 }
@@ -142,4 +169,123 @@ fn write_config_atomically(path: &Path, rendered: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::ModelCatalog;
+    use crate::live_config::LiveConfig;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn set_account_model_and_model_enabled_sync_both_directions() {
+        let temp_db = std::env::temp_dir().join(format!("llm-test-{}.db", Uuid::new_v4().simple()));
+        let db_url = format!("sqlite://{}", temp_db.display());
+
+        let config_toml = format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+default_model = "test-model"
+
+[[providers]]
+id = "test-provider"
+kind = "openai-compatible"
+base_url = "https://api.test.com"
+
+[[accounts]]
+id = "test-account"
+provider = "test-provider"
+api_key_env = "TEST_API_KEY"
+enabled = true
+
+[[routes]]
+id = "test-route"
+model = "model-1"
+account = "test-account"
+
+[virtual_models.test-model]
+routes = ["test-route"]
+
+[storage]
+database_url = "{db_url}"
+"#
+        );
+        let config = Arc::new(AppConfig::parse(&config_toml).unwrap());
+        let live_config = LiveConfig::new(config.clone());
+        let _catalog = ModelCatalog::connect(live_config).await.unwrap();
+        let pool = catalog_pool(&config).await.unwrap();
+
+        // Seed a model and account_model
+        sqlx::query(
+            "INSERT INTO models (canonical_id, provider_id, external_id, display_name, owned_by, enabled)
+             VALUES ('test-provider/model-1', 'test-provider', 'model-1', 'Model 1', 'test', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO account_models (account_id, canonical_model_id, availability, enabled, configured, discovered)
+             VALUES ('test-account', 'test-provider/model-1', 'available', 1, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 1. Disable via set_account_model_enabled -> models.enabled should become 0
+        set_account_model_enabled(&config, "test-account", "test-provider/model-1", false)
+            .await
+            .unwrap();
+
+        let am_enabled: i64 = sqlx::query_scalar(
+            "SELECT enabled FROM account_models WHERE account_id = 'test-account' AND canonical_model_id = 'test-provider/model-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(am_enabled, 0);
+
+        let m_enabled: i64 = sqlx::query_scalar(
+            "SELECT enabled FROM models WHERE canonical_id = 'test-provider/model-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            m_enabled, 0,
+            "models.enabled must sync to 0 when account model disabled"
+        );
+
+        // 2. Enable via set_model_enabled -> account_models.enabled should become 1
+        set_model_enabled(&config, "test-provider/model-1", true)
+            .await
+            .unwrap();
+
+        let am_enabled: i64 = sqlx::query_scalar(
+            "SELECT enabled FROM account_models WHERE account_id = 'test-account' AND canonical_model_id = 'test-provider/model-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            am_enabled, 1,
+            "account_models.enabled must sync to 1 when model enabled"
+        );
+
+        let m_enabled: i64 = sqlx::query_scalar(
+            "SELECT enabled FROM models WHERE canonical_id = 'test-provider/model-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(m_enabled, 1);
+
+        pool.close().await;
+        let _ = fs::remove_file(&temp_db);
+    }
 }

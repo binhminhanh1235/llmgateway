@@ -1,7 +1,10 @@
 use crate::config::AppConfig;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, Row, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    Row, SqlitePool,
+};
 use std::{path::Path, str::FromStr, sync::Arc};
 use thiserror::Error;
 use uuid::Uuid;
@@ -225,7 +228,10 @@ impl ExecutionTraceStore {
         Ok(())
     }
 
-    pub async fn record_attempt(&self, record: AttemptRecord<'_>) -> Result<(), ExecutionTraceError> {
+    pub async fn record_attempt(
+        &self,
+        record: AttemptRecord<'_>,
+    ) -> Result<(), ExecutionTraceError> {
         sqlx::query(
             "INSERT INTO execution_attempts
              (request_id, attempt_index, route_id, account_id, model, status_code,
@@ -452,7 +458,10 @@ impl ExecutionTraceStore {
             .collect())
     }
 
-    pub async fn list(&self, limit: usize) -> Result<Vec<ExecutionTraceSummary>, ExecutionTraceError> {
+    pub async fn list(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ExecutionTraceSummary>, ExecutionTraceError> {
         let rows = sqlx::query(
             "SELECT r.request_id, r.requested_model, r.preferred_route, r.status,
                     r.selected_route, r.attachment_strategy, r.final_error, r.started_at, r.completed_at,
@@ -469,7 +478,10 @@ impl ExecutionTraceStore {
         Ok(rows.into_iter().map(summary_from_row).collect())
     }
 
-    async fn summary(&self, request_id: &str) -> Result<ExecutionTraceSummary, ExecutionTraceError> {
+    async fn summary(
+        &self,
+        request_id: &str,
+    ) -> Result<ExecutionTraceSummary, ExecutionTraceError> {
         let row = sqlx::query(
             "SELECT r.request_id, r.requested_model, r.preferred_route, r.status,
                     r.selected_route, r.attachment_strategy, r.final_error, r.started_at, r.completed_at,
@@ -525,7 +537,10 @@ fn ensure_sqlite_parent(database_url: &str) -> std::io::Result<()> {
     if path == ":memory:" || path.is_empty() {
         return Ok(());
     }
-    if let Some(parent) = Path::new(path).parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())

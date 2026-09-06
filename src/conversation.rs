@@ -3,7 +3,10 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, Row, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    Row, SqlitePool,
+};
 use std::{collections::BTreeMap, convert::Infallible, path::Path, str::FromStr, sync::Arc};
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -661,22 +664,24 @@ fn captured_assistant_message(text: &str, tools: &BTreeMap<usize, CapturedTool>)
     if !tools.is_empty() {
         let tool_calls = tools
             .values()
-            .map(|tool| json!({
-                "id": if tool.id.is_empty() {
-                    format!("call_{}", Uuid::new_v4())
-                } else {
-                    tool.id.clone()
-                },
-                "type":"function",
-                "function":{
-                    "name": if tool.name.is_empty() {
-                        "tool".to_string()
+            .map(|tool| {
+                json!({
+                    "id": if tool.id.is_empty() {
+                        format!("call_{}", Uuid::new_v4())
                     } else {
-                        tool.name.clone()
+                        tool.id.clone()
                     },
-                    "arguments":tool.arguments.clone()
-                }
-            }))
+                    "type":"function",
+                    "function":{
+                        "name": if tool.name.is_empty() {
+                            "tool".to_string()
+                        } else {
+                            tool.name.clone()
+                        },
+                        "arguments":tool.arguments.clone()
+                    }
+                })
+            })
             .collect::<Vec<_>>();
         if let Some(object) = message.as_object_mut() {
             object.insert("tool_calls".into(), Value::Array(tool_calls));
@@ -783,7 +788,9 @@ fn capture_frames(
     }
 }
 
-fn thread_summary_from_row(row: sqlx::sqlite::SqliteRow) -> Result<ThreadSummary, ConversationError> {
+fn thread_summary_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<ThreadSummary, ConversationError> {
     Ok(ThreadSummary {
         id: row.try_get("id")?,
         title: row.try_get("title")?,
@@ -878,7 +885,9 @@ mod tests {
         capture_frames(&mut buffer, &mut text, &mut tools, &mut completed);
         send_captured_completion_if_ready(&mut sender, completed, &text, &tools);
 
-        let message = rx.await.expect("terminal finish_reason should publish assistant capture");
+        let message = rx
+            .await
+            .expect("terminal finish_reason should publish assistant capture");
         assert_eq!(message["role"], "assistant");
         assert_eq!(message["content"], "answer");
         assert!(sender.is_none());
@@ -887,7 +896,11 @@ mod tests {
     #[test]
     fn incomplete_or_empty_streams_are_not_persistable() {
         let empty_tools = BTreeMap::new();
-        assert!(!captured_assistant_is_persistable(false, "partial", &empty_tools));
+        assert!(!captured_assistant_is_persistable(
+            false,
+            "partial",
+            &empty_tools
+        ));
         assert!(!captured_assistant_is_persistable(true, "", &empty_tools));
 
         let mut tools = BTreeMap::new();
@@ -900,6 +913,10 @@ mod tests {
             },
         );
         assert!(captured_assistant_is_persistable(true, "", &tools));
-        assert!(captured_assistant_is_persistable(true, "answer", &empty_tools));
+        assert!(captured_assistant_is_persistable(
+            true,
+            "answer",
+            &empty_tools
+        ));
     }
 }

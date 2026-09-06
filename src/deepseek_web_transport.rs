@@ -3,8 +3,8 @@ use crate::{
     browser_auth_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
-        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
-        BrowserTransportMode, BrowserlessCapabilities, BROWSER_ADAPTER_CONTRACT_VERSION,
+        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError, BrowserTransportMode,
+        BrowserlessCapabilities, BROWSER_ADAPTER_CONTRACT_VERSION,
     },
     conversation_runtime,
     deepseek_pow::{solve_challenge, DeepSeekPowChallenge},
@@ -106,16 +106,15 @@ impl DeepSeekStreamState {
 
     fn validate_completion(&self) -> Result<(), String> {
         if !self.completed {
-            return Err("upstream_stream_dropped: DeepSeek stream ended before logical completion"
-                .into());
+            return Err(
+                "upstream_stream_dropped: DeepSeek stream ended before logical completion".into(),
+            );
         }
         if self.output.trim().is_empty() {
             return Err("DeepSeek direct stream completed without assistant output".into());
         }
         if self.response_message_id.is_none() {
-            return Err(
-                "DeepSeek direct stream completed without response_message_id".into(),
-            );
+            return Err("DeepSeek direct stream completed without response_message_id".into());
         }
         Ok(())
     }
@@ -178,7 +177,11 @@ impl DeepSeekSseDecoder {
             .map_err(|error| format!("DeepSeek SSE returned invalid JSON: {error}"))?;
         let mut update = DeepSeekFrameUpdate::default();
 
-        if let Some(code) = value.get("code").and_then(Value::as_i64).filter(|code| *code != 0) {
+        if let Some(code) = value
+            .get("code")
+            .and_then(Value::as_i64)
+            .filter(|code| *code != 0)
+        {
             update.error = Some(format!(
                 "DeepSeek upstream error {code}: {}",
                 error_message(&value)
@@ -254,12 +257,7 @@ impl DeepSeekSseDecoder {
                             format!("{parent}/{child}")
                         }
                     });
-                    self.apply_patch(
-                        expanded.as_deref(),
-                        child_operation,
-                        child_value,
-                        update,
-                    )?;
+                    self.apply_patch(expanded.as_deref(), child_operation, child_value, update)?;
                 }
             }
             return Ok(());
@@ -290,12 +288,7 @@ impl DeepSeekSseDecoder {
             Some(path) => {
                 if let Some(raw_index) = fragment_content_index(path) {
                     if let Some(text) = patch_value.and_then(Value::as_str) {
-                        self.apply_fragment_content_patch(
-                            raw_index,
-                            &operation,
-                            text,
-                            update,
-                        )?;
+                        self.apply_fragment_content_patch(raw_index, &operation, text, update)?;
                     }
                 }
             }
@@ -377,9 +370,8 @@ impl DeepSeekSseDecoder {
         let index = if raw_index == -1 {
             self.fragments.len().checked_sub(1).unwrap_or(0)
         } else {
-            usize::try_from(raw_index).map_err(|_| {
-                format!("DeepSeek fragment index is invalid: {raw_index}")
-            })?
+            usize::try_from(raw_index)
+                .map_err(|_| format!("DeepSeek fragment index is invalid: {raw_index}"))?
         };
 
         while self.fragments.len() <= index {
@@ -466,11 +458,7 @@ fn fragment_content_index(path: &str) -> Option<i64> {
     index.parse::<i64>().ok()
 }
 
-fn monotonic_fragment_delta(
-    previous: &str,
-    next: &str,
-    index: usize,
-) -> Result<String, String> {
+fn monotonic_fragment_delta(previous: &str, next: &str, index: usize) -> Result<String, String> {
     if next == previous || previous.starts_with(next) {
         return Ok(String::new());
     }
@@ -527,9 +515,8 @@ impl DeepSeekWebHttpAdapter {
             return Err(BrowserProviderError::AdapterIncompatible {
                 account_id: account_id.to_string(),
                 code: "login_required".into(),
-                message:
-                    "DeepSeek auth snapshot does not contain a usable localStorage userToken"
-                        .into(),
+                message: "DeepSeek auth snapshot does not contain a usable localStorage userToken"
+                    .into(),
             });
         }
         Ok(material)
@@ -892,12 +879,10 @@ impl DeepSeekWebHttpAdapter {
             .clamp(1_000, 30_000);
         let (_, pow_header) = solve_challenge(challenge, pow_timeout)
             .await
-            .map_err(|error| {
-                BrowserProviderError::AdapterIncompatible {
-                    account_id: request.account.id.clone(),
-                    code: "adapter_incompatible".into(),
-                    message: format!("DeepSeek PoW solver failed: {error}"),
-                }
+            .map_err(|error| BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "adapter_incompatible".into(),
+                message: format!("DeepSeek PoW solver failed: {error}"),
             })?;
         let referer = format!("{DEEPSEEK_BASE_URL}/a/chat/s/{chat_session_id}");
         let search_enabled = request
@@ -1033,10 +1018,7 @@ impl DeepSeekWebHttpAdapter {
                     .map_err(BrowserProviderError::Transport)?;
             }
         }
-        for update in decoder
-            .finish()
-            .map_err(BrowserProviderError::Transport)?
-        {
+        for update in decoder.finish().map_err(BrowserProviderError::Transport)? {
             state
                 .apply(update)
                 .map_err(BrowserProviderError::Transport)?;
@@ -1262,9 +1244,8 @@ impl BrowserProviderAdapter for DeepSeekWebHttpAdapter {
                 contract_version: Some(BROWSER_ADAPTER_CONTRACT_VERSION),
                 expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
                 status: "ready".into(),
-                message:
-                    "DeepSeek direct HTTP auth is valid; Chromium is not required for chat"
-                        .into(),
+                message: "DeepSeek direct HTTP auth is valid; Chromium is not required for chat"
+                    .into(),
                 page_signature: None,
                 target_url_prefix: Some(DEEPSEEK_BASE_URL.into()),
                 configured_models: binding.models.clone(),
@@ -1317,10 +1298,7 @@ impl BrowserProviderAdapter for DeepSeekWebHttpAdapter {
             .access_token(&request.account.id, &request.binding)
             .await?;
         let (chat_session_id, request_parent_id) = if let Some(native) = native {
-            (
-                native.chat_session_id,
-                Some(native.response_message_id),
-            )
+            (native.chat_session_id, Some(native.response_message_id))
         } else {
             (
                 self.create_session(&request, &material, &access_token)
@@ -1557,9 +1535,7 @@ fn client_version(material: &BrowserAuthMaterial) -> String {
             "version",
         ],
     )
-    .filter(|value| {
-        value.len() <= 32 && value.chars().any(|character| character.is_ascii_digit())
-    })
+    .filter(|value| value.len() <= 32 && value.chars().any(|character| character.is_ascii_digit()))
     .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.to_string())
 }
 

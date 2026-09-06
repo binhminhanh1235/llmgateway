@@ -25,7 +25,11 @@ pub async fn launch_chromium_login(
         return unavailable();
     };
     match driver.launch(&session_id).await {
-        Ok(launch) => json_response(StatusCode::OK, json!({"launched":true,"launch":launch}), None),
+        Ok(launch) => json_response(
+            StatusCode::OK,
+            json!({"launched":true,"launch":launch}),
+            None,
+        ),
         Err(error) => driver_error(error),
     }
 }
@@ -155,7 +159,11 @@ pub async fn stop_chromium(
         return unavailable();
     };
     match driver.stop(&session_id).await {
-        Ok(status) => json_response(StatusCode::OK, json!({"stopped":true,"status":status}), None),
+        Ok(status) => json_response(
+            StatusCode::OK,
+            json!({"stopped":true,"status":status}),
+            None,
+        ),
         Err(error) => driver_error(error),
     }
 }
@@ -182,9 +190,11 @@ fn driver_error(error: ChromiumDriverError) -> Response<Body> {
         | ChromiumDriverError::ExecutableNotFound
         | ChromiumDriverError::AlreadyRunning(_)
         | ChromiumDriverError::InvalidDevToolsPort(_)
-        | ChromiumDriverError::InvalidConfig(_) => {
-            json_error(StatusCode::BAD_REQUEST, "chromium_driver_error", &error.to_string())
-        }
+        | ChromiumDriverError::InvalidConfig(_) => json_error(
+            StatusCode::BAD_REQUEST,
+            "chromium_driver_error",
+            &error.to_string(),
+        ),
         ChromiumDriverError::BrowserSession(error) => json_error(
             StatusCode::BAD_REQUEST,
             "browser_session_error",
@@ -203,11 +213,9 @@ fn driver_error(error: ChromiumDriverError) -> Response<Body> {
             "chromium_devtools_error",
             &error.to_string(),
         ),
-        ChromiumDriverError::DevToolsResponse(message) => json_error(
-            StatusCode::BAD_GATEWAY,
-            "chromium_devtools_error",
-            &message,
-        ),
+        ChromiumDriverError::DevToolsResponse(message) => {
+            json_error(StatusCode::BAD_GATEWAY, "chromium_devtools_error", &message)
+        }
         ChromiumDriverError::Toml(error) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "chromium_config_error",

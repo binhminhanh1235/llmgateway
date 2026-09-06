@@ -2,35 +2,34 @@ use crate::{
     artifact_store::ArtifactStore,
     browser_provider_runtime,
     catalog::{canonical_model_id, CatalogError, ModelCatalog},
-    compat::{anthropic, responses},
     client_policy::{ClientAccess, ClientPolicyError, ClientPolicyStore},
+    compat::{anthropic, responses},
     conversation::{ConversationError, ConversationStore},
+    file_attachments::{self, FileAttachmentError},
     gateway::{Gateway, GatewayError},
     multimodal::{
         canonical_input_modalities, canonical_output_modalities, AdapterCapabilities,
         ModelCapabilities, MultimodalError, MULTIMODAL_SCHEMA_VERSION,
     },
-    multimodal_compat,
-    quota_usage_runtime,
-    file_attachments::{self, FileAttachmentError},
+    multimodal_compat, quota_usage_runtime,
     response_state::{response_to_openai_assistant, responses_stream_with_capture},
     vision::{self, VisionError},
 };
 use axum::{
     body::{to_bytes, Body},
     extract::{Path, Request, State},
-    middleware::Next,
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         HeaderMap, HeaderValue, Response, StatusCode,
     },
+    middleware::Next,
     response::IntoResponse,
     Json,
 };
 use futures_util::TryStreamExt;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::Arc,
 };
 use tokio::sync::oneshot;
@@ -102,7 +101,10 @@ pub async fn openai_chat(
     };
     body = normalized.into_current_execution();
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
+    if let Err(error) = state
+        .client_policies
+        .enforce_model(&access, &requested_model)
+    {
         return client_policy_error(error);
     }
     let reservation = match state
@@ -240,7 +242,10 @@ pub async fn openai_responses(
     let requested_model = normalized.canonical.model.clone();
     let mut openai_body = normalized.into_current_execution();
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
+    if let Err(error) = state
+        .client_policies
+        .enforce_model(&access, &requested_model)
+    {
         return client_policy_error(error);
     }
     let response_owner = access.client_id().map(str::to_string);
@@ -262,9 +267,7 @@ pub async fn openai_responses(
             }
             Err(error) => return conversation_state_error(error),
         };
-        if response_owner.is_some()
-            && previous.client_id.as_deref() != response_owner.as_deref()
-        {
+        if response_owner.is_some() && previous.client_id.as_deref() != response_owner.as_deref() {
             return json_error(
                 StatusCode::NOT_FOUND,
                 "invalid_request_error",
@@ -332,10 +335,8 @@ pub async fn openai_responses(
                     route_id.clone(),
                     routed.started_at,
                 );
-                let stream = responses::openai_stream_to_responses(
-                    response,
-                    requested_model.clone(),
-                );
+                let stream =
+                    responses::openai_stream_to_responses(response, requested_model.clone());
                 let (tx, rx) = oneshot::channel();
                 let stream = responses_stream_with_capture(stream, tx);
                 let conversations = state.conversations.clone();
@@ -464,7 +465,10 @@ pub async fn anthropic_messages(
     let requested_model = normalized.canonical.model.clone();
     let mut openai_body = normalized.into_current_execution();
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
+    if let Err(error) = state
+        .client_policies
+        .enforce_model(&access, &requested_model)
+    {
         return client_policy_error(error);
     }
     let reservation = match state
@@ -491,8 +495,7 @@ pub async fn anthropic_messages(
                     route_id.clone(),
                     routed.started_at,
                 );
-                let stream =
-                    anthropic::openai_stream_to_anthropic(response, requested_model);
+                let stream = anthropic::openai_stream_to_anthropic(response, requested_model);
                 response_with_route_and_request(
                     StatusCode::OK,
                     "text/event-stream",
@@ -534,7 +537,11 @@ pub async fn anthropic_messages(
 pub(crate) fn file_attachment_error(error: FileAttachmentError) -> Response<Body> {
     match error {
         FileAttachmentError::Artifact(crate::artifact_store::ArtifactError::NotFound(_)) => {
-            json_error(StatusCode::NOT_FOUND, "not_found_error", "file artifact was not found")
+            json_error(
+                StatusCode::NOT_FOUND,
+                "not_found_error",
+                "file artifact was not found",
+            )
         }
         FileAttachmentError::Artifact(crate::artifact_store::ArtifactError::TooLarge { limit }) => {
             json_error(
@@ -590,17 +597,24 @@ pub(crate) fn vision_error(error: VisionError) -> Response<Body> {
             "not_found_error",
             "image artifact was not found",
         ),
-        VisionError::Artifact(crate::artifact_store::ArtifactError::TooLarge { limit }) => json_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "file_too_large",
-            &format!("image exceeds configured limit of {limit} bytes"),
-        ),
-        VisionError::Artifact(crate::artifact_store::ArtifactError::MimeDenied(mime)) => json_error(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "unsupported_media_type",
-            &format!("MIME type '{mime}' is not allowed"),
-        ),
-        VisionError::Artifact(crate::artifact_store::ArtifactError::MimeMismatch { declared, detected }) => json_error(
+        VisionError::Artifact(crate::artifact_store::ArtifactError::TooLarge { limit }) => {
+            json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "file_too_large",
+                &format!("image exceeds configured limit of {limit} bytes"),
+            )
+        }
+        VisionError::Artifact(crate::artifact_store::ArtifactError::MimeDenied(mime)) => {
+            json_error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+                &format!("MIME type '{mime}' is not allowed"),
+            )
+        }
+        VisionError::Artifact(crate::artifact_store::ArtifactError::MimeMismatch {
+            declared,
+            detected,
+        }) => json_error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "mime_type_mismatch",
             &format!("declared MIME '{declared}' does not match detected MIME '{detected}'"),
@@ -675,15 +689,75 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 capabilities.insert("native_file_upload".into());
             }
         }
-        enriched_route_capabilities
-            .insert(route.id.clone(), capabilities.into_iter().collect());
+        enriched_route_capabilities.insert(route.id.clone(), capabilities.into_iter().collect());
     }
 
+    let eligible_models: HashSet<&str> = physical.iter().map(|m| m.id.as_str()).collect();
+    let eligible_external_models: HashSet<(&str, &str)> = physical
+        .iter()
+        .map(|m| (m.provider.as_str(), m.external_id.as_str()))
+        .collect();
+
+    let route_is_valid = |route: &crate::config::RouteConfig| -> bool {
+        if !route.enabled {
+            return false;
+        }
+        let Some(account) = config.account(&route.account) else {
+            return false;
+        };
+        if !account.enabled {
+            return false;
+        }
+        physical.iter().any(|model| {
+            model.provider == account.provider
+                && (model.external_id == route.model || model.id == route.model)
+                && model.accounts.iter().any(|binding| {
+                    binding.account_id == route.account
+                        && binding.enabled
+                        && matches!(binding.availability.as_str(), "available" | "unknown")
+                })
+        })
+    };
+
+    let group_has_viable_targets = |group: &crate::config::VirtualModelConfig| -> bool {
+        let member_models = group.model_ids();
+        let member_routes = group.route_ids();
+
+        if member_models.is_empty() && member_routes.is_empty() {
+            return false;
+        }
+
+        let has_viable_model = member_models.iter().any(|model_id| {
+            if eligible_models.contains(model_id) {
+                return true;
+            }
+            if let Some((provider, external)) = model_id.split_once('/') {
+                eligible_external_models.contains(&(provider, external))
+            } else {
+                eligible_external_models
+                    .iter()
+                    .any(|(_, ext)| ext == model_id)
+            }
+        });
+        if has_viable_model {
+            return true;
+        }
+
+        member_routes.iter().any(|route_id| {
+            config
+                .route(route_id)
+                .is_some_and(|route| route_is_valid(route))
+        })
+    };
+
     for (id, virtual_model) in &config.virtual_models {
-        if !virtual_model.enabled {
+        if !virtual_model.enabled || !group_has_viable_targets(virtual_model) {
             continue;
         }
-        if access.policy().is_some_and(|policy| !policy.model_allowed(id, id)) {
+        if access
+            .policy()
+            .is_some_and(|policy| !policy.model_allowed(id, id))
+        {
             continue;
         }
         let mut capability_tags = BTreeSet::new();
@@ -691,7 +765,10 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             let Some(route) = config.route(route_id).filter(|route| route.enabled) else {
                 continue;
             };
-            if access.policy().is_some_and(|policy| !policy.route_allowed(&route.id)) {
+            if access
+                .policy()
+                .is_some_and(|policy| !policy.route_allowed(&route.id))
+            {
                 continue;
             }
             capability_tags.extend(
@@ -740,6 +817,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             json!({
                 "id":id,
                 "object":"model",
+                "name":id,
                 "owned_by":"llmgateway",
                 "llmgateway":{
                     "kind":"virtual",
@@ -753,7 +831,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         );
     }
 
-    for model in physical {
+    for model in &physical {
         if access
             .policy()
             .is_some_and(|policy| !policy.model_allowed(&model.id, &model.id))
@@ -792,14 +870,15 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         let model_capabilities = model_capabilities.into_iter().collect::<Vec<_>>();
         let multimodal_capabilities = ModelCapabilities::from_legacy_tags(&model_capabilities)
             .with_file_attachment_metadata(
-            state.artifacts.config().max_files_per_request,
-            state.artifacts.config().max_file_size_bytes,
-        );
+                state.artifacts.config().max_files_per_request,
+                state.artifacts.config().max_file_size_bytes,
+            );
         data.insert(
             model.id.clone(),
             json!({
                 "id":model.id,
                 "object":"model",
+                "name":model.display_name,
                 "owned_by":model.owned_by,
                 "llmgateway":{
                     "kind":"physical",
@@ -814,11 +893,10 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         );
     }
 
-    // Preserve v0.1 route IDs as selectable aliases for existing clients.
-    for route in config.routes.iter().filter(|route| route.enabled) {
+    // Preserve v0.1 route IDs as selectable aliases for existing clients only if the route is valid and active.
+    for route in config.routes.iter().filter(|route| route_is_valid(route)) {
         if access.policy().is_some_and(|policy| {
-            !policy.route_allowed(&route.id)
-                || !policy.model_allowed(&route.id, &route.model)
+            !policy.route_allowed(&route.id) || !policy.model_allowed(&route.id, &route.model)
         }) {
             continue;
         }
@@ -830,6 +908,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             json!({
                 "id":route.id,
                 "object":"model",
+                "name":route.id,
                 "owned_by":"llmgateway-route",
                 "llmgateway":{
                     "kind":"route",
@@ -851,7 +930,6 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         None,
     )
 }
-
 
 pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> Response<Body> {
     let access = match authorize_client(&headers, &state) {
@@ -912,12 +990,14 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
     let mut models_by_adapter: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for route in config.routes.iter().filter(|route| route.enabled) {
         if access.policy().is_some_and(|policy| {
-            !policy.route_allowed(&route.id)
-                || !policy.model_allowed(&route.id, &route.model)
+            !policy.route_allowed(&route.id) || !policy.model_allowed(&route.id, &route.model)
         }) {
             continue;
         }
-        let Some(account) = config.account(&route.account).filter(|account| account.enabled) else {
+        let Some(account) = config
+            .account(&route.account)
+            .filter(|account| account.enabled)
+        else {
             continue;
         };
         let Some(provider) = config.provider(&account.provider) else {
@@ -1052,7 +1132,12 @@ pub async fn admin_refresh_account_models(
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let config = state.gateway.config_snapshot();
     let routes = state.gateway.router.snapshot().await;
-    let catalog_models = state.catalog.models().await.map(|models| models.len()).unwrap_or(0);
+    let catalog_models = state
+        .catalog
+        .models()
+        .await
+        .map(|models| models.len())
+        .unwrap_or(0);
     let threads = state
         .conversations
         .list_threads()
@@ -1135,10 +1220,7 @@ async fn update_provider_usage(event_id: Option<&str>, response: &Value) {
     }
 }
 
-pub(crate) async fn normalize_json_rejections(
-    request: Request,
-    next: Next,
-) -> Response<Body> {
+pub(crate) async fn normalize_json_rejections(request: Request, next: Next) -> Response<Body> {
     let request_is_json = request
         .headers()
         .get(CONTENT_TYPE)
@@ -1226,7 +1308,11 @@ fn presented_api_key(headers: &HeaderMap) -> Option<&str> {
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .or_else(|| headers.get("x-api-key").and_then(|value| value.to_str().ok()))
+        .or_else(|| {
+            headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+        })
 }
 
 fn multimodal_error(error: MultimodalError) -> Response<Body> {
@@ -1243,13 +1329,17 @@ pub(crate) fn client_policy_error(error: ClientPolicyError) -> Response<Body> {
         ClientPolicyError::Forbidden(message) => {
             json_error(StatusCode::FORBIDDEN, "client_policy_error", &message)
         }
-        ClientPolicyError::BudgetExceeded(message) => {
-            json_error(StatusCode::TOO_MANY_REQUESTS, "client_budget_exceeded", &message)
-        }
+        ClientPolicyError::BudgetExceeded(message) => json_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "client_budget_exceeded",
+            &message,
+        ),
         ClientPolicyError::MissingEnv(message) => json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "client_policy_configuration_error",
-            &format!("configured client credential environment variable '{message}' is unavailable"),
+            &format!(
+                "configured client credential environment variable '{message}' is unavailable"
+            ),
         ),
         ClientPolicyError::Database(error) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1284,11 +1374,9 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
             "configuration_error",
             &message,
         ),
-        GatewayError::ClientPolicyDenied(message) => json_error(
-            StatusCode::FORBIDDEN,
-            "client_policy_error",
-            &message,
-        ),
+        GatewayError::ClientPolicyDenied(message) => {
+            json_error(StatusCode::FORBIDDEN, "client_policy_error", &message)
+        }
         GatewayError::Transport(message) => {
             json_error(StatusCode::BAD_GATEWAY, "upstream_error", &message)
         }
@@ -1297,26 +1385,25 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
             "browser_session_error",
             &message,
         ),
-        GatewayError::BrowserTransport(message) => json_error(
-            StatusCode::BAD_GATEWAY,
-            "browser_transport_error",
-            &message,
-        ),
+        GatewayError::BrowserTransport(message) => {
+            json_error(StatusCode::BAD_GATEWAY, "browser_transport_error", &message)
+        }
         GatewayError::BrowserAdapterIncompatible(message) => json_error(
             StatusCode::BAD_GATEWAY,
             "browser_adapter_incompatible",
             &message,
         ),
+        GatewayError::ModelBindingConflict(message) => {
+            json_error(StatusCode::CONFLICT, "model_binding_conflict", &message)
+        }
         GatewayError::BrowserModelUnavailable(message) => json_error(
             StatusCode::BAD_GATEWAY,
             "browser_model_unavailable",
             &message,
         ),
-        GatewayError::BrowserModelRecipeStale(message) => json_error(
-            StatusCode::BAD_GATEWAY,
-            "model_recipe_stale",
-            &message,
-        ),
+        GatewayError::BrowserModelRecipeStale(message) => {
+            json_error(StatusCode::BAD_GATEWAY, "model_recipe_stale", &message)
+        }
         GatewayError::Upstream { status, body } => json_error(status, "upstream_error", &body),
         GatewayError::Execution { request_id, source } => {
             let mut response = gateway_error(*source);
@@ -1363,7 +1450,8 @@ fn catalog_error(error: CatalogError) -> Response<Body> {
 
 fn conversation_state_error(error: ConversationError) -> Response<Body> {
     match error {
-        ConversationError::ThreadNotFound(message) | ConversationError::ResponseNotFound(message) => {
+        ConversationError::ThreadNotFound(message)
+        | ConversationError::ResponseNotFound(message) => {
             json_error(StatusCode::NOT_FOUND, "response_state_error", &message)
         }
         ConversationError::InvalidJson(message) => json_error(
@@ -1483,4 +1571,229 @@ fn openai_assistant_message(openai: &Value) -> Option<Value> {
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::AppConfig, execution_trace::ExecutionTraceStore, live_config::LiveConfig};
+    use axum::body::to_bytes;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::fs;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn models_exposes_only_enabled_models_active_routes_and_viable_groups() {
+        let temp_db = format!("/tmp/llmgateway-test-models-{}.db", Uuid::new_v4());
+        let db_url = format!("sqlite://{}", temp_db);
+
+        let config_toml = format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+key_env = "LLMGATEWAY_API_KEY"
+default_model = "group-viable"
+
+[storage]
+database_url = "{db_url}"
+
+[[providers]]
+id = "p1"
+kind = "openai-compatible"
+base_url = "https://api.p1.com"
+
+[[accounts]]
+id = "acc-enabled"
+provider = "p1"
+api_key_env = "API_KEY"
+enabled = true
+
+[[accounts]]
+id = "acc-disabled"
+provider = "p1"
+api_key_env = "API_KEY"
+enabled = false
+
+[[routes]]
+id = "route-active"
+account = "acc-enabled"
+model = "model-enabled"
+enabled = true
+
+[[routes]]
+id = "route-for-disabled-acc"
+account = "acc-disabled"
+model = "model-enabled"
+enabled = true
+
+[[routes]]
+id = "route-for-disabled-model"
+account = "acc-enabled"
+model = "model-disabled"
+enabled = true
+
+[[routes]]
+id = "route-disabled"
+account = "acc-enabled"
+model = "model-enabled"
+enabled = false
+
+[virtual_models.group-viable]
+enabled = true
+
+[[virtual_models.group-viable.tiers]]
+priority = 1
+models = ["p1/model-enabled"]
+
+[virtual_models.group-disabled]
+enabled = false
+
+[[virtual_models.group-disabled.tiers]]
+priority = 1
+models = ["p1/model-enabled"]
+
+[virtual_models.group-no-viable-models]
+enabled = true
+
+[[virtual_models.group-no-viable-models.tiers]]
+priority = 1
+models = ["p1/model-disabled"]
+"#
+        );
+
+        let config = Arc::new(AppConfig::parse(&config_toml).unwrap());
+        let live_config = LiveConfig::new(config.clone());
+        let catalog = Arc::new(ModelCatalog::connect(live_config.clone()).await.unwrap());
+        let conversations = Arc::new(ConversationStore::connect(config.clone()).await.unwrap());
+        let execution_traces =
+            Arc::new(ExecutionTraceStore::connect(config.clone()).await.unwrap());
+        let gateway_api_key = Arc::new("test-key".to_string());
+        let client_policies = Arc::new(
+            ClientPolicyStore::connect(
+                config.clone(),
+                live_config.clone(),
+                gateway_api_key.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+        let gateway = Arc::new(
+            Gateway::new(
+                config.clone(),
+                live_config.clone(),
+                catalog.clone(),
+                execution_traces,
+            )
+            .unwrap(),
+        );
+
+        let artifacts = Arc::new(ArtifactStore::connect(config.clone()).await.unwrap());
+
+        let state = AppState {
+            gateway,
+            catalog,
+            conversations,
+            artifacts,
+            gateway_api_key,
+            client_policies,
+        };
+
+        let pool = SqlitePoolOptions::new().connect(&db_url).await.unwrap();
+
+        // Seed model-enabled (enabled=1)
+        sqlx::query(
+            "INSERT INTO models (canonical_id, provider_id, external_id, display_name, owned_by, enabled)
+             VALUES ('p1/model-enabled', 'p1', 'model-enabled', 'Model Enabled', 'p1', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO account_models (account_id, canonical_model_id, availability, enabled, configured, discovered)
+             VALUES ('acc-enabled', 'p1/model-enabled', 'available', 1, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Seed model-disabled (enabled=0)
+        sqlx::query(
+            "INSERT INTO models (canonical_id, provider_id, external_id, display_name, owned_by, enabled)
+             VALUES ('p1/model-disabled', 'p1', 'model-disabled', 'Model Disabled', 'p1', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO account_models (account_id, canonical_model_id, availability, enabled, configured, discovered)
+             VALUES ('acc-enabled', 'p1/model-disabled', 'available', 0, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer test-key"));
+
+        let response = models(State(state), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_val: Value = serde_json::from_slice(&body_bytes).unwrap();
+        let items = json_val["data"].as_array().unwrap();
+        let ids: HashSet<&str> = items
+            .iter()
+            .filter_map(|item| item["id"].as_str())
+            .collect();
+
+        // Physical model: enabled should be present, disabled should NOT
+        assert!(
+            ids.contains("p1/model-enabled"),
+            "p1/model-enabled should be present"
+        );
+        assert!(
+            !ids.contains("p1/model-disabled"),
+            "p1/model-disabled should NOT be present"
+        );
+
+        // Virtual model (group): viable enabled group should be present; disabled group or empty group should NOT
+        assert!(
+            ids.contains("group-viable"),
+            "group-viable should be present"
+        );
+        assert!(
+            !ids.contains("group-disabled"),
+            "group-disabled should NOT be present"
+        );
+        assert!(
+            !ids.contains("group-no-viable-models"),
+            "group-no-viable-models should NOT be present"
+        );
+
+        // Routes: active route on enabled account with enabled model should be present
+        assert!(
+            ids.contains("route-active"),
+            "route-active should be present"
+        );
+        assert!(
+            !ids.contains("route-for-disabled-acc"),
+            "route-for-disabled-acc should NOT be present"
+        );
+        assert!(
+            !ids.contains("route-for-disabled-model"),
+            "route-for-disabled-model should NOT be present"
+        );
+        assert!(
+            !ids.contains("route-disabled"),
+            "route-disabled should NOT be present"
+        );
+
+        pool.close().await;
+        let _ = fs::remove_file(&temp_db);
+    }
 }

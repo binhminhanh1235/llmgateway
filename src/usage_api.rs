@@ -10,10 +10,7 @@ use axum::{
 };
 use serde_json::json;
 
-pub async fn get_usage(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response<Body> {
+pub async fn get_usage(State(state): State<AppState>, headers: HeaderMap) -> Response<Body> {
     if let Err(response) = authorize(&headers, &state.gateway_api_key) {
         return response;
     }

@@ -84,9 +84,18 @@ pub async fn inspect_thread_retrieval(
         );
     };
     let config = &state.gateway.config.context;
-    let max_chunks = body.max_chunks.unwrap_or(config.retrieval_max_chunks).max(1);
-    let max_tokens = body.max_tokens.unwrap_or(config.retrieval_max_tokens).max(1);
-    let min_score = body.min_score.unwrap_or(config.retrieval_min_score).max(0.0);
+    let max_chunks = body
+        .max_chunks
+        .unwrap_or(config.retrieval_max_chunks)
+        .max(1);
+    let max_tokens = body
+        .max_tokens
+        .unwrap_or(config.retrieval_max_tokens)
+        .max(1);
+    let min_score = body
+        .min_score
+        .unwrap_or(config.retrieval_min_score)
+        .max(0.0);
     let query_message = json!({"role":"user","content":body.query});
     let result = retrieve_relevant_history(
         &detail.messages,

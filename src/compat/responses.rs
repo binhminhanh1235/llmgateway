@@ -46,12 +46,7 @@ pub fn to_openai_request(body: &Value) -> Result<(String, Value), String> {
     copy_if_present(body, &mut out, "temperature", "temperature");
     copy_if_present(body, &mut out, "top_p", "top_p");
     copy_if_present(body, &mut out, "stream", "stream");
-    copy_if_present(
-        body,
-        &mut out,
-        "parallel_tool_calls",
-        "parallel_tool_calls",
-    );
+    copy_if_present(body, &mut out, "parallel_tool_calls", "parallel_tool_calls");
     copy_if_present(body, &mut out, "max_output_tokens", "max_tokens");
 
     if let Some(effort) = body

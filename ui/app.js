@@ -700,10 +700,14 @@
   }
 
   function displayProvider(provider) {
-    if (provider === "chatgpt-web") return "ChatGPT Web";
-    if (provider === "gemini-web") return "Gemini Web";
-    if (provider === "qwen-web") return "Qwen Web";
-    return provider || "Other";
+    const labels = {
+      "chatgpt-web": "ChatGPT Web",
+      "gemini-web": "Gemini Web",
+      "qwen-web": "Qwen Web",
+      "deepseek-web": "DeepSeek Web",
+      "mimo-web": "Xiaomi MiMo Web",
+    };
+    return labels[provider] || provider || "Other";
   }
 
   function modelGroupHtml(title, models, selectedId) {
@@ -720,7 +724,11 @@
   async function loadAccounts(force = false) {
     if (!state.apiKey) return openAuthModal();
     if (!force && state.accounts.length) return renderAccounts();
-    elements.accountsContent.innerHTML = '<div class="loading-box">Loading accounts…</div>';
+    const hasExistingContent = Boolean(elements.accountsContent.querySelector(".account-grid, .account-card"));
+    if (!hasExistingContent) {
+      elements.accountsContent.innerHTML = '<div class="loading-box">Loading accounts…</div>';
+    }
+    const savedScrollTop = elements.accountsContent.scrollTop;
     try {
       const response = await apiFetch("/_llmgateway/accounts");
       if (!response.ok) throw new Error(extractError(await response.text(), response.status));
@@ -733,8 +741,12 @@
         account.models = modelResponse.ok ? ((await modelResponse.json()).data || []) : [];
         account.transport_control = transportResponse.ok ? await transportResponse.json() : null;
       }));
-      renderAccounts();
-    } catch (error) { elements.accountsContent.innerHTML = `<div class="error-box">${escapeHtml(error.message || error)}</div>`; }
+      renderAccounts(savedScrollTop);
+    } catch (error) {
+      if (!hasExistingContent) {
+        elements.accountsContent.innerHTML = `<div class="error-box">${escapeHtml(error.message || error)}</div>`;
+      }
+    }
   }
 
   function updateStatusTabs(container, current, items, enabled) {
@@ -754,14 +766,22 @@
     });
   }
 
-  function renderAccounts() {
+  function renderAccounts(restoreScrollTop) {
+    const savedScrollTop = typeof restoreScrollTop === "number" ? restoreScrollTop : elements.accountsContent.scrollTop;
     updateStatusTabs(elements.accountStatusTabs, state.accountStatus, state.accounts, (account) => account.enabled === true);
     if (!state.accounts.length) return void (elements.accountsContent.innerHTML = '<div class="loading-box">No configured accounts</div>');
 
     const visible = state.accounts.filter((account) =>
       state.accountStatus === "all" || (state.accountStatus === "enabled") === (account.enabled === true)
     );
-    elements.accountsContent.innerHTML = visible.length ? `<div class="account-grid">${visible.map((account) => {
+    const existingGrid = elements.accountsContent.querySelector(".account-grid");
+    if (!visible.length) {
+      if (existingGrid) existingGrid.remove();
+      else elements.accountsContent.innerHTML = '<div class="loading-box">No accounts in this status</div>';
+      return;
+    }
+
+    const gridHtml = `<div class="account-grid">${visible.map((account) => {
       const rows = (account.models || []).map((model) => {
         const binding = model.accounts?.find((candidate) => candidate.account_id === account.id);
         if (!binding) return "";
@@ -770,12 +790,27 @@
       }).join("") || '<div class="account-model-row"><div class="model-meta">No models discovered yet</div></div>';
       const transport = accountTransportHtml(account);
       const enabled = account.enabled === true;
-      return `<article class="account-card ${enabled ? "" : "is-disabled"}"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><div class="entity-state-actions"><span class="badge ${enabled ? "available" : "unavailable"}">${enabled ? "Enabled" : "Disabled"}</span><label class="toggle" title="${enabled ? "Disable account routing" : "Enable account routing"}"><input type="checkbox" data-toggle-account-state="${escapeAttr(account.id)}" ${enabled ? "checked" : ""}/><span class="toggle-track"></span></label><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button></div></div>${transport}<div class="account-models">${rows}</div></article>`;
-    }).join("")}</div>` : '<div class="loading-box">No accounts in this status</div>';
+      return `<article class="account-card ${enabled ? "" : "is-disabled"}"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><div class="entity-state-actions"><span class="badge ${enabled ? "available" : "unavailable"}">${enabled ? "Enabled" : "Disabled"}</span><label class="toggle" title="${enabled ? "Disable account routing" : "Enable account routing"}"><input type="checkbox" data-toggle-account-state="${escapeAttr(account.id)}" ${enabled ? "checked" : ""}/><span class="toggle-track"></span></label><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button><button type="button" class="secondary-button account-delete" data-delete-account="${escapeAttr(account.id)}">Delete</button></div></div>${transport}<div class="account-models">${rows}</div></article>`;
+    }).join("")}</div>`;
+
+    if (existingGrid) {
+      existingGrid.outerHTML = gridHtml;
+    } else {
+      elements.accountsContent.innerHTML = gridHtml;
+    }
+
     elements.accountsContent.querySelectorAll(".refresh-account").forEach((button) => button.addEventListener("click", () => refreshAccountModels(button.dataset.account, button)));
+    elements.accountsContent.querySelectorAll("[data-delete-account]").forEach((button) => button.addEventListener("click", () => deleteAccount(button.dataset.deleteAccount, button)));
     elements.accountsContent.querySelectorAll("[data-toggle-account-state]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleAccountState(checkbox)));
     elements.accountsContent.querySelectorAll("[data-toggle-model]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleAccountModel(checkbox)));
     elements.accountsContent.querySelectorAll("[data-toggle-browserless]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleBrowserless(checkbox)));
+
+    if (typeof savedScrollTop === "number") {
+      elements.accountsContent.scrollTop = savedScrollTop;
+      requestAnimationFrame(() => {
+        elements.accountsContent.scrollTop = savedScrollTop;
+      });
+    }
   }
 
   function accountTransportHtml(account) {
@@ -867,6 +902,33 @@
     finally { button.disabled = false; button.textContent = old; }
   }
 
+  async function deleteAccount(accountId, button) {
+    const confirmed = confirm(
+      `Delete account "${accountId}"? This removes its routes and local browser session data. Model-group model entries are preserved and will be ignored if no enabled account can serve them.`
+    );
+    if (!confirmed) return;
+
+    button.disabled = true;
+    const old = button.textContent;
+    button.textContent = "Deleting…";
+    try {
+      const response = await apiFetch(`/_llmgateway/accounts/${encodeURIComponent(accountId)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      state.accounts = [];
+      state.catalog = [];
+      await loadModels();
+      await loadAccounts(true);
+      window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
+      toast(`Deleted account ${accountId}`);
+    } catch (error) {
+      toast(error.message || String(error));
+      button.disabled = false;
+      button.textContent = old;
+    }
+  }
+
   async function toggleAccountState(checkbox) {
     const accountId = checkbox.dataset.toggleAccountState;
     const desired = checkbox.checked;
@@ -894,6 +956,12 @@
       const response = await apiFetch(`/_llmgateway/accounts/${encodeURIComponent(accountId)}/models`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model_id: modelId, enabled: checkbox.checked }) });
       if (!response.ok) throw new Error(extractError(await response.text(), response.status));
       toast(`${checkbox.checked ? "Enabled" : "Disabled"} ${displayModel(modelId)} on ${accountId}`);
+      const account = state.accounts.find((a) => a.id === accountId);
+      if (account && account.models) {
+        const model = account.models.find((m) => m.id === modelId);
+        const binding = model?.accounts?.find((b) => b.account_id === accountId);
+        if (binding) binding.enabled = checkbox.checked;
+      }
       window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
     } catch (error) { checkbox.checked = !checkbox.checked; toast(error.message || String(error)); }
     finally { checkbox.disabled = false; }
@@ -1005,6 +1073,13 @@
 
   function changeApiKey() { localStorage.removeItem(LOCAL_KEY); sessionStorage.removeItem(SESSION_KEY); state.apiKey = ""; openAuthModal(); }
   function toast(message) { elements.toast.textContent = message; elements.toast.classList.remove("hidden"); clearTimeout(toast.timer); toast.timer = setTimeout(() => elements.toast.classList.add("hidden"), 3200); }
+
+  window.addEventListener("llmgateway:accounts-changed", () => {
+    state.accounts = [];
+    state.catalog = [];
+    loadModels().catch((error) => toast(error.message || String(error)));
+    if (state.currentView === "accounts") loadAccounts(true);
+  });
 
   function bindEvents() {
     elements.newChatButton.addEventListener("click", createThread);

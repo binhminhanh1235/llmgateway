@@ -1,11 +1,14 @@
 use crate::{
-    browser_auth_runtime, browser_session_runtime, chromium_driver_runtime, conversation_runtime,
+    browser_auth_runtime, browser_session_runtime,
     chatgpt_web_transport::ChatGptWebHttpAdapter,
+    chromium_driver_runtime,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
+    conversation_runtime,
     deepseek_web_transport::DeepSeekWebHttpAdapter,
-    gemini_web_transport::GeminiWebHttpAdapter,
-    qwen_web_transport::QwenWebHttpAdapter,
     file_attachments,
+    gemini_web_transport::GeminiWebHttpAdapter,
+    mimo_web_transport::MimoWebHttpAdapter,
+    qwen_web_transport::QwenWebHttpAdapter,
     vision,
 };
 use async_trait::async_trait;
@@ -26,12 +29,12 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use tracing::warn;
 use tokio::{
     sync::RwLock,
     time::{sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::warn;
 
 const MAX_ADAPTER_SCRIPT_BYTES: u64 = 512 * 1024;
 const CDP_EXECUTION_TIMEOUT_SECONDS: u64 = 600;
@@ -41,6 +44,7 @@ const GEMINI_WEB_ADAPTER: &str = include_str!("../adapters/gemini-web.js");
 const CHATGPT_WEB_ADAPTER: &str = include_str!("../adapters/chatgpt-web.js");
 const QWEN_WEB_ADAPTER: &str = include_str!("../adapters/qwen-web.js");
 const DEEPSEEK_WEB_ADAPTER: &str = include_str!("../adapters/deepseek-web.js");
+const MIMO_WEB_ADAPTER: &str = include_str!("../adapters/mimo-web.js");
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct BrowserProviderConfig {
@@ -79,7 +83,9 @@ impl BrowserTransportPolicy {
         match value {
             "browser-only" => Ok(Self::BrowserOnly),
             "browserless-preferred" => Ok(Self::BrowserlessPreferred),
-            other => Err(BrowserProviderError::InvalidTransportPolicy(other.to_string())),
+            other => Err(BrowserProviderError::InvalidTransportPolicy(
+                other.to_string(),
+            )),
         }
     }
 }
@@ -483,10 +489,12 @@ impl BrowserProviderRegistry {
         let chatgpt = Arc::new(CdpBrowserAdapter::chatgpt()?);
         let qwen = Arc::new(CdpBrowserAdapter::qwen()?);
         let deepseek = Arc::new(CdpBrowserAdapter::deepseek()?);
+        let mimo = Arc::new(CdpBrowserAdapter::mimo()?);
         let gemini_http = Arc::new(GeminiWebHttpAdapter::new()?);
         let chatgpt_http = Arc::new(ChatGptWebHttpAdapter::new()?);
         let qwen_http = Arc::new(QwenWebHttpAdapter::new()?);
         let deepseek_http = Arc::new(DeepSeekWebHttpAdapter::new()?);
+        let mimo_http = Arc::new(MimoWebHttpAdapter::new()?);
         let mut adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> = BTreeMap::new();
         adapters.insert(http.kind().to_string(), http);
         adapters.insert(cdp.kind().to_string(), cdp);
@@ -494,6 +502,7 @@ impl BrowserProviderRegistry {
         adapters.insert(chatgpt.kind().to_string(), chatgpt);
         adapters.insert(qwen.kind().to_string(), qwen);
         adapters.insert(deepseek.kind().to_string(), deepseek);
+        adapters.insert(mimo.kind().to_string(), mimo);
 
         let mut direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> =
             BTreeMap::new();
@@ -501,6 +510,7 @@ impl BrowserProviderRegistry {
         direct_adapters.insert("browser-chatgpt".into(), chatgpt_http);
         direct_adapters.insert("browser-qwen".into(), qwen_http);
         direct_adapters.insert("browser-deepseek".into(), deepseek_http);
+        direct_adapters.insert("browser-mimo".into(), mimo_http);
         Ok(Self {
             config: Arc::new(StdRwLock::new(config)),
             adapters,
@@ -609,7 +619,9 @@ impl BrowserProviderRegistry {
         let desired_policy = match binding.transport_mode {
             BrowserTransportMode::BrowserOnly => BrowserTransportPolicy::BrowserOnly,
             BrowserTransportMode::HttpPreferred => BrowserTransportPolicy::BrowserlessPreferred,
-            BrowserTransportMode::Auto if browserless.modes.contains(&BrowserTransportMode::Auto) => {
+            BrowserTransportMode::Auto
+                if browserless.modes.contains(&BrowserTransportMode::Auto) =>
+            {
                 BrowserTransportPolicy::BrowserlessPreferred
             }
             BrowserTransportMode::Auto => BrowserTransportPolicy::BrowserOnly,
@@ -638,52 +650,61 @@ impl BrowserProviderRegistry {
                 .map(str::to_string)
         });
         let last = self.last_transport_execution(account_id).await;
-        let (effective_transport, effective_adapter_id, browser_fallback, effective_recorded_at, effective_reason) =
-            match last {
-                Some(execution) if execution.browser_fallback => (
-                    "browser-fallback".to_string(),
-                    Some(execution.adapter_id),
-                    true,
-                    Some(execution.recorded_at),
-                    "last request used browser fallback".to_string(),
-                ),
-                Some(execution) if execution.transport == "direct-http" => (
-                    "direct-http".to_string(),
-                    Some(execution.adapter_id),
-                    false,
-                    Some(execution.recorded_at),
-                    "last request used direct transport".to_string(),
-                ),
-                Some(execution) if matches!(execution.transport.as_str(), "browser-cdp" | "browser-http") => (
+        let (
+            effective_transport,
+            effective_adapter_id,
+            browser_fallback,
+            effective_recorded_at,
+            effective_reason,
+        ) = match last {
+            Some(execution) if execution.browser_fallback => (
+                "browser-fallback".to_string(),
+                Some(execution.adapter_id),
+                true,
+                Some(execution.recorded_at),
+                "last request used browser fallback".to_string(),
+            ),
+            Some(execution) if execution.transport == "direct-http" => (
+                "direct-http".to_string(),
+                Some(execution.adapter_id),
+                false,
+                Some(execution.recorded_at),
+                "last request used direct transport".to_string(),
+            ),
+            Some(execution)
+                if matches!(execution.transport.as_str(), "browser-cdp" | "browser-http") =>
+            {
+                (
                     "browser".to_string(),
                     Some(execution.adapter_id),
                     false,
                     Some(execution.recorded_at),
                     "last request used browser transport".to_string(),
-                ),
-                Some(execution) => (
-                    execution.transport,
-                    Some(execution.adapter_id),
-                    execution.browser_fallback,
-                    Some(execution.recorded_at),
-                    "last request transport was recorded by the adapter".to_string(),
-                ),
-                None if direct_ready_adapter_id.is_some() => (
-                    "direct-http".to_string(),
-                    direct_ready_adapter_id,
-                    false,
-                    None,
-                    "direct adapter is ready; no request has executed since startup or policy change"
-                        .to_string(),
-                ),
-                None => (
-                    "unavailable".to_string(),
-                    None,
-                    false,
-                    None,
-                    "no transport execution recorded since startup or policy change".to_string(),
-                ),
-            };
+                )
+            }
+            Some(execution) => (
+                execution.transport,
+                Some(execution.adapter_id),
+                execution.browser_fallback,
+                Some(execution.recorded_at),
+                "last request transport was recorded by the adapter".to_string(),
+            ),
+            None if direct_ready_adapter_id.is_some() => (
+                "direct-http".to_string(),
+                direct_ready_adapter_id,
+                false,
+                None,
+                "direct adapter is ready; no request has executed since startup or policy change"
+                    .to_string(),
+            ),
+            None => (
+                "unavailable".to_string(),
+                None,
+                false,
+                None,
+                "no transport execution recorded since startup or policy change".to_string(),
+            ),
+        };
         Ok(BrowserAccountTransportState {
             account_id: account_id.to_string(),
             provider_kind: provider_kind.to_string(),
@@ -703,10 +724,7 @@ impl BrowserProviderRegistry {
         self.last_transport.write().await.remove(account_id);
     }
 
-    pub fn browserless_idle_session_ids(
-        &self,
-        app_config: &AppConfig,
-    ) -> BTreeSet<String> {
+    pub fn browserless_idle_session_ids(&self, app_config: &AppConfig) -> BTreeSet<String> {
         let provider_config = self.config_snapshot();
         let mut session_readiness = BTreeMap::<String, bool>::new();
 
@@ -774,11 +792,7 @@ impl BrowserProviderRegistry {
         })
     }
 
-     pub fn account_supports_model_discovery(
-        &self,
-        provider_kind: &str,
-        account_id: &str,
-    ) -> bool {
+    pub fn account_supports_model_discovery(&self, provider_kind: &str, account_id: &str) -> bool {
         let config = self.config_snapshot();
         let Some(binding) = config.bindings.get(account_id) else {
             return false;
@@ -840,11 +854,7 @@ impl BrowserProviderRegistry {
             .remove(account_id);
     }
 
-    fn remember_discovered_models(
-        &self,
-        account_id: &str,
-        models: &[BrowserDiscoveredModel],
-    ) {
+    fn remember_discovered_models(&self, account_id: &str, models: &[BrowserDiscoveredModel]) {
         let mut guard = self
             .discovered_models
             .write()
@@ -893,8 +903,7 @@ impl BrowserProviderRegistry {
     }
 
     fn auth_material_available(&self, session_id: &str) -> bool {
-        browser_auth_runtime::get()
-            .is_some_and(|vault| vault.contains(session_id))
+        browser_auth_runtime::get().is_some_and(|vault| vault.contains(session_id))
     }
 
     fn direct_adapter(
@@ -990,8 +999,8 @@ impl BrowserProviderRegistry {
             );
         }
         let direct_adapter = self.direct_adapter(provider_kind, &binding).cloned();
-        let direct_snapshot_ready = direct_adapter.is_some()
-            && self.auth_material_available(&binding.session);
+        let direct_snapshot_ready =
+            direct_adapter.is_some() && self.auth_material_available(&binding.session);
         let auth_snapshot_ready = (provider_kind == "browser-http"
             && self.auth_material_available(&binding.session))
             || direct_snapshot_ready;
@@ -1058,10 +1067,7 @@ impl BrowserProviderRegistry {
                 .await
         };
 
-        if diagnostics.status == "ready"
-            && session.status != "ready"
-            && !auth_snapshot_ready
-        {
+        if diagnostics.status == "ready" && session.status != "ready" && !auth_snapshot_ready {
             if let Ok(recovered) = store.mark_ready(&binding.session).await {
                 session_marker = recovered.updated_at;
             }
@@ -1074,7 +1080,8 @@ impl BrowserProviderRegistry {
             }
         }
 
-        self.cache_session_diagnostics(diagnostics, session_marker).await
+        self.cache_session_diagnostics(diagnostics, session_marker)
+            .await
     }
 
     async fn cache_diagnostics(
@@ -1229,9 +1236,11 @@ impl BrowserProviderRegistry {
                 }),
             )
             .await
-            .map_err(|error| BrowserProviderError::Transport(format!(
-                "failed to mark provider state unsynced before browser fallback: {error}"
-            )))
+            .map_err(|error| {
+                BrowserProviderError::Transport(format!(
+                    "failed to mark provider state unsynced before browser fallback: {error}"
+                ))
+            })
     }
 
     pub async fn mark_degraded(
@@ -1345,7 +1354,8 @@ impl BrowserProviderRegistry {
             // discovered-model allow-list is intentionally in-memory. Rehydrate that
             // allow-list through the direct, non-generating discovery RPC before
             // rejecting a physical model selected from the persisted catalog.
-            self.discover_models(&provider.kind, &account.id, false).await?;
+            self.discover_models(&provider.kind, &account.id, false)
+                .await?;
         }
         if !self.model_allowed(&account.id, &route.model) {
             return Err(BrowserProviderError::ModelUnavailable {
@@ -1376,14 +1386,14 @@ impl BrowserProviderRegistry {
                 session_id: binding.session.clone(),
             });
         };
-        let mut session = store
-            .session(&binding.session)
-            .await
-            .map_err(|_| BrowserProviderError::SessionUnavailable {
+        let mut session = store.session(&binding.session).await.map_err(|_| {
+            BrowserProviderError::SessionUnavailable {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
-            })?;
-        let attachment_browser_was_live = if requires_browser_attachment && browser_adapter.is_cdp() {
+            }
+        })?;
+        let attachment_browser_was_live = if requires_browser_attachment && browser_adapter.is_cdp()
+        {
             self.cdp_session_live(&binding.session).await
         } else {
             false
@@ -1394,23 +1404,19 @@ impl BrowserProviderRegistry {
             && !attachment_browser_was_live
         {
             let _ = self.ensure_cdp_session_ready(&binding.session).await;
-            session = store
-                .session(&binding.session)
-                .await
-                .map_err(|_| BrowserProviderError::SessionUnavailable {
+            session = store.session(&binding.session).await.map_err(|_| {
+                BrowserProviderError::SessionUnavailable {
                     account_id: account.id.clone(),
                     session_id: binding.session.clone(),
-                })?;
+                }
+            })?;
         }
 
         let direct_adapter = self.direct_adapter(&provider.kind, &binding).cloned();
-        let direct_snapshot_ready = direct_adapter
-            .as_ref()
-            .is_some_and(|adapter| {
-                (!requires_image || adapter.supports_image_input())
-                    && (!requires_file || adapter.supports_file_input())
-            })
-            && self.auth_material_available(&binding.session);
+        let direct_snapshot_ready = direct_adapter.as_ref().is_some_and(|adapter| {
+            (!requires_image || adapter.supports_image_input())
+                && (!requires_file || adapter.supports_file_input())
+        }) && self.auth_material_available(&binding.session);
         let auth_snapshot_ready = (provider.kind == "browser-http"
             && self.auth_material_available(&binding.session))
             || direct_snapshot_ready;
@@ -1433,16 +1439,14 @@ impl BrowserProviderRegistry {
         };
 
         let attachment_forced_browser_fallback = direct_adapter.is_some()
-            && (
-                (requires_image
-                    && !direct_adapter
-                        .as_ref()
-                        .is_some_and(|adapter| adapter.supports_image_input()))
+            && ((requires_image
+                && !direct_adapter
+                    .as_ref()
+                    .is_some_and(|adapter| adapter.supports_image_input()))
                 || (requires_file
                     && !direct_adapter
                         .as_ref()
-                        .is_some_and(|adapter| adapter.supports_file_input()))
-            );
+                        .is_some_and(|adapter| adapter.supports_file_input())));
         let attachment_browser_is_ephemeral = attachment_forced_browser_fallback
             && !attachment_browser_was_live
             && !matches!(binding.transport_mode, BrowserTransportMode::BrowserOnly);
@@ -1470,8 +1474,8 @@ impl BrowserProviderRegistry {
                         browser_adapter.is_cdp(),
                     )
                 });
-            let browser_was_live = safe_fallback_candidate
-                && self.cdp_session_live(&binding.session).await;
+            let browser_was_live =
+                safe_fallback_candidate && self.cdp_session_live(&binding.session).await;
             let safe_browser_fallback = if safe_fallback_candidate {
                 self.ensure_cdp_session_ready(&binding.session).await
             } else {
@@ -1492,10 +1496,9 @@ impl BrowserProviderRegistry {
                         fallback_result
                     } else {
                         match fallback_result {
-                            Ok(response) => wrap_response_with_browser_stop(
-                                response,
-                                binding.session.clone(),
-                            ),
+                            Ok(response) => {
+                                wrap_response_with_browser_stop(response, binding.session.clone())
+                            }
                             Err(error) => {
                                 stop_browser_runtime_soon(binding.session.clone());
                                 Err(error)
@@ -1510,10 +1513,9 @@ impl BrowserProviderRegistry {
             let browser_result = browser_adapter.execute_chat(adapter_request).await;
             if attachment_browser_is_ephemeral {
                 match browser_result {
-                    Ok(response) => wrap_response_with_browser_stop(
-                        response,
-                        binding.session.clone(),
-                    ),
+                    Ok(response) => {
+                        wrap_response_with_browser_stop(response, binding.session.clone())
+                    }
                     Err(error) => {
                         stop_browser_runtime_soon(binding.session.clone());
                         Err(error)
@@ -1580,7 +1582,6 @@ impl BrowserProviderRegistry {
         result
     }
 }
-
 
 struct BrowserFallbackStopGuard {
     session_id: Option<String>,
@@ -1923,6 +1924,19 @@ impl CdpBrowserAdapter {
         })
     }
 
+    fn mimo() -> Result<Self, BrowserProviderError> {
+        Self::new(CdpAdapterSpec {
+            kind: "browser-mimo",
+            adapter_id: "mimo-web",
+            provider: "mimo",
+            builtin_script: Some(MIMO_WEB_ADAPTER),
+            default_target_url_prefix: Some("https://aistudio.xiaomimimo.com/"),
+            new_chat_url: Some("https://aistudio.xiaomimimo.com/#/c"),
+            ephemeral_default: true,
+            native_conversation_affinity: false,
+        })
+    }
+
     fn new(spec: CdpAdapterSpec) -> Result<Self, BrowserProviderError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(2))
@@ -1959,7 +1973,9 @@ impl CdpBrowserAdapter {
     }
 
     fn use_ephemeral_chat(&self, binding: &BrowserAccountBinding) -> bool {
-        binding.ephemeral_chat.unwrap_or(self.spec.ephemeral_default)
+        binding
+            .ephemeral_chat
+            .unwrap_or(self.spec.ephemeral_default)
     }
 
     fn model_label(&self, binding: &BrowserAccountBinding, model: &str) -> Option<String> {
@@ -2111,9 +2127,10 @@ impl CdpBrowserAdapter {
         conversation_url: &str,
     ) -> Result<Option<CdpTarget>, BrowserProviderError> {
         let targets = self.targets(profile_dir).await?;
-        for target in targets.into_iter().filter(|target| {
-            target.kind == "page" && !target.websocket_debugger_url.is_empty()
-        }) {
+        for target in targets
+            .into_iter()
+            .filter(|target| target.kind == "page" && !target.websocket_debugger_url.is_empty())
+        {
             if same_conversation_url(&target.url, conversation_url) {
                 return Ok(Some(target));
             }
@@ -2182,7 +2199,7 @@ impl CdpBrowserAdapter {
                     "persisted browser provider native conversation affinity"
                 );
                 true
-            },
+            }
             Err(error) => {
                 warn!(
                     %error,
@@ -2237,7 +2254,10 @@ impl CdpBrowserAdapter {
 
                 if let Ok(Ok(Value::String(host))) = runtime_host {
                     last_runtime_host = host.clone();
-                    if expected_host.as_deref().is_none_or(|expected| host == expected) {
+                    if expected_host
+                        .as_deref()
+                        .is_none_or(|expected| host == expected)
+                    {
                         return Ok(current);
                     }
                 }
@@ -2300,14 +2320,13 @@ impl CdpBrowserAdapter {
     ) -> Result<CdpTarget, BrowserProviderError> {
         let Some(prefix) = prefix else {
             let targets = self.targets(profile_dir).await?;
-            return self
-                .select_target(&targets, None)
-                .cloned()
-                .ok_or_else(|| BrowserProviderError::AdapterIncompatible {
+            return self.select_target(&targets, None).cloned().ok_or_else(|| {
+                BrowserProviderError::AdapterIncompatible {
                     account_id: "<unknown>".into(),
                     code: "target_not_found".into(),
                     message: "No browser page target is available for adapter execution".into(),
-                });
+                }
+            });
         };
 
         let expected_host = Url::parse(prefix)
@@ -2338,7 +2357,10 @@ impl CdpBrowserAdapter {
 
                 if let Ok(Ok(Value::String(host))) = runtime_host {
                     last_runtime_host = host.clone();
-                    if expected_host.as_deref().is_none_or(|expected| host == expected) {
+                    if expected_host
+                        .as_deref()
+                        .is_none_or(|expected| host == expected)
+                    {
                         return Ok(target);
                     }
                 }
@@ -2446,11 +2468,8 @@ impl CdpBrowserAdapter {
             }
         };
         if let Some(error) = envelope.error {
-            let result = contract_error_to_provider_error(
-                &request.account.id,
-                &request.route.model,
-                error,
-            );
+            let result =
+                contract_error_to_provider_error(&request.account.id, &request.route.model, error);
             if ephemeral {
                 self.close_target(&request.profile_dir, &target.id).await;
             }
@@ -2499,9 +2518,9 @@ impl CdpBrowserAdapter {
             account = %request.account.id,
             "evaluating streaming native conversation affinity"
         );
-        let native_affinity_request =
-            (request.thread_id.is_some() && self.supports_native_conversation_affinity())
-                .then(|| request.clone());
+        let native_affinity_request = (request.thread_id.is_some()
+            && self.supports_native_conversation_affinity())
+        .then(|| request.clone());
         let status = match reqwest::StatusCode::from_u16(start.status) {
             Ok(status) => status,
             Err(error) => {
@@ -2517,12 +2536,10 @@ impl CdpBrowserAdapter {
         let account_id = request.account.id.clone();
         let stream_id = start.stream_id.clone();
         let profile_dir = request.profile_dir.clone();
-        let first_byte_timeout = Duration::from_millis(
-            request.binding.first_byte_timeout_ms.unwrap_or(30_000),
-        );
-        let idle_stream_timeout = Duration::from_millis(
-            request.binding.idle_stream_timeout_ms.unwrap_or(30_000),
-        );
+        let first_byte_timeout =
+            Duration::from_millis(request.binding.first_byte_timeout_ms.unwrap_or(30_000));
+        let idle_stream_timeout =
+            Duration::from_millis(request.binding.idle_stream_timeout_ms.unwrap_or(30_000));
         let stream_target = target.clone();
         let stream_native_request = native_affinity_request.clone();
         let stream_provider_id = request.provider.id.clone();
@@ -2736,14 +2753,16 @@ impl CdpBrowserAdapter {
             .as_ref()
             .map(|error| error.message.clone())
             .or_else(|| {
-                probe.as_ref().map(|probe| match (
-                    probe.code.trim().is_empty(),
-                    probe.message.trim().is_empty(),
-                ) {
-                    (false, false) => format!("{}: {}", probe.code, probe.message),
-                    (false, true) => probe.code.clone(),
-                    (true, false) => probe.message.clone(),
-                    (true, true) => String::new(),
+                probe.as_ref().map(|probe| {
+                    match (
+                        probe.code.trim().is_empty(),
+                        probe.message.trim().is_empty(),
+                    ) {
+                        (false, false) => format!("{}: {}", probe.code, probe.message),
+                        (false, true) => probe.code.clone(),
+                        (true, false) => probe.message.clone(),
+                        (true, true) => String::new(),
+                    }
                 })
             })
             .filter(|message| !message.trim().is_empty())
@@ -2931,7 +2950,8 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
             .as_ref()
             .map(|conversation| conversation.conversation_url.as_str());
         let ephemeral = thread_affinity.is_none() && self.use_ephemeral_chat(&request.binding);
-        let start_new_conversation = persistent_url.is_none() && (thread_affinity.is_some() || ephemeral);
+        let start_new_conversation =
+            persistent_url.is_none() && (thread_affinity.is_some() || ephemeral);
         if let Some(context) = context.as_object_mut() {
             context.insert(
                 "start_new_conversation".into(),
@@ -2964,7 +2984,11 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
             } else {
                 let opened = self.open_target_url(&request.profile_dir, url).await?;
                 let navigation_timeout = Duration::from_millis(
-                    request.binding.probe_timeout_ms.unwrap_or(8_000).max(15_000),
+                    request
+                        .binding
+                        .probe_timeout_ms
+                        .unwrap_or(8_000)
+                        .max(15_000),
                 );
                 match self
                     .wait_for_target_navigation(
@@ -2993,7 +3017,11 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         } else if thread_affinity.is_some() || ephemeral {
             let opened = self.open_ephemeral_target(&request.profile_dir).await?;
             let navigation_timeout = Duration::from_millis(
-                request.binding.probe_timeout_ms.unwrap_or(8_000).max(15_000),
+                request
+                    .binding
+                    .probe_timeout_ms
+                    .unwrap_or(8_000)
+                    .max(15_000),
             );
             match self
                 .wait_for_target_navigation(
@@ -3020,7 +3048,11 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
             }
         } else {
             let runtime_target_timeout = Duration::from_millis(
-                request.binding.probe_timeout_ms.unwrap_or(8_000).max(10_000),
+                request
+                    .binding
+                    .probe_timeout_ms
+                    .unwrap_or(8_000)
+                    .max(10_000),
             );
             match self
                 .select_runtime_ready_target(
@@ -3081,18 +3113,22 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
 
         let envelope = result?;
         if let Some(error) = envelope.error {
-            return contract_error_to_provider_error(&request.account.id, &request.route.model, error);
+            return contract_error_to_provider_error(
+                &request.account.id,
+                &request.route.model,
+                error,
+            );
         }
-        let result = envelope.result.ok_or_else(|| BrowserProviderError::AdapterIncompatible {
-            account_id: request.account.id.clone(),
-            code: "missing_result".into(),
-            message: "adapter contract did not return a chat result".into(),
-        })?;
+        let result = envelope
+            .result
+            .ok_or_else(|| BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "missing_result".into(),
+                message: "adapter contract did not return a chat result".into(),
+            })?;
         synthetic_response(result)
     }
 }
-
-
 
 fn incremental_browser_body(body: &Value, unsynced_messages: &[Value]) -> Value {
     let mut incremental = body.clone();
@@ -3128,9 +3164,15 @@ fn target_url_matches_prefix(candidate: &str, prefix: &str) -> bool {
     if prefix.host_str() == Some("gemini.google.com") {
         let segments = candidate
             .path_segments()
-            .map(|segments| segments.filter(|segment| !segment.is_empty()).collect::<Vec<_>>())
+            .map(|segments| {
+                segments
+                    .filter(|segment| !segment.is_empty())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
-        return segments.iter().any(|segment| *segment == "app" || *segment == "gem");
+        return segments
+            .iter()
+            .any(|segment| *segment == "app" || *segment == "gem");
     }
     false
 }
@@ -3148,7 +3190,11 @@ fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
 
     let segments = url
         .path_segments()
-        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect::<Vec<_>>())
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
 
     if base.host_str() == Some("chatgpt.com") {
@@ -3168,11 +3214,15 @@ fn is_native_conversation_url(new_chat_url: &str, candidate: &str) -> bool {
 
     let app_index = segments.iter().position(|segment| *segment == "app");
     if let Some(index) = app_index {
-        return segments.get(index + 1).is_some_and(|value| !value.is_empty());
+        return segments
+            .get(index + 1)
+            .is_some_and(|value| !value.is_empty());
     }
 
     if let Some(index) = segments.iter().position(|segment| *segment == "gem") {
-        return segments.get(index + 2).is_some_and(|value| !value.is_empty());
+        return segments
+            .get(index + 2)
+            .is_some_and(|value| !value.is_empty());
     }
 
     false
@@ -3250,6 +3300,7 @@ fn effective_target_url_prefix(
             "browser-chatgpt" => Some("https://chatgpt.com/".into()),
             "browser-qwen" => Some("https://chat.qwen.ai/".into()),
             "browser-deepseek" => Some("https://chat.deepseek.com/".into()),
+            "browser-mimo" => Some("https://aistudio.xiaomimimo.com/".into()),
             _ => None,
         })
 }
@@ -3462,10 +3513,7 @@ return {{ meta: __meta, error: {{ code: "invalid_stream_operation", message: "un
     ))
 }
 
-fn browser_stream_poll_advanced(
-    poll: &CdpStreamPoll,
-    last_progress_seq: &mut Option<u64>,
-) -> bool {
+fn browser_stream_poll_advanced(poll: &CdpStreamPoll, last_progress_seq: &mut Option<u64>) -> bool {
     let Some(progress_seq) = poll.progress_seq else {
         return false;
     };
@@ -3593,11 +3641,7 @@ fn contract_error_to_provider_error(
     }
 }
 
-
-fn direct_failure_can_open_browser(
-    provider_kind: &str,
-    mode: BrowserTransportMode,
-) -> bool {
+fn direct_failure_can_open_browser(provider_kind: &str, mode: BrowserTransportMode) -> bool {
     provider_kind != "browser-chatgpt" || matches!(mode, BrowserTransportMode::Auto)
 }
 
@@ -3689,7 +3733,8 @@ async fn evaluate_cdp(
 
     let value = timeout(Duration::from_secs(CDP_EXECUTION_TIMEOUT_SECONDS), async {
         while let Some(message) = socket.next().await {
-            let message = message.map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+            let message =
+                message.map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
             match message {
                 Message::Text(text) => {
                     let payload: Value = serde_json::from_str(text.as_ref())
@@ -3814,13 +3859,27 @@ mod tests {
         };
         let transport = BrowserProviderError::Transport("post-submit stream failed".into());
 
-        assert!(direct_error_allows_browser_fallback(&challenge, false, true));
+        assert!(direct_error_allows_browser_fallback(
+            &challenge, false, true
+        ));
         assert!(direct_error_allows_browser_fallback(&login, false, true));
-        assert!(!direct_error_allows_browser_fallback(&unsynced, false, true));
-        assert!(!direct_error_allows_browser_fallback(&unavailable, false, true));
-        assert!(!direct_error_allows_browser_fallback(&transport, false, true));
-        assert!(!direct_error_allows_browser_fallback(&challenge, true, true));
-        assert!(!direct_error_allows_browser_fallback(&challenge, false, false));
+        assert!(!direct_error_allows_browser_fallback(
+            &unsynced, false, true
+        ));
+        assert!(!direct_error_allows_browser_fallback(
+            &unavailable,
+            false,
+            true
+        ));
+        assert!(!direct_error_allows_browser_fallback(
+            &transport, false, true
+        ));
+        assert!(!direct_error_allows_browser_fallback(
+            &challenge, true, true
+        ));
+        assert!(!direct_error_allows_browser_fallback(
+            &challenge, false, false
+        ));
     }
 
     #[test]
@@ -3841,7 +3900,9 @@ mod tests {
         assert!(BrowserProviderRegistry::is_browser_kind("browser-chatgpt"));
         assert!(BrowserProviderRegistry::is_browser_kind("browser-qwen"));
         assert!(BrowserProviderRegistry::is_browser_kind("browser-deepseek"));
-        assert!(!BrowserProviderRegistry::is_browser_kind("openai-compatible"));
+        assert!(!BrowserProviderRegistry::is_browser_kind(
+            "openai-compatible"
+        ));
     }
 
     #[test]
@@ -3885,7 +3946,10 @@ mod tests {
         let registry = BrowserProviderRegistry::new(BrowserProviderConfig::default()).unwrap();
         let capabilities = registry.transport_capabilities("browser-deepseek");
         assert!(capabilities.supported);
-        assert_eq!(capabilities.recommended_mode, Some(BrowserTransportMode::Auto));
+        assert_eq!(
+            capabilities.recommended_mode,
+            Some(BrowserTransportMode::Auto)
+        );
         assert!(capabilities.modes.contains(&BrowserTransportMode::Auto));
         assert!(capabilities.supports_direct_model_discovery);
         assert!(capabilities.supports_native_conversation);
@@ -3900,7 +3964,9 @@ mod tests {
             "deepseek-web-http"
         );
         binding.transport_mode = BrowserTransportMode::BrowserOnly;
-        assert!(registry.direct_adapter("browser-deepseek", &binding).is_none());
+        assert!(registry
+            .direct_adapter("browser-deepseek", &binding)
+            .is_none());
     }
 
     #[test]
@@ -3967,7 +4033,10 @@ mod tests {
         assert_eq!(qwen.kind(), "browser-qwen");
         assert_eq!(qwen.adapter_id(), "qwen-web");
         assert!(qwen.spec.ephemeral_default);
-        assert_eq!(qwen.spec.new_chat_url, Some("https://chat.qwen.ai/c/new-chat"));
+        assert_eq!(
+            qwen.spec.new_chat_url,
+            Some("https://chat.qwen.ai/c/new-chat")
+        );
         assert_eq!(deepseek.kind(), "browser-deepseek");
         assert_eq!(deepseek.adapter_id(), "deepseek-web");
         assert!(deepseek.spec.ephemeral_default);
@@ -3976,7 +4045,10 @@ mod tests {
             deepseek.spec.default_target_url_prefix,
             Some("https://chat.deepseek.com/")
         );
-        assert_eq!(deepseek.spec.new_chat_url, Some("https://chat.deepseek.com/"));
+        assert_eq!(
+            deepseek.spec.new_chat_url,
+            Some("https://chat.deepseek.com/")
+        );
     }
 
     #[test]
@@ -4129,7 +4201,7 @@ mod tests {
         });
         let missed = vec![
             json!({"role":"user","content":"missed user"}),
-            json!({"role":"assistant","content":"missed assistant"})
+            json!({"role":"assistant","content":"missed assistant"}),
         ];
         let delta = incremental_browser_body(&body, &missed);
         assert_eq!(
@@ -4165,7 +4237,10 @@ mod tests {
         });
         let delta = incremental_browser_body(&body, &[]);
         assert_eq!(delta["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(delta["messages"][0]["content"], "follow up without reattaching");
+        assert_eq!(
+            delta["messages"][0]["content"],
+            "follow up without reattaching"
+        );
         assert!(!file_attachments::request_has_file(&delta));
     }
 
@@ -4251,8 +4326,12 @@ mod tests {
         .unwrap();
         assert!(expression.contains("globalThis.__LLMGATEWAY_ADAPTER__ ="));
         assert!(expression.contains("streamPoll"));
-        let injected = expression.find("globalThis.__LLMGATEWAY_ADAPTER__ =").unwrap();
-        let read = expression.find("const __adapter = globalThis.__LLMGATEWAY_ADAPTER__;").unwrap();
+        let injected = expression
+            .find("globalThis.__LLMGATEWAY_ADAPTER__ =")
+            .unwrap();
+        let read = expression
+            .find("const __adapter = globalThis.__LLMGATEWAY_ADAPTER__;")
+            .unwrap();
         assert!(injected < read);
     }
 
@@ -4343,10 +4422,7 @@ mod tests {
 
         let ready_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ready_address = ready_listener.local_addr().unwrap();
-        let ready_task = tokio::spawn(serve_runtime_host(
-            ready_listener,
-            "gemini.google.com",
-        ));
+        let ready_task = tokio::spawn(serve_runtime_host(ready_listener, "gemini.google.com"));
 
         let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let http_address = http_listener.local_addr().unwrap();
@@ -4585,7 +4661,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod browser_transport_policy_tests {
     use super::*;
@@ -4691,10 +4766,7 @@ mod browser_transport_policy_tests {
         );
         assert_eq!(
             registry
-                .resolve_transport_policy(
-                    "browser-custom",
-                    BrowserTransportPolicy::BrowserOnly,
-                )
+                .resolve_transport_policy("browser-custom", BrowserTransportPolicy::BrowserOnly,)
                 .unwrap(),
             BrowserTransportMode::BrowserOnly
         );
@@ -4732,8 +4804,11 @@ mod browser_transport_policy_tests {
         let request_snapshot = registry.config_snapshot();
 
         let mut updated = request_snapshot.clone();
-        updated.bindings.get_mut("account-a").unwrap().transport_mode =
-            BrowserTransportMode::HttpPreferred;
+        updated
+            .bindings
+            .get_mut("account-a")
+            .unwrap()
+            .transport_mode = BrowserTransportMode::HttpPreferred;
         registry.reload(updated).unwrap();
 
         assert_eq!(

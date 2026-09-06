@@ -96,7 +96,8 @@ pub fn from_openai_response(openai: &Value, requested_model: &str) -> Value {
                 .get("arguments")
                 .and_then(Value::as_str)
                 .unwrap_or("{}");
-            let input = serde_json::from_str(raw_args).unwrap_or_else(|_| json!({"_raw": raw_args}));
+            let input =
+                serde_json::from_str(raw_args).unwrap_or_else(|_| json!({"_raw": raw_args}));
             content.push(json!({
                 "type": "tool_use",
                 "id": call.get("id").cloned().unwrap_or_else(|| Value::String(format!("toolu_{}", Uuid::new_v4()))),
@@ -349,14 +350,17 @@ fn translate_message(message: &Value, out: &mut Vec<Value>) -> Result<(), String
     let content = message.get("content").unwrap_or(&Value::Null);
 
     if role == "assistant" {
-        let blocks = content.as_array().cloned().unwrap_or_else(|| {
-            vec![json!({"type":"text","text":content.as_str().unwrap_or("")})]
-        });
+        let blocks = content
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![json!({"type":"text","text":content.as_str().unwrap_or("")})]);
         let mut text = String::new();
         let mut tool_calls = Vec::new();
         for block in blocks {
             match block.get("type").and_then(Value::as_str) {
-                Some("text") => text.push_str(block.get("text").and_then(Value::as_str).unwrap_or("")),
+                Some("text") => {
+                    text.push_str(block.get("text").and_then(Value::as_str).unwrap_or(""))
+                }
                 Some("tool_use") => {
                     let args = serde_json::to_string(block.get("input").unwrap_or(&json!({})))
                         .unwrap_or_else(|_| "{}".into());
@@ -394,7 +398,9 @@ fn translate_message(message: &Value, out: &mut Vec<Value>) -> Result<(), String
                 match block.get("type").and_then(Value::as_str) {
                     Some("tool_result") => {
                         if !user_parts.is_empty() {
-                            out.push(json!({"role":"user","content":std::mem::take(&mut user_parts)}));
+                            out.push(
+                                json!({"role":"user","content":std::mem::take(&mut user_parts)}),
+                            );
                         }
                         out.push(json!({
                             "role":"tool",
