@@ -585,7 +585,7 @@ Chi tiết: [docs/agent-native-gateway.md](docs/agent-native-gateway.md).
 
 ### P1-P3 preview trên feature branch
 
-Branch `feat/agent-native-runtime` / issue #92 đang phát triển phần runtime tiếp theo, **chưa ship trên main**:
+Branch `feat/agent-native-runtime` / issue #92 / PR #93 đã **DONE / VERIFIED trên feature branch**, nhưng **chưa ship trên main**:
 
 ```bash
 python3 skills/llmgateway/scripts/llmgateway_agent.py capabilities
