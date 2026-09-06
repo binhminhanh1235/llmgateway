@@ -157,14 +157,40 @@ impl ModelCapabilities {
             "image/jpeg".into(),
             "image/gif".into(),
             "image/webp".into(),
+        ];
+        capabilities
+            .supported_mime_types
+            .extend(Self::file_input_mime_types());
+        capabilities
+    }
+
+    pub fn file_input_mime_types() -> Vec<String> {
+        vec![
             "application/pdf".into(),
             "text/plain".into(),
             "text/markdown".into(),
             "text/csv".into(),
             "application/json".into(),
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
-        ];
-        capabilities
+        ]
+    }
+
+    pub fn with_file_attachment_metadata(
+        mut self,
+        max_attachment_count: usize,
+        max_attachment_size_bytes: usize,
+    ) -> Self {
+        if self.input_modalities.contains(&Modality::File) {
+            self.supported_mime_types
+                .extend(Self::file_input_mime_types());
+            self.supported_mime_types.sort();
+            self.supported_mime_types.dedup();
+            self.max_attachment_count =
+                Some(u32::try_from(max_attachment_count).unwrap_or(u32::MAX));
+            self.max_attachment_size_bytes =
+                Some(u64::try_from(max_attachment_size_bytes).unwrap_or(u64::MAX));
+        }
+        self
     }
 
     pub fn from_legacy_tags(tags: &[String]) -> Self {
@@ -364,6 +390,29 @@ mod tests {
         );
         assert!(structured.streaming);
         assert!(structured.image_generation);
+    }
+
+    #[test]
+    fn file_capabilities_publish_supported_mime_types_and_limits() {
+        let capabilities = ModelCapabilities::from_legacy_tags(&[
+            "chat".into(),
+            "file".into(),
+            "native_file_upload".into(),
+        ])
+        .with_file_attachment_metadata(8, 25 * 1024 * 1024);
+        assert!(capabilities.input_modalities.contains(&Modality::File));
+        assert!(capabilities.native_file_upload);
+        assert!(capabilities
+            .supported_mime_types
+            .contains(&"application/pdf".to_string()));
+        assert!(capabilities
+            .supported_mime_types
+            .contains(&"application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()));
+        assert_eq!(capabilities.max_attachment_count, Some(8));
+        assert_eq!(
+            capabilities.max_attachment_size_bytes,
+            Some(25 * 1024 * 1024)
+        );
     }
 
     #[test]

@@ -744,7 +744,10 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 "llmgateway":{
                     "kind":"virtual",
                     "capabilities":capability_tags,
-                    "multimodal_capabilities":ModelCapabilities::from_legacy_tags(&capability_tags)
+                    "multimodal_capabilities":ModelCapabilities::from_legacy_tags(&capability_tags).with_file_attachment_metadata(
+                        state.artifacts.config().max_files_per_request,
+                        state.artifacts.config().max_file_size_bytes,
+                    )
                 }
             }),
         );
@@ -787,7 +790,11 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             model_capabilities.insert("native_file_upload".into());
         }
         let model_capabilities = model_capabilities.into_iter().collect::<Vec<_>>();
-        let multimodal_capabilities = ModelCapabilities::from_legacy_tags(&model_capabilities);
+        let multimodal_capabilities = ModelCapabilities::from_legacy_tags(&model_capabilities)
+            .with_file_attachment_metadata(
+            state.artifacts.config().max_files_per_request,
+            state.artifacts.config().max_file_size_bytes,
+        );
         data.insert(
             model.id.clone(),
             json!({
@@ -829,7 +836,10 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                     "upstream_model":route.model,
                     "account":route.account,
                     "capabilities":route_capabilities,
-                    "multimodal_capabilities":ModelCapabilities::from_legacy_tags(&route_capabilities)
+                    "multimodal_capabilities":ModelCapabilities::from_legacy_tags(&route_capabilities).with_file_attachment_metadata(
+                        state.artifacts.config().max_files_per_request,
+                        state.artifacts.config().max_file_size_bytes,
+                    )
                 }
             })
         });
@@ -885,7 +895,11 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
                 capabilities.insert("native_file_upload".into());
             }
             let capabilities = capabilities.into_iter().collect::<Vec<_>>();
-            let structured = ModelCapabilities::from_legacy_tags(&capabilities);
+            let structured = ModelCapabilities::from_legacy_tags(&capabilities)
+                .with_file_attachment_metadata(
+                    state.artifacts.config().max_files_per_request,
+                    state.artifacts.config().max_file_size_bytes,
+                );
             json!({
                 "id":model.id,
                 "legacy_capabilities":capabilities,
@@ -943,7 +957,11 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
                 id: provider.id.clone(),
                 transport: provider.transport().to_string(),
                 models: models.into_iter().collect(),
-                capabilities: ModelCapabilities::from_legacy_tags(&tags),
+                capabilities: ModelCapabilities::from_legacy_tags(&tags)
+                    .with_file_attachment_metadata(
+                        state.artifacts.config().max_files_per_request,
+                        state.artifacts.config().max_file_size_bytes,
+                    ),
             })
         })
         .collect::<Vec<_>>();
@@ -957,7 +975,11 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
                 "input":canonical_input_modalities(),
                 "output":canonical_output_modalities()
             },
-            "gateway_execution":ModelCapabilities::attachment_execution(),
+            "gateway_execution":ModelCapabilities::attachment_execution()
+                .with_file_attachment_metadata(
+                    state.artifacts.config().max_files_per_request,
+                    state.artifacts.config().max_file_size_bytes,
+                ),
             "live_attachments":true,
             "artifact_store":{
                 "enabled":true,
