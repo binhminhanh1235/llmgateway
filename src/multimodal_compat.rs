@@ -31,6 +31,7 @@ pub fn normalize_responses_request(
     body: &Value,
 ) -> Result<NormalizedTextRequest, MultimodalError> {
     reject_requested_output_modalities(body)?;
+    reject_responses_unsupported_inputs(body)?;
     let (requested_model, execution) =
         responses::to_openai_request(body).map_err(MultimodalError::InvalidRequest)?;
     normalize_current_execution(execution, requested_model)
@@ -253,6 +254,41 @@ fn modality_from_name(name: &str) -> Option<Modality> {
         "file" => Some(Modality::File),
         "audio" => Some(Modality::Audio),
         _ => None,
+    }
+}
+
+fn reject_responses_unsupported_inputs(body: &Value) -> Result<(), MultimodalError> {
+    let Some(input) = body.get("input") else {
+        return Ok(());
+    };
+    let Some(items) = input.as_array() else {
+        return Ok(());
+    };
+
+    for item in items {
+        if let Some(kind) = item.get("type").and_then(Value::as_str) {
+            reject_unsupported_responses_kind(kind)?;
+        }
+        if let Some(content) = item.get("content").and_then(Value::as_array) {
+            for part in content {
+                if let Some(kind) = part.get("type").and_then(Value::as_str) {
+                    reject_unsupported_responses_kind(kind)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_unsupported_responses_kind(kind: &str) -> Result<(), MultimodalError> {
+    match kind {
+        "file" | "input_file" | "document" => Err(
+            MultimodalError::UnsupportedInputModality(Modality::File),
+        ),
+        "audio" | "input_audio" => Err(
+            MultimodalError::UnsupportedInputModality(Modality::Audio),
+        ),
+        _ => Ok(()),
     }
 }
 
