@@ -366,25 +366,31 @@ Các tracking issue đang mở gồm:
 
 Không ghi các capability này là shipped trên main cho tới khi merge và verification hoàn tất.
 
-## 16. Agent-Native initiative
+## 16. Agent-Native P0
 
-Agent-Native llmgateway đang được triển khai riêng ở issue #90 và branch:
+Agent-Native P0 đã **DONE / VERIFIED / SHIPPED trên `main`**.
 
-`feat/agent-native-skill`
+Tracking:
 
-P0 tập trung vào portable Agent Skill, không thay đổi Router:
+- issue #90: closed completed;
+- PR #91: merged;
+- merge commit: `777c7cf3fa8b9d25a4d49ea46c2e5822e88548d3`;
+- exact-head PR CI #1760 / run `34030566592`: PASS.
 
-- `skills/llmgateway/SKILL.md`;
-- reference playbooks cho API, routing, diagnostics và operations;
-- helper CLI stdlib-only;
+Main hiện có:
+
+- portable `skills/llmgateway/SKILL.md`;
+- API/routing/diagnostics/operations reference playbooks;
+- helper CLI Python stdlib-only;
 - helper chỉ READ + EXECUTE;
 - normal execution ưu tiên scoped client key;
 - admin diagnostics dùng global admin key;
-- model discovery trước, logical model/group trước physical provider model;
-- destructive/mutating actions không phải default skill behavior;
-- deterministic offline helper tests được nối vào CI.
+- client-visible model discovery;
+- logical model/group-first selection;
+- explicit READ / EXECUTE / OPERATE / ADMIN boundary;
+- deterministic offline helper/bundle tests trong CI.
 
-Các bước sau mới xem xét Agent Control API, MCP server và capability-based agent routing. Không mô tả chúng là shipped cho tới khi implementation/verification tương ứng hoàn tất.
+P1 Agent Control API, P2 MCP server và P3 capability-based Agent Routing vẫn là **planned**, chưa được mô tả là shipped.
 
 ## 17. Open work đáng chú ý
 
@@ -394,7 +400,6 @@ Tại thời điểm audit repository còn các tracking/PR mở liên quan tớ
 - ChatGPT model picker/Sentinel recovery
 - Xiaomi MiMo tracking
 - multimodal initiative
-- Agent-Native llmgateway issue #90
 
 Trạng thái issue/PR là tracking signal, không luôn đồng nghĩa code chưa tồn tại. Một số thay đổi có thể đã cherry-pick/merge theo commit khác trong khi PR cũ vẫn còn mở.
 
