@@ -36,6 +36,7 @@ jobs:
       - run: bash -n scripts/live-browserless-acceptance.sh
       - run: bash -n scripts/live-gemini-model-selection.sh
       - run: bash -n scripts/live-vision-acceptance.sh
+      - run: bash -n scripts/live-file-acceptance.sh
       - run: bash -n scripts/smoke-file-attachments.sh
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
       - run: bash -n scripts/smoke-gemini-recovery.sh
