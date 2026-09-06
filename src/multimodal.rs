@@ -173,9 +173,13 @@ impl ModelCapabilities {
         capabilities.audio_transcription = true;
         capabilities.image_generation = true;
         capabilities.image_editing = true;
-        capabilities
-            .supported_mime_types
-            .extend(["audio/wav".into(), "audio/mpeg".into(), "audio/webm".into(), "audio/ogg".into(), "audio/mp4".into()]);
+        capabilities.supported_mime_types.extend([
+            "audio/wav".into(),
+            "audio/mpeg".into(),
+            "audio/webm".into(),
+            "audio/ogg".into(),
+            "audio/mp4".into(),
+        ]);
         capabilities.supported_mime_types.sort();
         capabilities.supported_mime_types.dedup();
         capabilities
