@@ -49,11 +49,20 @@ with open(sys.argv[2],"w",encoding="utf-8") as f: json.dump(body,f)
 PY
 
 echo "[p3-file-smoke] execute extraction fallback"
-TEXT_REPLY=$(curl -fsS -X POST "$BASE_URL/v1/chat/completions" \
+TEXT_REPLY=$(curl -fsS -D "$TMP_DIR/text-fallback.headers" -X POST "$BASE_URL/v1/chat/completions" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
   --data-binary "@$TMP_DIR/text-fallback.json")
 printf '%s' "$TEXT_REPLY" | grep -q 'fake file reply messages=1 extracted_file=yes'
+TEXT_REQUEST_ID=$(awk 'BEGIN{IGNORECASE=1} /^x-llmgateway-request-id:/ {gsub("\\r", "", $2); print $2}' "$TMP_DIR/text-fallback.headers")
+test -n "$TEXT_REQUEST_ID"
+TEXT_TRACE=$(curl -fsS "$BASE_URL/_llmgateway/executions/$TEXT_REQUEST_ID" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$TEXT_TRACE" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["attachment_strategy"] == "extracted_fallback", x
+'
 
 curl -fsS -X DELETE "$BASE_URL/v1/files/$TEXT_ID" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" | grep -q '"deleted":true'
@@ -94,11 +103,20 @@ for path,body in [(sys.argv[2],responses),(sys.argv[3],text_only)]:
 PY
 
 echo "[p3-file-smoke] execute native PDF via Responses"
-PDF_RESPONSE=$(curl -fsS -X POST "$BASE_URL/v1/responses" \
+PDF_RESPONSE=$(curl -fsS -D "$TMP_DIR/pdf-response.headers" -X POST "$BASE_URL/v1/responses" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
   --data-binary "@$TMP_DIR/pdf-responses.json")
 printf '%s' "$PDF_RESPONSE" | grep -q 'fake file reply messages=1 native_file=yes'
+PDF_REQUEST_ID=$(awk 'BEGIN{IGNORECASE=1} /^x-llmgateway-request-id:/ {gsub("\\r", "", $2); print $2}' "$TMP_DIR/pdf-response.headers")
+test -n "$PDF_REQUEST_ID"
+PDF_TRACE=$(curl -fsS "$BASE_URL/_llmgateway/executions/$PDF_REQUEST_ID" \
+  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$PDF_TRACE" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["attachment_strategy"] == "native_upload", x
+'
 printf '%s' "$PDF_RESPONSE" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
