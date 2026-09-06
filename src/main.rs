@@ -1,4 +1,5 @@
 mod account_intelligence_api;
+mod agent_control_api;
 mod admin;
 mod admin_api;
 mod api;
@@ -53,6 +54,7 @@ mod ui;
 mod usage_api;
 
 use account_intelligence_api::account_intelligence;
+use agent_control_api::{agent_capabilities, agent_diagnostics, agent_resolve};
 use admin_api::{set_account, set_account_model, set_model};
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
@@ -397,6 +399,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(account_intelligence),
         )
         .route("/_llmgateway/clients", get(list_client_policies))
+        .route("/_llmgateway/agent/capabilities", get(agent_capabilities))
+        .route("/_llmgateway/agent/resolve", post(agent_resolve))
+        .route("/_llmgateway/agent/diagnostics", post(agent_diagnostics))
         .route("/_llmgateway/routes/explain", post(explain_routes))
         .route(
             "/_llmgateway/model-groups",
