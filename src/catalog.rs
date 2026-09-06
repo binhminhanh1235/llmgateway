@@ -376,9 +376,12 @@ impl ModelCatalog {
             let row = sqlx::query(
                 "SELECT
                     COUNT(*) AS model_count,
-                    COALESCE(SUM(CASE WHEN availability = 'available' AND enabled = 1 THEN 1 ELSE 0 END), 0)
-                        AS available_model_count
-                 FROM account_models WHERE account_id = ?",
+                    COALESCE(SUM(CASE
+                        WHEN am.availability = 'available' AND am.enabled = 1 AND m.enabled = 1
+                        THEN 1 ELSE 0 END), 0) AS available_model_count
+                 FROM account_models am
+                 JOIN models m ON m.canonical_id = am.canonical_model_id
+                 WHERE am.account_id = ?",
             )
             .bind(&account.id)
             .fetch_one(&self.pool)
