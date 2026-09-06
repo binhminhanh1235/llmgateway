@@ -1557,11 +1557,11 @@ fn push_browser(
     candidates: &[&str],
     windows_suffixes: &[&str],
 ) {
-    let mut executable = candidates.iter().find_map(|candidate| find_executable(candidate));
+    let path_candidate = candidates.iter().find_map(|candidate| find_executable(candidate));
 
     #[cfg(target_os = "windows")]
-    if executable.is_none() {
-        executable = [
+    let executable = path_candidate.or_else(|| {
+        [
             env::var_os("PROGRAMFILES"),
             env::var_os("PROGRAMFILES(X86)"),
             env::var_os("LOCALAPPDATA"),
@@ -1573,11 +1573,14 @@ fn push_browser(
                 .iter()
                 .map(move |suffix| PathBuf::from(&root).join(suffix))
         })
-        .find(|path| path.is_file());
-    }
+        .find(|path| path.is_file())
+    });
 
     #[cfg(not(target_os = "windows"))]
-    let _ = windows_suffixes;
+    let executable = {
+        let _ = windows_suffixes;
+        path_candidate
+    };
 
     let Some(path) = executable else {
         return;
