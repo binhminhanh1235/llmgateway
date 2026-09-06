@@ -2,7 +2,8 @@ use crate::{
     api::{
         authorize_client, client_policy_error, gateway_error, json_error, json_response, AppState,
     },
-    client_policy::{ClientAccess, ClientPolicyConfig},
+    client_policy::ClientAccess,
+    config::ClientPolicyConfig,
     routing::RouteDecisionTrace,
     routing_api::{push_reason, rerank_after_client_policy},
 };
