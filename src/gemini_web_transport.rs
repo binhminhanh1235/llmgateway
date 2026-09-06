@@ -40,6 +40,9 @@ const GEMINI_DEFAULT_MODEL: &str = "gemini-web-default";
 const GEMINI_ADAPTER_VERSION: &str = "experimental-2";
 const USAGE_LIMIT_EXCEEDED: i64 = 1037;
 const MODEL_HEADER_INVALID: i64 = 1052;
+const UPSTREAM_TRANSIENT_REJECTION: i64 = 1155;
+const MAX_TRANSIENT_RETRIES: usize = 3;
+const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(500);
 const STREAM_REWRITE_HOLD_CHARS: usize = 192;
 const MODEL_CATALOG_TTL: Duration = Duration::from_secs(600);
 
@@ -64,6 +67,7 @@ struct GeminiModelRecipe {
 #[derive(Clone, Debug)]
 struct GeminiModelCatalogSnapshot {
     discovered_at: Instant,
+    #[allow(dead_code)]
     wire_session_id: String,
     models: Vec<GeminiModelRecipe>,
 }
@@ -384,9 +388,10 @@ impl GeminiWebHttpAdapter {
                 model: request.route.model.clone(),
             }
         })?;
+        let wire_session_id = Uuid::new_v4().to_string().to_uppercase();
         Ok(Some(GeminiModelSelection {
             recipe,
-            wire_session_id: snapshot.wire_session_id,
+            wire_session_id,
         }))
     }
 
@@ -644,7 +649,7 @@ impl GeminiWebHttpAdapter {
         synthetic_json_response(body)
     }
 
-    fn streaming_response(
+    async fn streaming_response(
         &self,
         request: &BrowserAdapterRequest,
         response: Response,
@@ -657,16 +662,72 @@ impl GeminiWebHttpAdapter {
         let completion_id = format!("chatcmpl_gemini_{}", Uuid::new_v4().simple());
         let created = chrono::Utc::now().timestamp();
 
+        let mut upstream = response.bytes_stream();
+        let mut decoder = GeminiFrameDecoder::default();
+        let mut initial_frames = Vec::new();
+        let mut has_text_or_completion = false;
+
+        while let Some(chunk) = upstream.next().await {
+            let chunk = chunk.map_err(|error| {
+                BrowserProviderError::Transport(format!(
+                    "Gemini browserless stream body failed: {error}"
+                ))
+            })?;
+
+            let frames = decoder
+                .push(&chunk)
+                .map_err(BrowserProviderError::Transport)?;
+
+            for part in frames {
+                let update = parse_frame_update(&part);
+                if let Some(error_code) = update.error_code {
+                    if error_code != 0 {
+                        if error_code == MODEL_HEADER_INVALID {
+                            adapter.invalidate_model_catalog(&account_id).await;
+                        }
+                        return Err(generation_error(error_code, &account_id, &model));
+                    }
+                }
+                if !update.text.is_empty() || update.completed {
+                    has_text_or_completion = true;
+                }
+                initial_frames.push(update);
+            }
+
+            if has_text_or_completion {
+                break;
+            }
+        }
+
+        if initial_frames.is_empty() {
+            let remaining = decoder.finish().map_err(BrowserProviderError::Transport)?;
+            for part in remaining {
+                let update = parse_frame_update(&part);
+                if let Some(error_code) = update.error_code {
+                    if error_code != 0 {
+                        if error_code == MODEL_HEADER_INVALID {
+                            adapter.invalidate_model_catalog(&account_id).await;
+                        }
+                        return Err(generation_error(error_code, &account_id, &model));
+                    }
+                }
+                initial_frames.push(update);
+            }
+        }
+
+        if initial_frames.is_empty() {
+            return Err(BrowserProviderError::Transport(
+                "Gemini browserless stream ended before receiving any frames".into(),
+            ));
+        }
+
         let stream = async_stream::stream! {
-            let mut upstream = response.bytes_stream();
-            let mut decoder = GeminiFrameDecoder::default();
             let mut emitter = StableTextEmitter::default();
             let mut latest = GeminiFrameUpdate::default();
             let mut saw_text = false;
             let mut finished = false;
 
-            // Emit a role-only chunk immediately so gateway first-byte timers do not
-            // punish the stability window used to absorb cumulative Gemini rewrites.
+            // Emit role-only chunk once text/completion is verified
             let role_event = json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -680,64 +741,109 @@ impl GeminiWebHttpAdapter {
             });
             yield Ok(Bytes::from(format!("data: {role_event}\n\n")));
 
-            'outer: while let Some(chunk) = upstream.next().await {
-                let chunk = match chunk {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        yield Err(std::io::Error::other(format!(
-                            "Gemini browserless stream body failed: {error}"
-                        )));
-                        break;
+            for update in initial_frames {
+                merge_update(&mut latest, update);
+                match emitter.observe(&latest.text, latest.completed) {
+                    Ok(Some(delta)) if !delta.is_empty() => {
+                        saw_text = true;
+                        let event = json!({
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": delta},
+                                "finish_reason": Value::Null
+                            }]
+                        });
+                        yield Ok(Bytes::from(format!("data: {event}\n\n")));
                     }
-                };
-
-                let frames = match decoder.push(&chunk) {
-                    Ok(frames) => frames,
+                    Ok(_) => {}
                     Err(error) => {
                         yield Err(std::io::Error::other(error));
-                        break;
+                        return;
                     }
-                };
+                }
 
-                for part in frames {
-                    let update = parse_frame_update(&part);
-                    if let Some(error_code) = update.error_code {
-                        if error_code == MODEL_HEADER_INVALID {
-                            adapter.invalidate_model_catalog(&account_id).await;
-                        }
-                        yield Err(std::io::Error::other(
-                            generation_error(error_code, &account_id, &model).to_string(),
-                        ));
-                        break 'outer;
-                    }
+                if latest.completed {
+                    finished = true;
+                    break;
+                }
+            }
 
-                    merge_update(&mut latest, update);
-                    match emitter.observe(&latest.text, latest.completed) {
-                        Ok(Some(delta)) if !delta.is_empty() => {
-                            saw_text = true;
-                            let event = json!({
-                                "id": completion_id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"content": delta},
-                                    "finish_reason": Value::Null
-                                }]
-                            });
-                            yield Ok(Bytes::from(format!("data: {event}\n\n")));
+            if !finished {
+                'outer: while let Some(chunk) = upstream.next().await {
+                    let chunk = match chunk {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            yield Err(std::io::Error::other(format!(
+                                "Gemini browserless stream body failed: {error}"
+                            )));
+                            break;
                         }
-                        Ok(_) => {}
+                    };
+
+                    let frames = match decoder.push(&chunk) {
+                        Ok(frames) => frames,
                         Err(error) => {
                             yield Err(std::io::Error::other(error));
+                            break;
+                        }
+                    };
+
+                    for part in frames {
+                        let update = parse_frame_update(&part);
+                        if let Some(error_code) = update.error_code {
+                            if error_code != 0 {
+                                if error_code == MODEL_HEADER_INVALID {
+                                    adapter.invalidate_model_catalog(&account_id).await;
+                                }
+                                if saw_text {
+                                    tracing::warn!(
+                                        error_code,
+                                        account_id = %account_id,
+                                        model = %model,
+                                        "Gemini stream interrupted by error code after emitting text; finalizing gracefully"
+                                    );
+                                    finished = true;
+                                    break 'outer;
+                                }
+                                yield Err(std::io::Error::other(
+                                    generation_error(error_code, &account_id, &model).to_string(),
+                                ));
+                                break 'outer;
+                            }
+                        }
+
+                        merge_update(&mut latest, update);
+                        match emitter.observe(&latest.text, latest.completed) {
+                            Ok(Some(delta)) if !delta.is_empty() => {
+                                saw_text = true;
+                                let event = json!({
+                                    "id": completion_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {"content": delta},
+                                        "finish_reason": Value::Null
+                                    }]
+                                });
+                                yield Ok(Bytes::from(format!("data: {event}\n\n")));
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                yield Err(std::io::Error::other(error));
+                                break 'outer;
+                            }
+                        }
+
+                        if latest.completed {
+                            finished = true;
                             break 'outer;
                         }
-                    }
-
-                    if latest.completed {
-                        finished = true;
-                        break 'outer;
                     }
                 }
             }
@@ -748,29 +854,29 @@ impl GeminiWebHttpAdapter {
                         for part in frames {
                             let update = parse_frame_update(&part);
                             if let Some(error_code) = update.error_code {
-                                if error_code == MODEL_HEADER_INVALID {
-                                    adapter.invalidate_model_catalog(&account_id).await;
+                                if error_code != 0 {
+                                    if error_code == MODEL_HEADER_INVALID {
+                                        adapter.invalidate_model_catalog(&account_id).await;
+                                    }
+                                    if !saw_text {
+                                        yield Err(std::io::Error::other(
+                                            generation_error(error_code, &account_id, &model).to_string(),
+                                        ));
+                                        return;
+                                    }
+                                    break;
                                 }
-                                yield Err(std::io::Error::other(
-                                    generation_error(error_code, &account_id, &model).to_string(),
-                                ));
-                                return;
                             }
                             merge_update(&mut latest, update);
                         }
                     }
                     Err(error) => {
-                        yield Err(std::io::Error::other(error));
-                        return;
+                        if !saw_text {
+                            yield Err(std::io::Error::other(error));
+                            return;
+                        }
                     }
                 }
-            }
-
-            if !latest.completed {
-                yield Err(std::io::Error::other(
-                    "Gemini browserless stream ended before the provider completion marker"
-                ));
-                return;
             }
 
             match emitter.observe(&latest.text, true) {
@@ -791,8 +897,10 @@ impl GeminiWebHttpAdapter {
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    yield Err(std::io::Error::other(error));
-                    return;
+                    if !saw_text {
+                        yield Err(std::io::Error::other(error));
+                        return;
+                    }
                 }
             }
 
@@ -814,6 +922,7 @@ impl GeminiWebHttpAdapter {
                 return;
             }
 
+            let finish_reason = if latest.completed { "stop" } else { "length" };
             let final_event = json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -822,7 +931,7 @@ impl GeminiWebHttpAdapter {
                 "choices": [{
                     "index": 0,
                     "delta": {},
-                    "finish_reason": "stop"
+                    "finish_reason": finish_reason
                 }]
             });
             yield Ok(Bytes::from(format!("data: {final_event}\n\n")));
@@ -948,32 +1057,82 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
         request: BrowserAdapterRequest,
     ) -> Result<reqwest::Response, BrowserProviderError> {
         let material = self.auth_material(&request.session_id, &request.account.id)?;
-        let session = self
+        let mut session = self
             .init_session(
                 &material,
                 &request.account.id,
                 Duration::from_millis(request.binding.probe_timeout_ms.unwrap_or(8_000).max(3_000)),
             )
             .await?;
-        let selection = self.resolve_model_selection(&request).await?;
         let metadata = self
             .conversation_metadata(&request, &request.route.model)
             .await?;
         let has_native_state = metadata != default_metadata();
         let prompt = serialize_prompt(&request.body, has_native_state)?;
-        let response = self
-            .submit_generation(&request, &session, &prompt, metadata, selection.as_ref())
-            .await?;
-
-        if request
+        let is_stream = request
             .body
             .get("stream")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            self.streaming_response(&request, response)
-        } else {
-            self.buffered_response(&request, response).await
+            .unwrap_or(false);
+
+        let mut attempts = 0;
+        loop {
+            let selection = self.resolve_model_selection(&request).await?;
+            let response = self
+                .submit_generation(
+                    &request,
+                    &session,
+                    &prompt,
+                    metadata.clone(),
+                    selection.as_ref(),
+                )
+                .await?;
+
+            let result = if is_stream {
+                self.streaming_response(&request, response).await
+            } else {
+                self.buffered_response(&request, response).await
+            };
+
+            match result {
+                Ok(res) => return Ok(res),
+                Err(error) => {
+                    if attempts < MAX_TRANSIENT_RETRIES && is_gemini_transient_error(&error) {
+                        attempts += 1;
+                        let delay = TRANSIENT_RETRY_DELAY * attempts as u32;
+                        tracing::warn!(
+                            account_id = %request.account.id,
+                            model = %request.route.model,
+                            attempt = attempts,
+                            delay_ms = delay.as_millis(),
+                            error = %error,
+                            "Gemini StreamGenerate transient rejection; retrying in-flight request"
+                        );
+                        if attempts >= 2 {
+                            self.invalidate_model_catalog(&request.account.id).await;
+                            if let Ok(fresh_session) = self
+                                .init_session(
+                                    &material,
+                                    &request.account.id,
+                                    Duration::from_millis(
+                                        request
+                                            .binding
+                                            .probe_timeout_ms
+                                            .unwrap_or(8_000)
+                                            .max(3_000),
+                                    ),
+                                )
+                                .await
+                            {
+                                session = fresh_session;
+                            }
+                        }
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
         }
     }
 }
@@ -1066,9 +1225,25 @@ fn generation_error(error_code: i64, account_id: &str, model: &str) -> BrowserPr
             account_id: account_id.to_string(),
             model: model.to_string(),
         },
+        UPSTREAM_TRANSIENT_REJECTION => BrowserProviderError::Transport(
+            "Gemini StreamGenerate returned transient rejection (error code 1155)".into(),
+        ),
         _ => BrowserProviderError::Transport(format!(
             "Gemini StreamGenerate returned error code {error_code}"
         )),
+    }
+}
+
+fn is_gemini_transient_error(error: &BrowserProviderError) -> bool {
+    match error {
+        BrowserProviderError::Transport(msg) => {
+            msg.contains("1155")
+                || msg.contains("transient rejection")
+                || msg.contains("HTTP 502")
+                || msg.contains("HTTP 503")
+                || msg.contains("HTTP 504")
+        }
+        _ => false,
     }
 }
 
@@ -1854,6 +2029,17 @@ mod tests {
                 model
             } if account_id == "account-a" && model == "gemini-web-pro"
         ));
+    }
+
+    #[test]
+    fn transient_rejection_code_is_recognized() {
+        let error = generation_error(
+            UPSTREAM_TRANSIENT_REJECTION,
+            "account-a",
+            "gemini-web-flash",
+        );
+        assert!(is_gemini_transient_error(&error));
+        assert!(error.to_string().contains("1155"));
     }
 
     #[tokio::test]
