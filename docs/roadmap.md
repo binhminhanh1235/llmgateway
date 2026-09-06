@@ -124,6 +124,52 @@ The remaining browser work is now mostly **usage/cost intelligence, broader prov
 
 ---
 
+## Active initiative - Provider Runtime Fabric (not on main yet)
+
+Working branch:
+
+`feat/provider-runtime-fabric`
+
+Baseline:
+
+`f85e54b8741a8a184bdc84b142c8b770adee29c0`
+
+Plan:
+
+`docs/provider-runtime-fabric-plan.md`
+
+Goal: make browser-backed providers self-healing and resource-efficient while keeping normal user workflows invisible and uninterrupted.
+
+This initiative refines the existing browser-first product direction into an **invisible-first runtime policy**:
+
+- authenticated browser accounts remain first-class execution identities;
+- direct/browserless transport is preferred when healthy;
+- headless browser transport is an on-demand escalation resource;
+- browser processes are stopped by default and reclaimed after idle/resource pressure;
+- normal background traffic must never automatically open a visible browser;
+- visible browser UI is reserved for explicit user-triggered login, CAPTCHA, 2FA, consent, or manual recovery;
+- logical routing selects provider/account/model while the account runtime owns transport choice and recovery;
+- transport health is isolated so one broken transport does not unnecessarily poison a logical model/account;
+- typed failures, replay safety, stream commit barriers and bounded recovery budgets prevent unsafe or infinite fallback;
+- DeepSeek burst state, Gemini throttling/auth readiness and Qwen WAF/CDP recovery are explicit acceptance targets;
+- virtual models such as `llmgateway-best` and `llmgateway-coding` must remain available when an alternate eligible candidate exists.
+
+Planned phases:
+
+- P0 Execution Contract Foundation;
+- P1 Runtime Health Graph & Breakers;
+- P2 Account Runtime & Admission Control;
+- P3 DeepSeek Deterministic Stream State;
+- P4 Invisible Browser Runtime;
+- P5 Browser Fetch Transport;
+- P6 Auth Generations & Gemini Hardening;
+- P7 Logical Route / Transport Separation & Virtual-Model Continuity;
+- P8 Chaos, Resource & Live Acceptance.
+
+**Do not describe this initiative as shipped on `main` until final verification and explicit merge approval.**
+
+---
+
 ## Active initiative - Multimodal Gateway (not on main yet)
 
 Multimodal work is intentionally tracked outside the shipped main baseline until final acceptance and merge.
