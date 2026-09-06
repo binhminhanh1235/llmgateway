@@ -737,6 +737,7 @@ pub fn provider_presets() -> Vec<BrowserAccountProviderPreset> {
         provider_preset("chatgpt").expect("chatgpt preset"),
         provider_preset("gemini").expect("gemini preset"),
         provider_preset("deepseek").expect("deepseek preset"),
+        provider_preset("mimo").expect("mimo preset"),
         provider_preset("qwen").expect("qwen preset"),
     ]
 }
@@ -777,6 +778,19 @@ fn provider_preset(id: &str) -> Option<BrowserAccountProviderPreset> {
             login_url: "https://chat.deepseek.com/",
             ready_url_prefix: "https://chat.deepseek.com/",
             default_model_id: "deepseek-web-default",
+            default_capabilities: &["chat", "coding", "reasoning"],
+            discover_models: true,
+            initial_transport_mode: Some(BrowserTransportMode::HttpPreferred),
+            extra_virtual_models: &["llmgateway-coding", "llmgateway-best"],
+        }),
+        "mimo" | "browser-mimo" => Some(BrowserAccountProviderPreset {
+            id: "mimo",
+            label: "Xiaomi MiMo Web",
+            provider_id: "mimo-web",
+            provider_kind: "browser-mimo",
+            login_url: "https://aistudio.xiaomimimo.com/#/c",
+            ready_url_prefix: "https://aistudio.xiaomimimo.com/",
+            default_model_id: "mimo-web-default",
             default_capabilities: &["chat", "coding", "reasoning"],
             discover_models: true,
             initial_transport_mode: Some(BrowserTransportMode::HttpPreferred),
