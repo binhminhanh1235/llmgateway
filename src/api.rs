@@ -1,7 +1,7 @@
 use crate::{
     catalog::{CatalogError, ModelCatalog},
-    compat::{anthropic, responses},
     client_policy::{ClientAccess, ClientPolicyError, ClientPolicyStore},
+    compat::{anthropic, responses},
     conversation::{ConversationError, ConversationStore},
     gateway::{Gateway, GatewayError},
     quota_usage_runtime,
@@ -10,11 +10,11 @@ use crate::{
 use axum::{
     body::{to_bytes, Body},
     extract::{Path, Request, State},
-    middleware::Next,
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         HeaderMap, HeaderValue, Response, StatusCode,
     },
+    middleware::Next,
     response::IntoResponse,
     Json,
 };
@@ -64,7 +64,10 @@ pub async fn openai_chat(
             .to_string()
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
+    if let Err(error) = state
+        .client_policies
+        .enforce_model(&access, &requested_model)
+    {
         return client_policy_error(error);
     }
     let reservation = match state
@@ -156,7 +159,10 @@ pub async fn openai_responses(
         }
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
+    if let Err(error) = state
+        .client_policies
+        .enforce_model(&access, &requested_model)
+    {
         return client_policy_error(error);
     }
     let response_owner = access.client_id().map(str::to_string);
@@ -178,9 +184,7 @@ pub async fn openai_responses(
             }
             Err(error) => return conversation_state_error(error),
         };
-        if response_owner.is_some()
-            && previous.client_id.as_deref() != response_owner.as_deref()
-        {
+        if response_owner.is_some() && previous.client_id.as_deref() != response_owner.as_deref() {
             return json_error(
                 StatusCode::NOT_FOUND,
                 "invalid_request_error",
@@ -223,10 +227,8 @@ pub async fn openai_responses(
                     route_id.clone(),
                     routed.started_at,
                 );
-                let stream = responses::openai_stream_to_responses(
-                    response,
-                    requested_model.clone(),
-                );
+                let stream =
+                    responses::openai_stream_to_responses(response, requested_model.clone());
                 let (tx, rx) = oneshot::channel();
                 let stream = responses_stream_with_capture(stream, tx);
                 let conversations = state.conversations.clone();
@@ -336,7 +338,10 @@ pub async fn anthropic_messages(
         }
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    if let Err(error) = state.client_policies.enforce_model(&access, &requested_model) {
+    if let Err(error) = state
+        .client_policies
+        .enforce_model(&access, &requested_model)
+    {
         return client_policy_error(error);
     }
     let reservation = match state
@@ -363,8 +368,7 @@ pub async fn anthropic_messages(
                     route_id.clone(),
                     routed.started_at,
                 );
-                let stream =
-                    anthropic::openai_stream_to_anthropic(response, requested_model);
+                let stream = anthropic::openai_stream_to_anthropic(response, requested_model);
                 response_with_route_and_request(
                     StatusCode::OK,
                     "text/event-stream",
@@ -420,7 +424,10 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         if !group.enabled {
             continue;
         }
-        if access.policy().is_some_and(|policy| !policy.model_allowed(id, id)) {
+        if access
+            .policy()
+            .is_some_and(|policy| !policy.model_allowed(id, id))
+        {
             continue;
         }
         data.insert(
@@ -469,8 +476,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     // Preserve v0.1 route IDs as selectable aliases for existing clients.
     for route in config.routes.iter().filter(|route| route.enabled) {
         if access.policy().is_some_and(|policy| {
-            !policy.route_allowed(&route.id)
-                || !policy.model_allowed(&route.id, &route.model)
+            !policy.route_allowed(&route.id) || !policy.model_allowed(&route.id, &route.model)
         }) {
             continue;
         }
@@ -546,7 +552,12 @@ pub async fn admin_refresh_account_models(
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let config = state.gateway.config_snapshot();
     let routes = state.gateway.router.snapshot().await;
-    let catalog_models = state.catalog.models().await.map(|models| models.len()).unwrap_or(0);
+    let catalog_models = state
+        .catalog
+        .models()
+        .await
+        .map(|models| models.len())
+        .unwrap_or(0);
     let threads = state
         .conversations
         .list_threads()
@@ -572,10 +583,7 @@ async fn update_provider_usage(event_id: Option<&str>, response: &Value) {
     }
 }
 
-pub(crate) async fn normalize_json_rejections(
-    request: Request,
-    next: Next,
-) -> Response<Body> {
+pub(crate) async fn normalize_json_rejections(request: Request, next: Next) -> Response<Body> {
     let request_is_json = request
         .headers()
         .get(CONTENT_TYPE)
@@ -663,7 +671,11 @@ fn presented_api_key(headers: &HeaderMap) -> Option<&str> {
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .or_else(|| headers.get("x-api-key").and_then(|value| value.to_str().ok()))
+        .or_else(|| {
+            headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+        })
 }
 
 pub(crate) fn client_policy_error(error: ClientPolicyError) -> Response<Body> {
@@ -676,13 +688,17 @@ pub(crate) fn client_policy_error(error: ClientPolicyError) -> Response<Body> {
         ClientPolicyError::Forbidden(message) => {
             json_error(StatusCode::FORBIDDEN, "client_policy_error", &message)
         }
-        ClientPolicyError::BudgetExceeded(message) => {
-            json_error(StatusCode::TOO_MANY_REQUESTS, "client_budget_exceeded", &message)
-        }
+        ClientPolicyError::BudgetExceeded(message) => json_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "client_budget_exceeded",
+            &message,
+        ),
         ClientPolicyError::MissingEnv(message) => json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "client_policy_configuration_error",
-            &format!("configured client credential environment variable '{message}' is unavailable"),
+            &format!(
+                "configured client credential environment variable '{message}' is unavailable"
+            ),
         ),
         ClientPolicyError::Database(error) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -712,11 +728,9 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
             "configuration_error",
             &message,
         ),
-        GatewayError::ClientPolicyDenied(message) => json_error(
-            StatusCode::FORBIDDEN,
-            "client_policy_error",
-            &message,
-        ),
+        GatewayError::ClientPolicyDenied(message) => {
+            json_error(StatusCode::FORBIDDEN, "client_policy_error", &message)
+        }
         GatewayError::Transport(message) => {
             json_error(StatusCode::BAD_GATEWAY, "upstream_error", &message)
         }
@@ -725,11 +739,9 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
             "browser_session_error",
             &message,
         ),
-        GatewayError::BrowserTransport(message) => json_error(
-            StatusCode::BAD_GATEWAY,
-            "browser_transport_error",
-            &message,
-        ),
+        GatewayError::BrowserTransport(message) => {
+            json_error(StatusCode::BAD_GATEWAY, "browser_transport_error", &message)
+        }
         GatewayError::BrowserAdapterIncompatible(message) => json_error(
             StatusCode::BAD_GATEWAY,
             "browser_adapter_incompatible",
@@ -745,11 +757,9 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
             "browser_model_unavailable",
             &message,
         ),
-        GatewayError::BrowserModelRecipeStale(message) => json_error(
-            StatusCode::BAD_GATEWAY,
-            "model_recipe_stale",
-            &message,
-        ),
+        GatewayError::BrowserModelRecipeStale(message) => {
+            json_error(StatusCode::BAD_GATEWAY, "model_recipe_stale", &message)
+        }
         GatewayError::Upstream { status, body } => json_error(status, "upstream_error", &body),
         GatewayError::Execution { request_id, source } => {
             let mut response = gateway_error(*source);
@@ -796,7 +806,8 @@ fn catalog_error(error: CatalogError) -> Response<Body> {
 
 fn conversation_state_error(error: ConversationError) -> Response<Body> {
     match error {
-        ConversationError::ThreadNotFound(message) | ConversationError::ResponseNotFound(message) => {
+        ConversationError::ThreadNotFound(message)
+        | ConversationError::ResponseNotFound(message) => {
             json_error(StatusCode::NOT_FOUND, "response_state_error", &message)
         }
         ConversationError::InvalidJson(message) => json_error(

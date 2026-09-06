@@ -36,9 +36,7 @@ pub async fn explain_routes(
         .unwrap_or_else(|| config.api.default_model.clone());
 
     let has_task_context = request.task.is_some() || request.body.is_some();
-    let mut body = request
-        .body
-        .unwrap_or_else(|| Value::Object(Map::new()));
+    let mut body = request.body.unwrap_or_else(|| Value::Object(Map::new()));
     if let Some(task) = request.task.filter(|task| !task.trim().is_empty()) {
         if let Some(object) = body.as_object_mut() {
             object.insert("llmgateway_task".into(), Value::String(task));
@@ -58,13 +56,14 @@ pub async fn explain_routes(
         },
         None => None,
     };
-    let effective_config = match state
-        .gateway
-        .effective_request_config(config.clone(), client_policy.as_ref(), &body)
-    {
-        Ok(config) => config,
-        Err(error) => return crate::api::gateway_error(error),
-    };
+    let effective_config =
+        match state
+            .gateway
+            .effective_request_config(config.clone(), client_policy.as_ref(), &body)
+        {
+            Ok(config) => config,
+            Err(error) => return crate::api::gateway_error(error),
+        };
     let mut trace = state
         .gateway
         .router

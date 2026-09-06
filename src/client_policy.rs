@@ -382,11 +382,9 @@ impl ClientPolicyStore {
                 .is_ok_and(|name| name == "observed_input_tokens")
         });
         if !has_observed_input {
-            sqlx::query(
-                "ALTER TABLE client_usage_events ADD COLUMN observed_input_tokens INTEGER",
-            )
-            .execute(&self.pool)
-            .await?;
+            sqlx::query("ALTER TABLE client_usage_events ADD COLUMN observed_input_tokens INTEGER")
+                .execute(&self.pool)
+                .await?;
         }
         let has_observed_output = usage_columns.iter().any(|row| {
             row.try_get::<String, _>("name")
@@ -457,13 +455,16 @@ fn requested_output_tokens(body: &Value) -> Option<u64> {
 }
 
 fn implicit_output_cap(snapshot: &ClientBudgetSnapshot, input_tokens: u64) -> u64 {
-    [snapshot.daily.token_remaining, snapshot.monthly.token_remaining]
-        .into_iter()
-        .flatten()
-        .map(|remaining| remaining.saturating_sub(input_tokens))
-        .min()
-        .unwrap_or(DEFAULT_BUDGET_OUTPUT_TOKENS)
-        .min(DEFAULT_BUDGET_OUTPUT_TOKENS)
+    [
+        snapshot.daily.token_remaining,
+        snapshot.monthly.token_remaining,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|remaining| remaining.saturating_sub(input_tokens))
+    .min()
+    .unwrap_or(DEFAULT_BUDGET_OUTPUT_TOKENS)
+    .min(DEFAULT_BUDGET_OUTPUT_TOKENS)
 }
 
 fn normalized_observed_usage(response: &Value) -> (Option<u64>, Option<u64>) {
@@ -501,15 +502,17 @@ fn ensure_sqlite_parent(database_url: &str) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_window, implicit_output_cap, normalized_observed_usage,
-        requested_output_tokens, ClientBudgetSnapshot, ClientBudgetWindow,
-        DEFAULT_BUDGET_OUTPUT_TOKENS,
+        enforce_window, implicit_output_cap, normalized_observed_usage, requested_output_tokens,
+        ClientBudgetSnapshot, ClientBudgetWindow, DEFAULT_BUDGET_OUTPUT_TOKENS,
     };
     use serde_json::json;
 
     #[test]
     fn output_token_reservation_understands_compat_fields() {
-        assert_eq!(requested_output_tokens(&json!({"max_tokens": 128})), Some(128));
+        assert_eq!(
+            requested_output_tokens(&json!({"max_tokens": 128})),
+            Some(128)
+        );
         assert_eq!(
             requested_output_tokens(&json!({"max_completion_tokens": 256})),
             Some(256)

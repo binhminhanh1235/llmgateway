@@ -1,11 +1,12 @@
 use crate::{
     browser_auth::{BrowserAuthMaterial, BrowserAuthVault},
-    browser_auth_runtime, browser_provider_runtime, conversation_runtime,
+    browser_auth_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
-        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
-        BrowserlessCapabilities, BrowserTransportMode, BROWSER_ADAPTER_CONTRACT_VERSION,
+        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError, BrowserTransportMode,
+        BrowserlessCapabilities, BROWSER_ADAPTER_CONTRACT_VERSION,
     },
+    browser_provider_runtime, conversation_runtime,
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
@@ -219,8 +220,7 @@ impl GeminiWebHttpAdapter {
         Ok(GeminiInitSession {
             access_token,
             build_label: extract_embedded_json_string(&html, "cfb2h").unwrap_or_default(),
-            frontend_session_id: extract_embedded_json_string(&html, "FdrFJe")
-                .unwrap_or_default(),
+            frontend_session_id: extract_embedded_json_string(&html, "FdrFJe").unwrap_or_default(),
             language: extract_embedded_json_string(&html, "TuX5cc")
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| GEMINI_DEFAULT_LANGUAGE.into()),
@@ -378,11 +378,12 @@ impl GeminiWebHttpAdapter {
         let snapshot = self
             .model_catalog(&request.binding, &request.account.id, false)
             .await?;
-        let recipe = find_model_recipe(&snapshot, &request.route.model)
-            .ok_or_else(|| BrowserProviderError::ModelUnavailable {
+        let recipe = find_model_recipe(&snapshot, &request.route.model).ok_or_else(|| {
+            BrowserProviderError::ModelUnavailable {
                 account_id: request.account.id.clone(),
                 model: request.route.model.clone(),
-            })?;
+            }
+        })?;
         Ok(Some(GeminiModelSelection {
             recipe,
             wire_session_id: snapshot.wire_session_id,
@@ -1056,11 +1057,7 @@ fn find_model_recipe(
         .cloned()
 }
 
-fn generation_error(
-    error_code: i64,
-    account_id: &str,
-    model: &str,
-) -> BrowserProviderError {
+fn generation_error(error_code: i64, account_id: &str, model: &str) -> BrowserProviderError {
     match error_code {
         USAGE_LIMIT_EXCEEDED => {
             BrowserProviderError::Transport("Gemini web usage limit exceeded".into())
@@ -1107,7 +1104,9 @@ fn model_header_value(
         .map_err(|error| BrowserProviderError::Transport(error.to_string()))
 }
 
-fn parse_model_catalog_response(raw: &[u8]) -> Result<Vec<GeminiModelRecipe>, BrowserProviderError> {
+fn parse_model_catalog_response(
+    raw: &[u8],
+) -> Result<Vec<GeminiModelRecipe>, BrowserProviderError> {
     let values = decode_response_values(raw)?;
     let mut bodies = Vec::new();
     for value in &values {
@@ -1127,12 +1126,9 @@ fn parse_model_catalog_response(raw: &[u8]) -> Result<Vec<GeminiModelRecipe>, Br
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let (capacity, capacity_field) =
-            compute_model_capacity(&tier_flags, &capability_flags);
+        let (capacity, capacity_field) = compute_model_capacity(&tier_flags, &capability_flags);
         for item in model_items {
-            let Some(mut recipe) =
-                parse_model_recipe(item, capacity, capacity_field)
-            else {
+            let Some(mut recipe) = parse_model_recipe(item, capacity, capacity_field) else {
                 continue;
             };
             if !used_ids.insert(recipe.external_id.clone()) {
@@ -1156,14 +1152,8 @@ fn parse_model_catalog_response(raw: &[u8]) -> Result<Vec<GeminiModelRecipe>, Br
 
 fn decode_response_values(raw: &[u8]) -> Result<Vec<Value>, BrowserProviderError> {
     let mut decoder = GeminiFrameDecoder::default();
-    let mut values = decoder
-        .push(raw)
-        .map_err(BrowserProviderError::Transport)?;
-    values.extend(
-        decoder
-            .finish()
-            .map_err(BrowserProviderError::Transport)?,
-    );
+    let mut values = decoder.push(raw).map_err(BrowserProviderError::Transport)?;
+    values.extend(decoder.finish().map_err(BrowserProviderError::Transport)?);
     Ok(values)
 }
 
@@ -1326,18 +1316,25 @@ fn normalize_model_lookup(value: &str) -> String {
     slugify(value.trim().trim_start_matches("gemini-web/"))
 }
 
-fn serialize_prompt(body: &Value, native_continuation: bool) -> Result<String, BrowserProviderError> {
+fn serialize_prompt(
+    body: &Value,
+    native_continuation: bool,
+) -> Result<String, BrowserProviderError> {
     let messages = body
         .get("messages")
         .and_then(Value::as_array)
-        .ok_or_else(|| BrowserProviderError::InvalidConfig(
-            "Gemini browserless chat requires an OpenAI-style messages array".into(),
-        ))?;
+        .ok_or_else(|| {
+            BrowserProviderError::InvalidConfig(
+                "Gemini browserless chat requires an OpenAI-style messages array".into(),
+            )
+        })?;
 
     if native_continuation {
-        if let Some(message) = messages.iter().rev().find(|message| {
-            message.get("role").and_then(Value::as_str) == Some("user")
-        }) {
+        if let Some(message) = messages
+            .iter()
+            .rev()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        {
             let text = content_text(message.get("content").unwrap_or(&Value::Null));
             if !text.trim().is_empty() {
                 return Ok(text);
@@ -1445,15 +1442,17 @@ impl GeminiFrameDecoder {
             Ok(_) => self.bytes.len(),
             Err(error) if error.error_len().is_none() && !final_input => error.valid_up_to(),
             Err(error) => {
-                return Err(format!("Gemini browserless stream returned invalid UTF-8: {error}"))
+                return Err(format!(
+                    "Gemini browserless stream returned invalid UTF-8: {error}"
+                ))
             }
         };
         if valid_len == 0 {
             return Ok(Vec::new());
         }
 
-        let text = std::str::from_utf8(&self.bytes[..valid_len])
-            .map_err(|error| error.to_string())?;
+        let text =
+            std::str::from_utf8(&self.bytes[..valid_len]).map_err(|error| error.to_string())?;
         let (frames, consumed) = parse_length_prefixed_frames(text, &mut self.preamble_handled)?;
         if consumed > 0 {
             self.bytes.drain(..consumed);
@@ -1684,14 +1683,8 @@ fn prefix_byte_len_excluding_tail(text: &str, tail_chars: usize) -> usize {
 
 fn decode_complete_response(raw: &[u8]) -> Result<Vec<GeminiFrameUpdate>, BrowserProviderError> {
     let mut decoder = GeminiFrameDecoder::default();
-    let mut parts = decoder
-        .push(raw)
-        .map_err(BrowserProviderError::Transport)?;
-    parts.extend(
-        decoder
-            .finish()
-            .map_err(BrowserProviderError::Transport)?,
-    );
+    let mut parts = decoder.push(raw).map_err(BrowserProviderError::Transport)?;
+    parts.extend(decoder.finish().map_err(BrowserProviderError::Transport)?);
     Ok(parts.iter().map(parse_frame_update).collect())
 }
 
@@ -1733,7 +1726,9 @@ mod tests {
             ]
         });
         assert_eq!(serialize_prompt(&body, true).unwrap(), "second");
-        assert!(serialize_prompt(&body, false).unwrap().contains("User: first"));
+        assert!(serialize_prompt(&body, false)
+            .unwrap()
+            .contains("User: first"));
     }
 
     #[test]
@@ -1778,9 +1773,17 @@ mod tests {
         body[15] = json!([model_data]);
         body[16] = json!([8]);
         body[17] = json!([19]);
-        let part = json!([["wrb.fr"], GEMINI_GET_USER_STATUS_RPC, Value::Array(body).to_string()]);
+        let part = json!([
+            ["wrb.fr"],
+            GEMINI_GET_USER_STATUS_RPC,
+            Value::Array(body).to_string()
+        ]);
         let json_frame = serde_json::to_string(&vec![part]).unwrap();
-        let payload = format!("\n{}\n{}\n", json_frame.encode_utf16().count() + 1, json_frame);
+        let payload = format!(
+            "\n{}\n{}\n",
+            json_frame.encode_utf16().count() + 1,
+            json_frame
+        );
         let models = parse_model_catalog_response(payload.as_bytes()).unwrap();
         assert_eq!(models.len(), 1);
         let model = &models[0];
@@ -1830,7 +1833,7 @@ mod tests {
             models: vec![GeminiModelRecipe {
                 external_id: "gemini-web-pro".into(),
                 display_name: "Pro".into(),
-                    model_id: "opaque-pro".into(),
+                model_id: "opaque-pro".into(),
                 capacity: 2,
                 capacity_field: 12,
                 model_number: 3,
@@ -1880,8 +1883,7 @@ mod tests {
             "metadata": default_metadata()
         });
         assert!(validate_thread_model_affinity(Some(&state), "gemini-web-pro").is_ok());
-        let error =
-            validate_thread_model_affinity(Some(&state), "gemini-web-flash").unwrap_err();
+        let error = validate_thread_model_affinity(Some(&state), "gemini-web-flash").unwrap_err();
         assert!(error.contains("start a new llmgateway thread"));
         assert!(error.contains("gemini-web-pro"));
         assert!(error.contains("gemini-web-flash"));
@@ -1899,14 +1901,7 @@ mod tests {
 
     #[test]
     fn model_number_is_written_into_inner_request() {
-        let inner = build_inner_request(
-            "hello",
-            "en",
-            default_metadata(),
-            "REQUEST",
-            false,
-            6,
-        );
+        let inner = build_inner_request("hello", "en", default_metadata(), "REQUEST", false, 6);
         assert_eq!(inner[79], json!(6));
     }
 
@@ -1917,11 +1912,25 @@ mod tests {
             ["c_test", "r_test"],
             null,
             null,
-            [["rc_test", ["hello"], null, null, null, null, null, null, [2]]]
+            [[
+                "rc_test",
+                ["hello"],
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                [2]
+            ]]
         ]);
         let part = json!([["wrb.fr"], null, inner.to_string()]);
         let json_frame = serde_json::to_string(&vec![part]).unwrap();
-        let payload = format!("\n{}\n{}\n", json_frame.encode_utf16().count() + 1, json_frame);
+        let payload = format!(
+            "\n{}\n{}\n",
+            json_frame.encode_utf16().count() + 1,
+            json_frame
+        );
         let mut handled = true;
         let (parts, _) = parse_length_prefixed_frames(&payload, &mut handled).unwrap();
         assert_eq!(parts.len(), 1);

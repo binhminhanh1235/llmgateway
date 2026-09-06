@@ -5,7 +5,10 @@ use crate::{
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header::{AUTHORIZATION, CONTENT_TYPE}, HeaderMap, HeaderValue, Response, StatusCode},
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        HeaderMap, HeaderValue, Response, StatusCode,
+    },
     Json,
 };
 use serde::Deserialize;
@@ -119,13 +122,8 @@ pub async fn set_account_model(
         );
     }
 
-    match set_account_model_enabled(
-        config.as_ref(),
-        &account_id,
-        &body.model_id,
-        body.enabled,
-    )
-    .await
+    match set_account_model_enabled(config.as_ref(), &account_id, &body.model_id, body.enabled)
+        .await
     {
         Ok(()) => json_response(
             StatusCode::OK,
@@ -165,9 +163,8 @@ fn json_response(status: StatusCode, value: serde_json::Value) -> Response<Body>
         .status(status)
         .body(Body::from(value.to_string()))
         .expect("valid admin response");
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     response
 }

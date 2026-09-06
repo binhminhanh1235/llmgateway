@@ -1,15 +1,14 @@
-use crate::{
-    browser_provider_runtime,
-    config::AccountConfig,
-    live_config::LiveConfig,
-};
+use crate::{browser_provider_runtime, config::AccountConfig, live_config::LiveConfig};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION},
     Client, StatusCode,
 };
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, Row, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    Row, SqlitePool,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -189,7 +188,10 @@ impl ModelCatalog {
         self.seed_from_app_config(config.as_ref()).await
     }
 
-    pub async fn seed_from_app_config(&self, config: &crate::config::AppConfig) -> Result<(), CatalogError> {
+    pub async fn seed_from_app_config(
+        &self,
+        config: &crate::config::AppConfig,
+    ) -> Result<(), CatalogError> {
         let mut capabilities_by_model: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for route in config.routes.iter().filter(|route| route.enabled) {
             let account = config.account(&route.account).ok_or_else(|| {
@@ -249,13 +251,9 @@ impl ModelCatalog {
         })?;
 
         let browser_discovery = if provider.is_browser() {
-            browser_provider_runtime::get()
-                .filter(|registry| {
-                    registry.account_supports_model_discovery(
-                        &provider.kind,
-                        account_id,
-                    )
-                })
+            browser_provider_runtime::get().filter(|registry| {
+                registry.account_supports_model_discovery(&provider.kind, account_id)
+            })
         } else {
             None
         };
@@ -407,13 +405,9 @@ impl ModelCatalog {
                 .provider(&account.provider)
                 .filter(|provider| provider.is_browser())
                 .and_then(|provider| {
-                    browser_provider_runtime::get()
-                        .map(|registry| {
-                            registry.account_supports_model_discovery(
-                                &provider.kind,
-                                &account.id,
-                            )
-                        })
+                    browser_provider_runtime::get().map(|registry| {
+                        registry.account_supports_model_discovery(&provider.kind, &account.id)
+                    })
                 })
                 .unwrap_or(false);
             let discover_models = config
@@ -442,7 +436,10 @@ impl ModelCatalog {
         Ok(result)
     }
 
-    pub async fn account_models(&self, account_id: &str) -> Result<Vec<CatalogModelView>, CatalogError> {
+    pub async fn account_models(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<CatalogModelView>, CatalogError> {
         let config = self.config.snapshot();
         if config.account(account_id).is_none() {
             return Err(CatalogError::AccountNotFound(account_id.to_string()));
@@ -450,7 +447,12 @@ impl ModelCatalog {
         let all = self.models().await?;
         Ok(all
             .into_iter()
-            .filter(|model| model.accounts.iter().any(|account| account.account_id == account_id))
+            .filter(|model| {
+                model
+                    .accounts
+                    .iter()
+                    .any(|account| account.account_id == account_id)
+            })
             .collect())
     }
 
@@ -472,20 +474,23 @@ impl ModelCatalog {
         for row in rows {
             let canonical_id: String = row.try_get("canonical_id")?;
             let capabilities_raw: String = row.try_get("capabilities_json")?;
-            let capabilities = serde_json::from_str::<Vec<String>>(&capabilities_raw).unwrap_or_default();
-            let entry = models.entry(canonical_id.clone()).or_insert_with(|| CatalogModelView {
-                id: canonical_id.clone(),
-                provider: row.get("provider_id"),
-                external_id: row.get("external_id"),
-                display_name: row.get("display_name"),
-                owned_by: row.get("owned_by"),
-                context_window: row.get("context_window"),
-                capabilities,
-                accounts: Vec::new(),
-                routes: self.routes_for_model(&canonical_id),
-                enabled: row.get::<i64, _>("model_enabled") != 0,
-                fallback_eligible: false,
-            });
+            let capabilities =
+                serde_json::from_str::<Vec<String>>(&capabilities_raw).unwrap_or_default();
+            let entry = models
+                .entry(canonical_id.clone())
+                .or_insert_with(|| CatalogModelView {
+                    id: canonical_id.clone(),
+                    provider: row.get("provider_id"),
+                    external_id: row.get("external_id"),
+                    display_name: row.get("display_name"),
+                    owned_by: row.get("owned_by"),
+                    context_window: row.get("context_window"),
+                    capabilities,
+                    accounts: Vec::new(),
+                    routes: self.routes_for_model(&canonical_id),
+                    enabled: row.get::<i64, _>("model_enabled") != 0,
+                    fallback_eligible: false,
+                });
 
             let account_id: Option<String> = row.try_get("account_id")?;
             if let Some(account_id) = account_id {
@@ -615,7 +620,11 @@ impl ModelCatalog {
 }
 
 pub fn canonical_model_id(provider_id: &str, external_id: &str) -> String {
-    format!("{}/{}", provider_id.trim_matches('/'), external_id.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        provider_id.trim_matches('/'),
+        external_id.trim_start_matches('/')
+    )
 }
 
 fn split_canonical_model_id(id: &str) -> Result<(&str, &str), CatalogError> {
@@ -623,7 +632,9 @@ fn split_canonical_model_id(id: &str) -> Result<(&str, &str), CatalogError> {
         .split_once('/')
         .ok_or_else(|| CatalogError::InvalidConfig(format!("invalid canonical model id '{id}'")))?;
     if provider.is_empty() || external.is_empty() {
-        return Err(CatalogError::InvalidConfig(format!("invalid canonical model id '{id}'")));
+        return Err(CatalogError::InvalidConfig(format!(
+            "invalid canonical model id '{id}'"
+        )));
     }
     Ok((provider, external))
 }
@@ -665,12 +676,17 @@ fn apply_auth(
     Ok(())
 }
 
-fn parse_discovered_models(payload: &Value, provider_id: &str) -> Result<Vec<DiscoveredModel>, CatalogError> {
+fn parse_discovered_models(
+    payload: &Value,
+    provider_id: &str,
+) -> Result<Vec<DiscoveredModel>, CatalogError> {
     let items = payload
         .get("data")
         .and_then(Value::as_array)
         .or_else(|| payload.get("models").and_then(Value::as_array))
-        .ok_or_else(|| CatalogError::InvalidResponse("expected a 'data' or 'models' array".into()))?;
+        .ok_or_else(|| {
+            CatalogError::InvalidResponse("expected a 'data' or 'models' array".into())
+        })?;
 
     let mut result = Vec::new();
     for item in items {
@@ -678,7 +694,9 @@ fn parse_discovered_models(payload: &Value, provider_id: &str) -> Result<Vec<Dis
             .get("id")
             .or_else(|| item.get("name"))
             .and_then(Value::as_str);
-        let Some(raw_id) = raw_id else { continue; };
+        let Some(raw_id) = raw_id else {
+            continue;
+        };
         let external_id = raw_id.strip_prefix("models/").unwrap_or(raw_id).to_string();
         if external_id.is_empty() {
             continue;
@@ -721,16 +739,26 @@ fn infer_capabilities(item: &Value, external_id: &str) -> Vec<String> {
         capabilities.insert("coding".to_string());
     }
 
-    if let Some(methods) = item.get("supportedGenerationMethods").and_then(Value::as_array) {
-        if methods.iter().any(|method| method.as_str() == Some("generateContent")) {
+    if let Some(methods) = item
+        .get("supportedGenerationMethods")
+        .and_then(Value::as_array)
+    {
+        if methods
+            .iter()
+            .any(|method| method.as_str() == Some("generateContent"))
+        {
             capabilities.insert("chat".to_string());
         }
     }
     if let Some(parameters) = item.get("supported_parameters").and_then(Value::as_array) {
         for parameter in parameters.iter().filter_map(Value::as_str) {
             match parameter {
-                "tools" | "tool_choice" => { capabilities.insert("tools".to_string()); }
-                "reasoning" | "reasoning_effort" => { capabilities.insert("reasoning".to_string()); }
+                "tools" | "tool_choice" => {
+                    capabilities.insert("tools".to_string());
+                }
+                "reasoning" | "reasoning_effort" => {
+                    capabilities.insert("reasoning".to_string());
+                }
                 _ => {}
             }
         }
@@ -742,8 +770,12 @@ fn infer_capabilities(item: &Value, external_id: &str) -> Vec<String> {
     {
         for modality in modalities.iter().filter_map(Value::as_str) {
             match modality {
-                "image" => { capabilities.insert("vision".to_string()); }
-                "audio" => { capabilities.insert("audio".to_string()); }
+                "image" => {
+                    capabilities.insert("vision".to_string());
+                }
+                "audio" => {
+                    capabilities.insert("audio".to_string());
+                }
                 _ => {}
             }
         }
@@ -778,7 +810,8 @@ mod tests {
             canonical_model_id("openrouter", "anthropic/claude-sonnet"),
             "openrouter/anthropic/claude-sonnet"
         );
-        let (provider, external) = split_canonical_model_id("openrouter/anthropic/claude-sonnet").unwrap();
+        let (provider, external) =
+            split_canonical_model_id("openrouter/anthropic/claude-sonnet").unwrap();
         assert_eq!(provider, "openrouter");
         assert_eq!(external, "anthropic/claude-sonnet");
     }

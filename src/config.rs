@@ -1,5 +1,10 @@
 use serde::Deserialize;
-use std::{collections::{HashMap, HashSet}, env, fs, net::IpAddr, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    env, fs,
+    net::IpAddr,
+    path::Path,
+};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -70,10 +75,9 @@ pub struct ClientPolicyConfig {
 impl ClientPolicyConfig {
     pub fn model_allowed(&self, requested: &str, resolved: &str) -> bool {
         self.allowed_models.is_empty()
-            || self
-                .allowed_models
-                .iter()
-                .any(|pattern| pattern_matches(pattern, requested) || pattern_matches(pattern, resolved))
+            || self.allowed_models.iter().any(|pattern| {
+                pattern_matches(pattern, requested) || pattern_matches(pattern, resolved)
+            })
     }
 
     pub fn route_allowed(&self, route_id: &str) -> bool {
@@ -202,8 +206,8 @@ impl Default for RoutingConfig {
             task_aware_enabled: true,
             task_fit_max_bonus: default_routing_task_fit_max_bonus(),
             task_mismatch_penalty: default_routing_task_mismatch_penalty(),
-            task_long_context_threshold_tokens:
-                default_routing_task_long_context_threshold_tokens(),
+            task_long_context_threshold_tokens: default_routing_task_long_context_threshold_tokens(
+            ),
             task_simple_max_input_tokens: default_routing_task_simple_max_input_tokens(),
             execution_preference: default_routing_execution_preference(),
             api_fallback: true,
@@ -269,7 +273,11 @@ impl ProviderConfig {
     }
 
     pub fn transport(&self) -> &'static str {
-        if self.is_browser() { "browser" } else { "api" }
+        if self.is_browser() {
+            "browser"
+        } else {
+            "api"
+        }
     }
 }
 
@@ -369,11 +377,7 @@ impl VirtualModelConfig {
             .map(|tier| tier.priority)
     }
 
-    pub fn tier_priority_for_route(
-        &self,
-        config: &AppConfig,
-        route: &RouteConfig,
-    ) -> Option<i32> {
+    pub fn tier_priority_for_route(&self, config: &AppConfig, route: &RouteConfig) -> Option<i32> {
         if let Some(priority) = self.tier_priority(&route.id) {
             return Some(priority);
         }
@@ -386,28 +390,26 @@ impl VirtualModelConfig {
         );
         self.tiers
             .iter()
-            .find(|tier| tier.models.iter().any(|candidate| candidate == &canonical_model))
+            .find(|tier| {
+                tier.models
+                    .iter()
+                    .any(|candidate| candidate == &canonical_model)
+            })
             .map(|tier| tier.priority)
     }
 
-    pub fn model_order_for_route(
-        &self,
-        config: &AppConfig,
-        route: &RouteConfig,
-    ) -> Option<usize> {
+    pub fn model_order_for_route(&self, config: &AppConfig, route: &RouteConfig) -> Option<usize> {
         let account = config.account(&route.account)?;
         let canonical_model = format!(
             "{}/{}",
             account.provider.trim_matches('/'),
             route.model.trim_start_matches('/')
         );
-        self.tiers
-            .iter()
-            .find_map(|tier| {
-                tier.models
-                    .iter()
-                    .position(|candidate| candidate == &canonical_model)
-            })
+        self.tiers.iter().find_map(|tier| {
+            tier.models
+                .iter()
+                .position(|candidate| candidate == &canonical_model)
+        })
     }
 }
 
@@ -510,13 +512,19 @@ impl AppConfig {
         }
 
         if self.providers.is_empty() {
-            return Err(ConfigError::Invalid("at least one provider is required".into()));
+            return Err(ConfigError::Invalid(
+                "at least one provider is required".into(),
+            ));
         }
         if self.accounts.is_empty() {
-            return Err(ConfigError::Invalid("at least one account is required".into()));
+            return Err(ConfigError::Invalid(
+                "at least one account is required".into(),
+            ));
         }
         if self.routes.is_empty() {
-            return Err(ConfigError::Invalid("at least one route is required".into()));
+            return Err(ConfigError::Invalid(
+                "at least one route is required".into(),
+            ));
         }
         if !self.virtual_models.contains_key(&self.api.default_model) {
             return Err(ConfigError::Invalid(format!(
@@ -829,7 +837,11 @@ impl AppConfig {
                             name, tier.priority
                         )));
                     }
-                    let tier_kind = if tier.models.is_empty() { "routes" } else { "models" };
+                    let tier_kind = if tier.models.is_empty() {
+                        "routes"
+                    } else {
+                        "models"
+                    };
                     if membership_kind.is_some_and(|kind| kind != tier_kind) {
                         return Err(ConfigError::Invalid(format!(
                             "virtual model '{}' cannot mix route-backed and model-backed tiers",
@@ -900,42 +912,114 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
 fn default_host() -> IpAddr {
     "127.0.0.1".parse().expect("valid loopback address")
 }
-fn default_port() -> u16 { 7331 }
-fn default_gateway_key_env() -> String { "LLMGATEWAY_API_KEY".into() }
-fn default_model() -> String { "llmgateway-auto".into() }
-fn default_database_url() -> String { "sqlite://data/llmgateway.db".into() }
-fn default_provider_kind() -> String { "openai-compatible".into() }
-fn default_models_path() -> String { "models".into() }
-fn default_auth_style() -> String { "bearer".into() }
-fn default_priority() -> i32 { 100 }
-fn default_true() -> bool { true }
-fn default_context_target_tokens() -> usize { 16_000 }
-fn default_context_reserve_output_tokens() -> usize { 4_000 }
-fn default_context_recent_messages() -> usize { 12 }
-fn default_context_trigger_ratio() -> f64 { 0.85 }
-fn default_context_summary_input_tokens() -> usize { 12_000 }
-fn default_context_summary_max_tokens() -> usize { 1_200 }
-fn default_context_retrieval_max_chunks() -> usize { 3 }
-fn default_context_retrieval_max_tokens() -> usize { 2_400 }
-fn default_context_retrieval_min_score() -> f64 { 0.35 }
-fn default_context_retrieval_backend() -> String { "local".into() }
-fn default_context_retrieval_semantic_weight() -> f64 { 0.70 }
-fn default_context_retrieval_min_similarity() -> f64 { 0.15 }
-fn default_context_retrieval_embedding_batch_size() -> usize { 64 }
-fn default_routing_adaptive_min_samples() -> u64 { 3 }
-fn default_routing_adaptive_history_samples() -> usize { 100 }
-fn default_routing_adaptive_stale_after_seconds() -> u64 { 3_600 }
-fn default_routing_adaptive_ewma_alpha() -> f64 { 0.25 }
-fn default_routing_adaptive_latency_target_ms() -> u64 { 1_200 }
-fn default_routing_adaptive_max_penalty() -> i32 { 30 }
-fn default_routing_adaptive_failure_weight() -> f64 { 0.70 }
-fn default_routing_task_fit_max_bonus() -> i32 { 20 }
-fn default_routing_task_mismatch_penalty() -> i32 { 12 }
-fn default_routing_task_long_context_threshold_tokens() -> usize { 12_000 }
-fn default_routing_task_simple_max_input_tokens() -> usize { 800 }
-fn default_routing_execution_preference() -> String { "browser-first".into() }
-fn default_routing_browser_recovery_penalty() -> i32 { 8 }
-fn default_routing_browser_recovery_max_penalty() -> i32 { 40 }
+fn default_port() -> u16 {
+    7331
+}
+fn default_gateway_key_env() -> String {
+    "LLMGATEWAY_API_KEY".into()
+}
+fn default_model() -> String {
+    "llmgateway-auto".into()
+}
+fn default_database_url() -> String {
+    "sqlite://data/llmgateway.db".into()
+}
+fn default_provider_kind() -> String {
+    "openai-compatible".into()
+}
+fn default_models_path() -> String {
+    "models".into()
+}
+fn default_auth_style() -> String {
+    "bearer".into()
+}
+fn default_priority() -> i32 {
+    100
+}
+fn default_true() -> bool {
+    true
+}
+fn default_context_target_tokens() -> usize {
+    16_000
+}
+fn default_context_reserve_output_tokens() -> usize {
+    4_000
+}
+fn default_context_recent_messages() -> usize {
+    12
+}
+fn default_context_trigger_ratio() -> f64 {
+    0.85
+}
+fn default_context_summary_input_tokens() -> usize {
+    12_000
+}
+fn default_context_summary_max_tokens() -> usize {
+    1_200
+}
+fn default_context_retrieval_max_chunks() -> usize {
+    3
+}
+fn default_context_retrieval_max_tokens() -> usize {
+    2_400
+}
+fn default_context_retrieval_min_score() -> f64 {
+    0.35
+}
+fn default_context_retrieval_backend() -> String {
+    "local".into()
+}
+fn default_context_retrieval_semantic_weight() -> f64 {
+    0.70
+}
+fn default_context_retrieval_min_similarity() -> f64 {
+    0.15
+}
+fn default_context_retrieval_embedding_batch_size() -> usize {
+    64
+}
+fn default_routing_adaptive_min_samples() -> u64 {
+    3
+}
+fn default_routing_adaptive_history_samples() -> usize {
+    100
+}
+fn default_routing_adaptive_stale_after_seconds() -> u64 {
+    3_600
+}
+fn default_routing_adaptive_ewma_alpha() -> f64 {
+    0.25
+}
+fn default_routing_adaptive_latency_target_ms() -> u64 {
+    1_200
+}
+fn default_routing_adaptive_max_penalty() -> i32 {
+    30
+}
+fn default_routing_adaptive_failure_weight() -> f64 {
+    0.70
+}
+fn default_routing_task_fit_max_bonus() -> i32 {
+    20
+}
+fn default_routing_task_mismatch_penalty() -> i32 {
+    12
+}
+fn default_routing_task_long_context_threshold_tokens() -> usize {
+    12_000
+}
+fn default_routing_task_simple_max_input_tokens() -> usize {
+    800
+}
+fn default_routing_execution_preference() -> String {
+    "browser-first".into()
+}
+fn default_routing_browser_recovery_penalty() -> i32 {
+    8
+}
+fn default_routing_browser_recovery_max_penalty() -> i32 {
+    40
+}
 
 #[cfg(test)]
 mod tests {
@@ -1004,9 +1088,7 @@ enabled = true"#,
             "browser-deepseek",
             "browser-mimo",
         ] {
-            let providers = format!(
-                "[[providers]]\nid = \"browser\"\nkind = \"{kind}\""
-            );
+            let providers = format!("[[providers]]\nid = \"browser\"\nkind = \"{kind}\"");
             let raw = minimal_config(
                 &providers,
                 r#"[[accounts]]
@@ -1278,5 +1360,4 @@ enabled = true"#,
             .to_string()
             .contains("cannot mix legacy routes with tiers"));
     }
-
 }

@@ -230,6 +230,9 @@ mod tests {
         for _ in 0..10 {
             state.observe_failure(10_000, &config());
         }
-        assert_eq!(state.snapshot(&config()).penalty, config().adaptive_max_penalty);
+        assert_eq!(
+            state.snapshot(&config()).penalty,
+            config().adaptive_max_penalty
+        );
     }
 }

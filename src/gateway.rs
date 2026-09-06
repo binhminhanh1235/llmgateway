@@ -285,9 +285,7 @@ impl Gateway {
         let request_preference = body
             .get("llmgateway_execution_preference")
             .and_then(Value::as_str);
-        let request_api_fallback = body
-            .get("llmgateway_api_fallback")
-            .and_then(Value::as_bool);
+        let request_api_fallback = body.get("llmgateway_api_fallback").and_then(Value::as_bool);
 
         if request_preference.is_none() && request_api_fallback.is_none() {
             return Ok(client_config);
@@ -1117,8 +1115,7 @@ fn route_failure_policy(error: &GatewayError) -> Option<(i64, bool)> {
 }
 
 fn is_retryable_attempt_error(error: &GatewayError) -> bool {
-    !matches!(error, GatewayError::BrowserModelRecipeStale(_))
-        && !is_model_binding_conflict(error)
+    !matches!(error, GatewayError::BrowserModelRecipeStale(_)) && !is_model_binding_conflict(error)
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -1177,7 +1174,10 @@ mod client_policy_tests {
 
     #[test]
     fn legacy_execution_preference_aliases_normalize_before_permission_checks() {
-        assert_eq!(normalize_execution_policy("browser-first"), "prefer-browser");
+        assert_eq!(
+            normalize_execution_policy("browser-first"),
+            "prefer-browser"
+        );
         assert_eq!(normalize_execution_policy("api-first"), "prefer-api");
         assert_eq!(normalize_execution_policy("balanced"), "balanced");
     }

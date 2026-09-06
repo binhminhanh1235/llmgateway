@@ -213,20 +213,35 @@ impl BrowserSessionStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        let (status, login_attempt_id, login_started_at, last_ready_at, last_verified_at, last_error, updated_at) =
-            if let Some(row) = row {
-                (
-                    row.try_get::<String, _>("status")?,
-                    row.try_get("login_attempt_id")?,
-                    row.try_get("login_started_at")?,
-                    row.try_get("last_ready_at")?,
-                    row.try_get("last_verified_at")?,
-                    row.try_get("last_error")?,
-                    row.try_get("updated_at")?,
-                )
-            } else {
-                (STATUS_LOGIN_REQUIRED.into(), None, None, None, None, None, None)
-            };
+        let (
+            status,
+            login_attempt_id,
+            login_started_at,
+            last_ready_at,
+            last_verified_at,
+            last_error,
+            updated_at,
+        ) = if let Some(row) = row {
+            (
+                row.try_get::<String, _>("status")?,
+                row.try_get("login_attempt_id")?,
+                row.try_get("login_started_at")?,
+                row.try_get("last_ready_at")?,
+                row.try_get("last_verified_at")?,
+                row.try_get("last_error")?,
+                row.try_get("updated_at")?,
+            )
+        } else {
+            (
+                STATUS_LOGIN_REQUIRED.into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
 
         let enabled = self.enabled() && spec.enabled;
         let routable = enabled && status == STATUS_READY;
@@ -279,10 +294,13 @@ impl BrowserSessionStore {
             profile_dir: profile_dir.display().to_string(),
             session,
             instructions: vec![
-                "Open the login URL in a Chromium browser using this isolated profile directory.".into(),
+                "Open the login URL in a Chromium browser using this isolated profile directory."
+                    .into(),
                 "Complete login, CAPTCHA, and 2FA normally in the browser if requested.".into(),
-                "Never copy raw cookies into llmgateway; the browser profile owns session secrets.".into(),
-                "Mark the session ready only after the normal login has completed successfully.".into(),
+                "Never copy raw cookies into llmgateway; the browser profile owns session secrets."
+                    .into(),
+                "Mark the session ready only after the normal login has completed successfully."
+                    .into(),
             ],
         })
     }
@@ -344,7 +362,8 @@ impl BrowserSessionStore {
         id: &str,
         error: Option<&str>,
     ) -> Result<BrowserSessionView, BrowserSessionError> {
-        self.set_runtime_status(id, STATUS_LOGIN_REQUIRED, error, true).await
+        self.set_runtime_status(id, STATUS_LOGIN_REQUIRED, error, true)
+            .await
     }
 
     pub async fn mark_degraded(
@@ -352,11 +371,13 @@ impl BrowserSessionStore {
         id: &str,
         error: &str,
     ) -> Result<BrowserSessionView, BrowserSessionError> {
-        self.set_runtime_status(id, STATUS_DEGRADED, Some(error), false).await
+        self.set_runtime_status(id, STATUS_DEGRADED, Some(error), false)
+            .await
     }
 
     pub async fn mark_stopped(&self, id: &str) -> Result<BrowserSessionView, BrowserSessionError> {
-        self.set_runtime_status(id, STATUS_STOPPED, None, true).await
+        self.set_runtime_status(id, STATUS_STOPPED, None, true)
+            .await
     }
 
     pub async fn mark_failed(
@@ -364,11 +385,13 @@ impl BrowserSessionStore {
         id: &str,
         error: &str,
     ) -> Result<BrowserSessionView, BrowserSessionError> {
-        self.set_runtime_status(id, STATUS_FAILED, Some(error), true).await
+        self.set_runtime_status(id, STATUS_FAILED, Some(error), true)
+            .await
     }
 
     pub async fn reset(&self, id: &str) -> Result<BrowserSessionView, BrowserSessionError> {
-        self.set_runtime_status(id, STATUS_LOGIN_REQUIRED, None, true).await
+        self.set_runtime_status(id, STATUS_LOGIN_REQUIRED, None, true)
+            .await
     }
 
     async fn set_runtime_status(

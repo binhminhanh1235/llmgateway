@@ -80,7 +80,11 @@ pub async fn complete_browser_login(
         return unavailable();
     };
     match store.mark_ready(&session_id).await {
-        Ok(session) => json_response(StatusCode::OK, json!({"ready":true,"session":session}), None),
+        Ok(session) => json_response(
+            StatusCode::OK,
+            json!({"ready":true,"session":session}),
+            None,
+        ),
         Err(error) => browser_error(error),
     }
 }
@@ -97,7 +101,11 @@ pub async fn verify_browser_session(
         return unavailable();
     };
     match store.mark_verified(&session_id).await {
-        Ok(session) => json_response(StatusCode::OK, json!({"verified":true,"session":session}), None),
+        Ok(session) => json_response(
+            StatusCode::OK,
+            json!({"verified":true,"session":session}),
+            None,
+        ),
         Err(error) => browser_error(error),
     }
 }
@@ -121,8 +129,15 @@ pub async fn require_browser_attention(
     let Some(store) = store() else {
         return unavailable();
     };
-    match store.require_attention(&session_id, body.error.trim()).await {
-        Ok(session) => json_response(StatusCode::OK, json!({"requires_attention":true,"session":session}), None),
+    match store
+        .require_attention(&session_id, body.error.trim())
+        .await
+    {
+        Ok(session) => json_response(
+            StatusCode::OK,
+            json!({"requires_attention":true,"session":session}),
+            None,
+        ),
         Err(error) => browser_error(error),
     }
 }
@@ -139,7 +154,11 @@ pub async fn reset_browser_session(
         return unavailable();
     };
     match store.reset(&session_id).await {
-        Ok(session) => json_response(StatusCode::OK, json!({"reset":true,"session":session}), None),
+        Ok(session) => json_response(
+            StatusCode::OK,
+            json!({"reset":true,"session":session}),
+            None,
+        ),
         Err(error) => browser_error(error),
     }
 }
@@ -158,9 +177,11 @@ fn unavailable() -> Response<Body> {
 
 fn browser_error(error: BrowserSessionError) -> Response<Body> {
     match error {
-        BrowserSessionError::NotFound(message) => {
-            json_error(StatusCode::NOT_FOUND, "browser_session_error", &format!("browser session '{message}' was not found"))
-        }
+        BrowserSessionError::NotFound(message) => json_error(
+            StatusCode::NOT_FOUND,
+            "browser_session_error",
+            &format!("browser session '{message}' was not found"),
+        ),
         BrowserSessionError::InvalidConfig(message) => {
             json_error(StatusCode::BAD_REQUEST, "browser_session_error", &message)
         }

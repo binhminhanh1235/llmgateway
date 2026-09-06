@@ -279,15 +279,16 @@ impl ContextEngine {
         }
 
         let mut memory = self.memory_snapshot(&detail.id).await?;
-        for chunk in chunk_messages_atomic(
-            &pending,
-            self.config.context.summary_input_tokens.max(512),
-        ) {
+        for chunk in
+            chunk_messages_atomic(&pending, self.config.context.summary_input_tokens.max(512))
+        {
             let values = chunk
                 .iter()
                 .map(|message| message.message.clone())
                 .collect::<Vec<_>>();
-            let previous_summary = checkpoint.as_ref().map(|existing| existing.summary.as_str());
+            let previous_summary = checkpoint
+                .as_ref()
+                .map(|existing| existing.summary.as_str());
             let previous_memory = memory.as_ref().map(|snapshot| &snapshot.memory);
             let (updated_memory, route_id) = self
                 .summarize_structured(
@@ -434,11 +435,7 @@ NEW TRANSCRIPT SEGMENT:\n{transcript}\n"
         Ok((memory, route_id))
     }
 
-    fn can_compact(
-        &self,
-        detail: &ThreadDetail,
-        checkpoint: Option<&ContextCheckpoint>,
-    ) -> bool {
+    fn can_compact(&self, detail: &ThreadDetail, checkpoint: Option<&ContextCheckpoint>) -> bool {
         let keep_recent = self.config.context.recent_messages.max(1);
         let Some(cutoff_index) = safe_compaction_cutoff(&detail.messages, keep_recent) else {
             return false;
@@ -806,8 +803,7 @@ fn ensure_sqlite_parent(database_url: &str) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        atomic_message_groups, estimate_text_tokens, fit_messages_to_budget,
-        safe_compaction_cutoff,
+        atomic_message_groups, estimate_text_tokens, fit_messages_to_budget, safe_compaction_cutoff,
     };
     use crate::conversation::StoredMessage;
     use serde_json::{json, Value};
@@ -879,8 +875,14 @@ mod tests {
         let groups = atomic_message_groups(&messages);
         assert_eq!(groups.len(), 3);
         assert_eq!(groups[1].len(), 2);
-        assert_eq!(groups[1][0].get("role").and_then(Value::as_str), Some("assistant"));
-        assert_eq!(groups[1][1].get("role").and_then(Value::as_str), Some("tool"));
+        assert_eq!(
+            groups[1][0].get("role").and_then(Value::as_str),
+            Some("assistant")
+        );
+        assert_eq!(
+            groups[1][1].get("role").and_then(Value::as_str),
+            Some("tool")
+        );
     }
 
     #[test]
@@ -925,7 +927,10 @@ mod tests {
                     }]
                 }),
             ),
-            stored(3, json!({"role":"tool","tool_call_id":"call_1","content":"result"})),
+            stored(
+                3,
+                json!({"role":"tool","tool_call_id":"call_1","content":"result"}),
+            ),
             stored(4, json!({"role":"assistant","content":"after tool"})),
         ];
         assert_eq!(safe_compaction_cutoff(&messages, 2), Some(1));

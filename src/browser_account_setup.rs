@@ -8,8 +8,7 @@ use crate::{
     browser_session::BrowserConfig,
     browser_session_runtime,
     chromium_driver::ChromiumConfig,
-    chromium_driver_api,
-    chromium_driver_runtime,
+    chromium_driver_api, chromium_driver_runtime,
     config::AppConfig,
 };
 use axum::{
@@ -26,9 +25,7 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
-use toml_edit::{
-    value, Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value,
-};
+use toml_edit::{value, Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize)]
@@ -604,7 +601,10 @@ pub fn apply_account_delete(
                     continue;
                 };
                 remove_string_values(group.get_mut("routes"), &removed_routes);
-                if let Some(tiers) = group.get_mut("tiers").and_then(Item::as_array_of_tables_mut) {
+                if let Some(tiers) = group
+                    .get_mut("tiers")
+                    .and_then(Item::as_array_of_tables_mut)
+                {
                     for tier in tiers.iter_mut() {
                         remove_string_values(tier.get_mut("routes"), &removed_routes);
                     }
@@ -669,9 +669,9 @@ pub fn apply_browser_account_enabled(
     let path = path.as_ref();
     let raw = fs::read_to_string(path)?;
     let current = AppConfig::parse(&raw)?;
-    let account = current.account(account_id).ok_or_else(|| {
-        BrowserAccountSetupError::NotFound(account_id.to_string())
-    })?;
+    let account = current
+        .account(account_id)
+        .ok_or_else(|| BrowserAccountSetupError::NotFound(account_id.to_string()))?;
     let provider = current.provider(&account.provider).ok_or_else(|| {
         BrowserAccountSetupError::Invalid(format!(
             "account '{account_id}' references unknown provider '{}'",
@@ -701,9 +701,7 @@ pub fn apply_browser_account_enabled(
     let table = accounts
         .iter_mut()
         .find(|table| table.get("id").and_then(Item::as_str) == Some(account_id))
-        .ok_or_else(|| {
-            BrowserAccountSetupError::NotFound(account_id.to_string())
-        })?;
+        .ok_or_else(|| BrowserAccountSetupError::NotFound(account_id.to_string()))?;
     table["enabled"] = value(enabled);
 
     let rendered = doc.to_string();
@@ -785,7 +783,11 @@ pub fn apply_browser_account_setup(
             )
         });
     validate_id("account_id", &account_id)?;
-    if current.accounts.iter().any(|account| account.id == account_id) {
+    if current
+        .accounts
+        .iter()
+        .any(|account| account.id == account_id)
+    {
         return Err(BrowserAccountSetupError::Conflict(account_id));
     }
 
@@ -1108,9 +1110,9 @@ fn upsert_by_id<'a>(
     table["id"] = value(id);
     tables.push(table);
     let index = tables.len().saturating_sub(1);
-    tables.get_mut(index).ok_or_else(|| {
-        BrowserAccountSetupError::Invalid(format!("could not create table '{id}'"))
-    })
+    tables
+        .get_mut(index)
+        .ok_or_else(|| BrowserAccountSetupError::Invalid(format!("could not create table '{id}'")))
 }
 
 fn append_new_by_id<'a>(
@@ -1127,9 +1129,9 @@ fn append_new_by_id<'a>(
     table["id"] = value(id);
     tables.push(table);
     let index = tables.len().saturating_sub(1);
-    tables.get_mut(index).ok_or_else(|| {
-        BrowserAccountSetupError::Invalid(format!("could not create table '{id}'"))
-    })
+    tables
+        .get_mut(index)
+        .ok_or_else(|| BrowserAccountSetupError::Invalid(format!("could not create table '{id}'")))
 }
 
 fn append_route_to_virtual_model(
@@ -1163,11 +1165,7 @@ fn append_route_to_virtual_model(
         let fallback_index = tiers
             .iter()
             .enumerate()
-            .max_by_key(|(_, tier)| {
-                tier.get("priority")
-                    .and_then(Item::as_integer)
-                    .unwrap_or(0)
-            })
+            .max_by_key(|(_, tier)| tier.get("priority").and_then(Item::as_integer).unwrap_or(0))
             .map(|(index, _)| index)
             .unwrap_or(0);
         let fallback = tiers.get_mut(fallback_index).ok_or_else(|| {
@@ -1191,11 +1189,12 @@ fn append_unique_string(
         .get_mut(key)
         .and_then(Item::as_array_mut)
         .ok_or_else(|| {
-            BrowserAccountSetupError::Invalid(format!(
-                "configuration key '{key}' must be an array"
-            ))
+            BrowserAccountSetupError::Invalid(format!("configuration key '{key}' must be an array"))
         })?;
-    if !array.iter().any(|value| value.as_str() == Some(value_to_add)) {
+    if !array
+        .iter()
+        .any(|value| value.as_str() == Some(value_to_add))
+    {
         array.push(value_to_add);
     }
     Ok(())
@@ -1342,7 +1341,10 @@ routes = ["api"]
         let route = parsed.route("chatgpt-a-route").unwrap();
         assert_eq!(route.model, "chatgpt-web-default");
         assert_eq!(route.priority, 4);
-        assert!(route.capabilities.iter().any(|capability| capability == "coding"));
+        assert!(route
+            .capabilities
+            .iter()
+            .any(|capability| capability == "coding"));
         assert!(parsed.virtual_models["llmgateway-auto"]
             .routes
             .contains(&"chatgpt-a-route".to_string()));
@@ -1423,9 +1425,15 @@ routes = ["api"]
 
         let raw = fs::read_to_string(&path).unwrap();
         let parsed = AppConfig::parse(&raw).unwrap();
-        assert_eq!(parsed.provider("deepseek-web").unwrap().kind, "browser-deepseek");
+        assert_eq!(
+            parsed.provider("deepseek-web").unwrap().kind,
+            "browser-deepseek"
+        );
         assert!(parsed.account("deepseek-a").unwrap().discover_models);
-        assert_eq!(parsed.route("deepseek-a-route").unwrap().model, "deepseek-web-default");
+        assert_eq!(
+            parsed.route("deepseek-a-route").unwrap().model,
+            "deepseek-web-default"
+        );
         assert!(parsed.virtual_models["llmgateway-coding"]
             .routes
             .contains(&"deepseek-a-route".to_string()));
@@ -1533,16 +1541,12 @@ routes = ["api"]
 
         assert!(!group.contains_key("routes"));
         let tiers = group["tiers"].as_array_of_tables().unwrap();
-        assert!(!tiers
-            .get(0)
-            .unwrap()["routes"]
+        assert!(!tiers.get(0).unwrap()["routes"]
             .as_array()
             .unwrap()
             .iter()
             .any(|value| value.as_str() == Some("new-route")));
-        assert!(tiers
-            .get(1)
-            .unwrap()["routes"]
+        assert!(tiers.get(1).unwrap()["routes"]
             .as_array()
             .unwrap()
             .iter()
@@ -1556,8 +1560,7 @@ routes = ["api"]
 
         let mut tier = Table::new();
         tier["priority"] = value(10);
-        tier["models"] =
-            Item::Value(Value::Array(string_array(["gemini-web/gemini-3.1-pro"])));
+        tier["models"] = Item::Value(Value::Array(string_array(["gemini-web/gemini-3.1-pro"])));
         tiers.push(tier);
         group["tiers"] = Item::ArrayOfTables(tiers);
 
@@ -1567,7 +1570,11 @@ routes = ["api"]
         let tier = tiers.get(0).unwrap();
         assert!(tier.get("routes").is_none());
         assert_eq!(
-            tier["models"].as_array().unwrap().get(0).and_then(Value::as_str),
+            tier["models"]
+                .as_array()
+                .unwrap()
+                .get(0)
+                .and_then(Value::as_str),
             Some("gemini-web/gemini-3.1-pro")
         );
     }
@@ -1606,7 +1613,10 @@ routes = ["api"]
         let result = apply_account_delete(&path, "gemini-delete").unwrap();
         assert_eq!(result.account_id, "gemini-delete");
         assert_eq!(result.browser_session_id.as_deref(), Some("gemini-delete"));
-        assert_eq!(result.removed_routes, vec!["gemini-delete-route".to_string()]);
+        assert_eq!(
+            result.removed_routes,
+            vec!["gemini-delete-route".to_string()]
+        );
 
         let raw = fs::read_to_string(&path).unwrap();
         let parsed = AppConfig::parse(&raw).unwrap();
@@ -1620,9 +1630,15 @@ routes = ["api"]
             .contains(&"gemini-delete-route".to_string()));
 
         let document: toml::Value = toml::from_str(&raw).unwrap();
-        assert!(document["browser"]["bindings"].get("gemini-delete").is_none());
-        assert!(document["browser"]["sessions"].get("gemini-delete").is_none());
-        assert!(document["chromium"]["sessions"].get("gemini-delete").is_none());
+        assert!(document["browser"]["bindings"]
+            .get("gemini-delete")
+            .is_none());
+        assert!(document["browser"]["sessions"]
+            .get("gemini-delete")
+            .is_none());
+        assert!(document["chromium"]["sessions"]
+            .get("gemini-delete")
+            .is_none());
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1648,7 +1664,6 @@ routes = ["api"]
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }
-
 
 #[cfg(test)]
 mod account_transport_persistence_tests {
@@ -1698,12 +1713,9 @@ mod account_transport_persistence_tests {
     #[test]
     fn non_browser_account_rejects_transport_control() {
         let path = super::tests::temp_config();
-        let error = apply_browser_account_transport_mode(
-            &path,
-            "api",
-            BrowserTransportMode::BrowserOnly,
-        )
-        .unwrap_err();
+        let error =
+            apply_browser_account_transport_mode(&path, "api", BrowserTransportMode::BrowserOnly)
+                .unwrap_err();
         assert!(matches!(error, BrowserAccountSetupError::Invalid(_)));
         assert!(error.to_string().contains("not browser-backed"));
     }

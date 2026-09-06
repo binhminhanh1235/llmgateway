@@ -1,5 +1,8 @@
 use crate::config::AppConfig;
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    SqlitePool,
+};
 use std::{fs, path::Path, str::FromStr};
 use toml_edit::{value, DocumentMut, Item};
 use uuid::Uuid;
@@ -52,13 +55,11 @@ pub async fn set_model_enabled(
     enabled: bool,
 ) -> Result<u64, String> {
     let pool = catalog_pool(config).await?;
-    let exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM models WHERE canonical_id = ?",
-    )
-    .bind(model_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|error| error.to_string())?;
+    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM models WHERE canonical_id = ?")
+        .bind(model_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|error| error.to_string())?;
     if exists == 0 {
         pool.close().await;
         return Err(format!("unknown model '{model_id}'"));

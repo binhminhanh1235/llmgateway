@@ -1,12 +1,12 @@
 use crate::{
     browser_auth::{BrowserAuthMaterial, BrowserAuthVault},
-    browser_auth_runtime, conversation_runtime,
+    browser_auth_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
-        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
-        BrowserlessCapabilities,
-        BrowserTransportMode, BROWSER_ADAPTER_CONTRACT_VERSION,
+        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError, BrowserTransportMode,
+        BrowserlessCapabilities, BROWSER_ADAPTER_CONTRACT_VERSION,
     },
+    conversation_runtime,
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
@@ -600,17 +600,12 @@ impl ChatGptWebHttpAdapter {
                 } else {
                     "direct_state_unsynced".into()
                 },
-                message: format!(
-                    "ChatGPT conversation state resync returned HTTP {status}"
-                ),
+                message: format!("ChatGPT conversation state resync returned HTTP {status}"),
             });
         }
-        let detail: Value = response
-            .json()
-            .await
-            .map_err(|error| {
-                preflight_error(&request.account.id, "direct_state_unsynced", error)
-            })?;
+        let detail: Value = response.json().await.map_err(|error| {
+            preflight_error(&request.account.id, "direct_state_unsynced", error)
+        })?;
         let parent_message_id = detail
             .get("current_node")
             .and_then(Value::as_str)
@@ -618,7 +613,9 @@ impl ChatGptWebHttpAdapter {
             .ok_or_else(|| BrowserProviderError::AdapterIncompatible {
                 account_id: request.account.id.clone(),
                 code: "direct_state_unsynced".into(),
-                message: "ChatGPT conversation detail returned no current_node for direct continuation".into(),
+                message:
+                    "ChatGPT conversation detail returned no current_node for direct continuation"
+                        .into(),
             })?
             .to_string();
 
@@ -707,16 +704,9 @@ impl ChatGptWebHttpAdapter {
             {
                 conduit = value.to_string();
             }
-            let body: Value = response
-                .json()
-                .await
-                .map_err(|error| {
-                    preflight_error(
-                        &request.account.id,
-                        "conversation_prepare_invalid",
-                        error,
-                    )
-                })?;
+            let body: Value = response.json().await.map_err(|error| {
+                preflight_error(&request.account.id, "conversation_prepare_invalid", error)
+            })?;
             if let Some(value) = body
                 .get("conduit_token")
                 .and_then(Value::as_str)
@@ -932,9 +922,7 @@ impl ChatGptWebHttpAdapter {
                     session,
                     &state,
                     referer,
-                    Duration::from_millis(
-                        request.binding.response_timeout_ms.unwrap_or(180_000),
-                    ),
+                    Duration::from_millis(request.binding.response_timeout_ms.unwrap_or(180_000)),
                 )
                 .await?;
             state.saw_done = false;
@@ -1383,7 +1371,9 @@ fn sentinel_config(session: &ChatGptSession) -> Vec<Value> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     vec![
         json!(2134),
-        json!(chrono::Utc::now().format("%a %b %d %Y %H:%M:%S GMT+0000 (UTC)").to_string()),
+        json!(chrono::Utc::now()
+            .format("%a %b %d %Y %H:%M:%S GMT+0000 (UTC)")
+            .to_string()),
         json!(4_294_967_296u64),
         json!(1),
         json!(session.user_agent),
@@ -1393,7 +1383,10 @@ fn sentinel_config(session: &ChatGptSession) -> Vec<Value> {
         json!("en-US,en"),
         json!(0),
         json!("vendor−Google Inc."),
-        json!(format!("_reactListening{}", &Uuid::new_v4().simple().to_string()[..10])),
+        json!(format!(
+            "_reactListening{}",
+            &Uuid::new_v4().simple().to_string()[..10]
+        )),
         json!("onmessage"),
         json!(0),
         json!(session.session_id),
@@ -1439,11 +1432,11 @@ fn solve_proof(
     }
     if difficulty.is_empty()
         || difficulty.len() > 8
-        || !difficulty.chars().all(|character| character.is_ascii_hexdigit())
+        || !difficulty
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
     {
-        return Err(format!(
-            "ChatGPT PoW difficulty is invalid: {difficulty:?}"
-        ));
+        return Err(format!("ChatGPT PoW difficulty is invalid: {difficulty:?}"));
     }
 
     let started = std::time::Instant::now();
@@ -1596,18 +1589,25 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
     models
 }
 
-fn serialize_prompt(body: &Value, native_continuation: bool) -> Result<String, BrowserProviderError> {
+fn serialize_prompt(
+    body: &Value,
+    native_continuation: bool,
+) -> Result<String, BrowserProviderError> {
     let messages = body
         .get("messages")
         .and_then(Value::as_array)
-        .ok_or_else(|| BrowserProviderError::InvalidConfig(
-            "ChatGPT browserless chat requires an OpenAI-style messages array".into(),
-        ))?;
+        .ok_or_else(|| {
+            BrowserProviderError::InvalidConfig(
+                "ChatGPT browserless chat requires an OpenAI-style messages array".into(),
+            )
+        })?;
 
     if native_continuation {
-        if let Some(message) = messages.iter().rev().find(|message| {
-            message.get("role").and_then(Value::as_str) == Some("user")
-        }) {
+        if let Some(message) = messages
+            .iter()
+            .rev()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        {
             let text = content_text(message.get("content").unwrap_or(&Value::Null));
             if !text.trim().is_empty() {
                 return Ok(text);
@@ -1697,7 +1697,10 @@ impl SseDecoder {
             let Some((index, separator_len)) = find_sse_separator(&self.buffer) else {
                 break;
             };
-            let block = self.buffer.drain(..index + separator_len).collect::<Vec<_>>();
+            let block = self
+                .buffer
+                .drain(..index + separator_len)
+                .collect::<Vec<_>>();
             let payload = &block[..index];
             if payload.is_empty() {
                 continue;
@@ -1785,8 +1788,7 @@ impl ChatGptStreamState {
                 self.handoff = true;
                 if let Some(options) = object.get("options").and_then(Value::as_array) {
                     for option in options {
-                        if option.get("type").and_then(Value::as_str)
-                            == Some("resume_sse_endpoint")
+                        if option.get("type").and_then(Value::as_str) == Some("resume_sse_endpoint")
                         {
                             if let Some(topic) = option.get("topic_id").and_then(Value::as_str) {
                                 self.resume_topic = Some(topic.to_string());
@@ -1856,9 +1858,7 @@ impl ChatGptStreamState {
                 ("replace", "/message/status") => {
                     self.assistant_status = value.as_str().map(str::to_string)
                 }
-                ("replace", "/message/end_turn") => {
-                    self.assistant_end_turn = value.as_bool()
-                }
+                ("replace", "/message/end_turn") => self.assistant_end_turn = value.as_bool(),
                 ("replace", "/message/recipient") => {
                     self.assistant_recipient = value.as_str().map(str::to_string)
                 }
@@ -1982,10 +1982,7 @@ async fn consume_response_bytes(
                 .map_err(BrowserProviderError::Transport)?;
         }
     }
-    for event in decoder
-        .finish()
-        .map_err(BrowserProviderError::Transport)?
-    {
+    for event in decoder.finish().map_err(BrowserProviderError::Transport)? {
         let _ = state
             .ingest_event(&event.data)
             .map_err(BrowserProviderError::Transport)?;
@@ -1993,12 +1990,7 @@ async fn consume_response_bytes(
     Ok(())
 }
 
-fn openai_delta_event(
-    completion_id: &str,
-    created: i64,
-    model: &str,
-    delta: &str,
-) -> Value {
+fn openai_delta_event(completion_id: &str, created: i64, model: &str, delta: &str) -> Value {
     json!({
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -2101,8 +2093,7 @@ mod tests {
         state.assistant_recipient = Some("all".into());
         let first = state
             .ingest_event(
-                &json!({"p":"/message/content/parts/0","o":"append","v":"Hello"})
-                    .to_string(),
+                &json!({"p":"/message/content/parts/0","o":"append","v":"Hello"}).to_string(),
             )
             .unwrap();
         let second = state
@@ -2123,7 +2114,9 @@ mod tests {
             ]
         });
         assert_eq!(serialize_prompt(&body, true).unwrap(), "second");
-        assert!(serialize_prompt(&body, false).unwrap().contains("User: first"));
+        assert!(serialize_prompt(&body, false)
+            .unwrap()
+            .contains("User: first"));
     }
 
     #[test]
@@ -2179,7 +2172,9 @@ mod tests {
 
     #[test]
     fn browser_challenges_are_detected_without_solving_them() {
-        assert!(challenge_required(Some(&json!({"required":true,"dx":"abc"}))));
+        assert!(challenge_required(Some(
+            &json!({"required":true,"dx":"abc"})
+        )));
         assert!(!challenge_required(Some(&json!({"required":false}))));
     }
 }

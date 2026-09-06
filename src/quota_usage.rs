@@ -7,13 +7,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Row, SqlitePool,
 };
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{collections::HashMap, fs, path::Path, str::FromStr, sync::Arc};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -344,10 +338,7 @@ impl QuotaUsageStore {
         }
         let pressure = snapshot.daily.pressure.max(snapshot.monthly.pressure);
         let pressure_penalty = (pressure.clamp(0.0, 0.999) * 1_000.0).round() as i32;
-        let balance_penalty = snapshot
-            .daily
-            .requests
-            .min(i32::MAX as u64) as i32
+        let balance_penalty = snapshot.daily.requests.min(i32::MAX as u64) as i32
             * self.usage_config.balance_weight.max(0);
         let rate_limit_penalty = (snapshot.consecutive_429 as i32).saturating_mul(100);
         let hint_penalty = if snapshot.remaining_requests_hint == Some(0)
@@ -373,7 +364,12 @@ impl QuotaUsageStore {
             return Err(UsageError::AccountNotFound(account_id.to_string()));
         }
         self.ensure_account_state(account_id).await?;
-        let quota = self.usage_config.accounts.get(account_id).cloned().unwrap_or_default();
+        let quota = self
+            .usage_config
+            .accounts
+            .get(account_id)
+            .cloned()
+            .unwrap_or_default();
         let daily = self
             .window_usage(
                 account_id,
@@ -403,8 +399,8 @@ impl QuotaUsageStore {
             .as_deref()
             .and_then(parse_time)
             .is_some_and(|until| until > Utc::now());
-        let hard_exhausted = self.usage_config.hard_limits
-            && (daily.pressure >= 1.0 || monthly.pressure >= 1.0);
+        let hard_exhausted =
+            self.usage_config.hard_limits && (daily.pressure >= 1.0 || monthly.pressure >= 1.0);
         Ok(AccountUsageSnapshot {
             account_id: account_id.to_string(),
             blocked: cooldown_active || hard_exhausted,
@@ -421,7 +417,12 @@ impl QuotaUsageStore {
 
     pub async fn summary(&self) -> Result<UsageSummary, UsageError> {
         let mut accounts = Vec::with_capacity(self.app_config.accounts.len());
-        for account in self.app_config.accounts.iter().filter(|account| account.enabled) {
+        for account in self
+            .app_config
+            .accounts
+            .iter()
+            .filter(|account| account.enabled)
+        {
             accounts.push(self.account_snapshot(&account.id).await?);
         }
         Ok(UsageSummary {
@@ -570,7 +571,10 @@ fn validate_usage_config(app: &AppConfig, usage: &UsageConfig) -> Result<(), Usa
                 )));
             }
         }
-        if quota.rate_limit_cooldown_seconds.is_some_and(|value| value <= 0) {
+        if quota
+            .rate_limit_cooldown_seconds
+            .is_some_and(|value| value <= 0)
+        {
             return Err(UsageError::InvalidConfig(format!(
                 "usage.accounts.{account_id}.rate_limit_cooldown_seconds must be greater than zero"
             )));

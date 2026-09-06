@@ -1,6 +1,4 @@
-use crate::{
-    api::{authorize, client_policy_error, json_response, AppState},
-};
+use crate::api::{authorize, client_policy_error, json_response, AppState};
 use axum::{
     body::Body,
     extract::State,

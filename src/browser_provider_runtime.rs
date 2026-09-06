@@ -3,9 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 static REGISTRY: OnceLock<Arc<BrowserProviderRegistry>> = OnceLock::new();
 
-pub fn install(
-    registry: Arc<BrowserProviderRegistry>,
-) -> Result<(), Arc<BrowserProviderRegistry>> {
+pub fn install(registry: Arc<BrowserProviderRegistry>) -> Result<(), Arc<BrowserProviderRegistry>> {
     REGISTRY.set(registry)
 }
 

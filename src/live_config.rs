@@ -35,8 +35,9 @@ mod tests {
 
     #[test]
     fn swaps_complete_immutable_snapshots() {
-        let first = Arc::new(AppConfig::parse(
-            r#"
+        let first = Arc::new(
+            AppConfig::parse(
+                r#"
 [server]
 host="127.0.0.1"
 port=7331
@@ -60,12 +61,15 @@ enabled=true
 [virtual_models.auto]
 routes=["r"]
 "#,
-        ).unwrap());
+            )
+            .unwrap(),
+        );
         let live = LiveConfig::new(first);
         assert_eq!(live.snapshot().server.port, 7331);
 
-        let second = Arc::new(AppConfig::parse(
-            r#"
+        let second = Arc::new(
+            AppConfig::parse(
+                r#"
 [server]
 host="127.0.0.1"
 port=7444
@@ -89,7 +93,9 @@ enabled=true
 [virtual_models.auto]
 routes=["r"]
 "#,
-        ).unwrap());
+            )
+            .unwrap(),
+        );
         live.replace(second);
         assert_eq!(live.snapshot().server.port, 7444);
     }

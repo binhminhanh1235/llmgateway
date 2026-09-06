@@ -94,8 +94,7 @@ impl BrowserAuthMaterial {
                     .trim_start_matches('.')
                     .trim_end_matches('.')
                     .to_ascii_lowercase();
-                !domain.is_empty()
-                    && (host == domain || host.ends_with(&format!(".{domain}")))
+                !domain.is_empty() && (host == domain || host.ends_with(&format!(".{domain}")))
             })
             .map(|cookie| format!("{}={}", cookie.name, cookie.value))
             .collect::<Vec<_>>()
@@ -167,9 +166,8 @@ impl BrowserAuthVault {
         })
     }
 
-     pub fn contains(&self, session_id: &str) -> bool {
-        self.entry_path(session_id)
-            .is_ok_and(|path| path.is_file())
+    pub fn contains(&self, session_id: &str) -> bool {
+        self.entry_path(session_id).is_ok_and(|path| path.is_file())
     }
 
     pub fn store(&self, material: &BrowserAuthMaterial) -> Result<(), BrowserAuthVaultError> {
@@ -241,7 +239,7 @@ impl BrowserAuthVault {
         Ok(true)
     }
 
-     fn entry_path(&self, session_id: &str) -> Result<PathBuf, BrowserAuthVaultError> {
+    fn entry_path(&self, session_id: &str) -> Result<PathBuf, BrowserAuthVaultError> {
         validate_session_id(session_id)?;
         Ok(self.root.join(format!("{session_id}.auth")))
     }
@@ -276,9 +274,9 @@ fn random_nonce() -> [u8; 12] {
 
 fn validate_session_id(session_id: &str) -> Result<(), BrowserAuthVaultError> {
     if session_id.is_empty()
-        || !session_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        || !session_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
     {
         return Err(BrowserAuthVaultError::InvalidEntry(
             "session id may contain only letters, numbers, '.', '-' and '_'".into(),
@@ -371,7 +369,10 @@ mod tests {
         let restored = vault.load("gemini-web-one").unwrap();
         assert_eq!(restored, material);
         assert_eq!(restored.cookie_header(), "SID=secret");
-        assert_eq!(restored.cookie_header_for_host("gemini.google.com"), "SID=secret");
+        assert_eq!(
+            restored.cookie_header_for_host("gemini.google.com"),
+            "SID=secret"
+        );
         assert_eq!(
             restored.cookie_value_for_host("gemini.google.com", "SID"),
             Some("secret")

@@ -1,6 +1,7 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
-    browser_auth_runtime, browser_provider_runtime, browser_session_runtime, chromium_driver_runtime,
+    browser_auth_runtime, browser_provider_runtime, browser_session_runtime,
+    chromium_driver_runtime,
 };
 use axum::{
     body::Body,
@@ -108,8 +109,8 @@ pub async fn browser_account_runtime_diagnostics(
             "refresh_required": true,
         }),
     };
-    let auth_snapshot_available = browser_auth_runtime::get()
-        .is_some_and(|vault| vault.contains(&session_id));
+    let auth_snapshot_available =
+        browser_auth_runtime::get().is_some_and(|vault| vault.contains(&session_id));
     let browser = match chromium_driver_runtime::get() {
         Some(driver) => driver.status(&session_id).await.ok(),
         None => None,
@@ -233,18 +234,20 @@ pub async fn browser_thread_affinity_diagnostics(
     let safe_state = raw_state
         .as_ref()
         .map(summarize_provider_state)
-        .unwrap_or_else(|| json!({
-            "present": false,
-            "transport": Value::Null,
-            "needs_resync": false,
-            "conversation_id_present": false,
-            "parent_message_id_present": false,
-            "metadata_present": false,
-            "response_id_present": false,
-            "candidate_id_present": false,
-            "model_external_id_present": false,
-            "native_chain": Value::Null
-        }));
+        .unwrap_or_else(|| {
+            json!({
+                "present": false,
+                "transport": Value::Null,
+                "needs_resync": false,
+                "conversation_id_present": false,
+                "parent_message_id_present": false,
+                "metadata_present": false,
+                "response_id_present": false,
+                "candidate_id_present": false,
+                "model_external_id_present": false,
+                "native_chain": Value::Null
+            })
+        });
 
     json_response(
         StatusCode::OK,

@@ -344,10 +344,7 @@ fn activate_model_groups(
     Ok(config)
 }
 
-fn group_views(
-    config: &AppConfig,
-    fallback_eligible: &HashSet<String>,
-) -> Vec<ModelGroupView> {
+fn group_views(config: &AppConfig, fallback_eligible: &HashSet<String>) -> Vec<ModelGroupView> {
     let mut groups = config
         .virtual_models
         .iter()
@@ -471,11 +468,9 @@ async fn model_views(
             .filter(|binding| {
                 binding.enabled
                     && matches!(binding.availability.as_str(), "available" | "unknown")
-                    && config
-                        .account(&binding.account_id)
-                        .is_some_and(|account| {
-                            account.enabled && account.provider == model.provider
-                        })
+                    && config.account(&binding.account_id).is_some_and(|account| {
+                        account.enabled && account.provider == model.provider
+                    })
             })
             .map(|binding| binding.account_id.clone())
             .collect::<Vec<_>>();
@@ -597,7 +592,10 @@ pub fn apply_model_group(
     let raw = fs::read_to_string(path)?;
     let current = AppConfig::parse(&raw)?;
 
-    match (current.virtual_models.contains_key(group_id), update_existing) {
+    match (
+        current.virtual_models.contains_key(group_id),
+        update_existing,
+    ) {
         (true, false) => return Err(ModelGroupError::Conflict(group_id.to_string())),
         (false, true) => return Err(ModelGroupError::NotFound(group_id.to_string())),
         _ => {}
@@ -685,7 +683,11 @@ pub fn remove_model_group(
             "cannot delete default model group '{group_id}'"
         )));
     }
-    if let Some(alias) = current.aliases.iter().find(|alias| alias.target == group_id) {
+    if let Some(alias) = current
+        .aliases
+        .iter()
+        .find(|alias| alias.target == group_id)
+    {
         return Err(ModelGroupError::Invalid(format!(
             "cannot delete model group '{group_id}' while alias '{}' targets it",
             alias.pattern
@@ -760,7 +762,11 @@ fn validate_tiers(
             )));
         }
 
-        let tier_kind = if tier.models.is_empty() { "routes" } else { "models" };
+        let tier_kind = if tier.models.is_empty() {
+            "routes"
+        } else {
+            "models"
+        };
         if membership_kind.is_some_and(|kind| kind != tier_kind) {
             return Err(ModelGroupError::Invalid(
                 "a model group cannot mix route-backed and model-backed tiers".into(),
@@ -820,10 +826,7 @@ fn model_group_root_key(doc: &DocumentMut) -> &'static str {
     }
 }
 
-fn ensure_table<'a>(
-    parent: &'a mut Table,
-    key: &str,
-) -> Result<&'a mut Table, ModelGroupError> {
+fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, ModelGroupError> {
     if !parent.contains_key(key) {
         parent.insert(key, Item::Table(Table::new()));
     }
@@ -831,9 +834,7 @@ fn ensure_table<'a>(
         .get_mut(key)
         .and_then(Item::as_table_mut)
         .ok_or_else(|| {
-            ModelGroupError::Invalid(format!(
-                "configuration key '{key}' must be a TOML table"
-            ))
+            ModelGroupError::Invalid(format!("configuration key '{key}' must be a TOML table"))
         })
 }
 
@@ -845,10 +846,7 @@ fn string_array<'a>(values: impl IntoIterator<Item = &'a str>) -> Array {
     array
 }
 
-fn write_validated_config(
-    path: &Path,
-    rendered: &str,
-) -> Result<Option<PathBuf>, ModelGroupError> {
+fn write_validated_config(path: &Path, rendered: &str) -> Result<Option<PathBuf>, ModelGroupError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let backup = if path.exists() {
@@ -1016,12 +1014,10 @@ routes = ["route-a", "route-b"]
         assert!(AppConfig::load(&path).unwrap().virtual_models["my-group"].enabled);
 
         remove_model_group(&path, "my-group").unwrap();
-        assert!(
-            !AppConfig::load(&path)
-                .unwrap()
-                .virtual_models
-                .contains_key("my-group")
-        );
+        assert!(!AppConfig::load(&path)
+            .unwrap()
+            .virtual_models
+            .contains_key("my-group"));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
