@@ -82,6 +82,17 @@ priority = 20
 enabled = true
 capabilities = ["chat"]
 
+[[routes]]
+id = "fake-media-route"
+account = "fake-primary"
+model = "fake-media-model"
+priority = 15
+enabled = true
+capabilities = ["chat", "audio_transcription", "image_generation", "image_output", "image_editing"]
+
+[virtual_models.llmgateway-media]
+routes = ["fake-media-route"]
+
 [virtual_models.llmgateway-auto]
 routes = ["fake-route"]
 
@@ -194,6 +205,12 @@ structured=physical["llmgateway"]["multimodal_capabilities"]
 assert "chat" in legacy, physical
 assert structured["input_modalities"] == ["text","image","file"], structured
 assert structured["output_modalities"] == ["text"], structured
+media=next(item for item in x["data"] if item["id"]=="fake/fake-media-model")
+mc=media["llmgateway"]["multimodal_capabilities"]
+assert mc["audio_transcription"] is True, mc
+assert mc["image_generation"] is True, mc
+assert mc["image_editing"] is True, mc
+assert "image" in mc["output_modalities"], mc
 '
 
 CAPABILITIES_JSON=$(curl -fsS http://127.0.0.1:7331/v1/capabilities \
@@ -205,7 +222,11 @@ assert x["object"] == "llmgateway.capabilities", x
 assert x["schema_version"] == 1, x
 assert x["canonical_modalities"]["input"] == ["text","image","file","audio"], x
 assert x["canonical_modalities"]["output"] == ["text","image","audio","file"], x
-assert x["gateway_execution"]["input_modalities"] == ["text","image","file"], x
+assert x["gateway_execution"]["input_modalities"] == ["text","image","file","audio"], x
+assert "image" in x["gateway_execution"]["output_modalities"], x
+assert x["gateway_execution"]["audio_transcription"] is True, x
+assert x["gateway_execution"]["image_generation"] is True, x
+assert x["gateway_execution"]["image_editing"] is True, x
 assert x["gateway_execution"]["native_file_upload"] is True, x
 assert x["live_attachments"] is True, x
 assert x["artifact_store"]["enabled"] is True, x
@@ -301,6 +322,7 @@ test "$(find data/artifacts/blobs -type f | wc -l | tr -d ' ')" = "0"
 
 bash scripts/smoke-vision-api.sh
 bash scripts/smoke-file-attachments.sh
+bash scripts/smoke-media-api.sh
 
 curl -fsS -X POST http://127.0.0.1:7331/v1/chat/completions \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
