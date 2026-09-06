@@ -416,7 +416,10 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     };
     let mut data: BTreeMap<String, Value> = BTreeMap::new();
 
-    for id in config.virtual_models.keys() {
+    for (id, group) in &config.virtual_models {
+        if !group.enabled {
+            continue;
+        }
         if access.policy().is_some_and(|policy| !policy.model_allowed(id, id)) {
             continue;
         }
