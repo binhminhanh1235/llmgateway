@@ -1207,6 +1207,7 @@ fn partial_suffix_len(text: &str, tokens: &[&str]) -> usize {
         .flat_map(|token| 1..token.len())
         .filter(|length| {
             text.len() >= *length
+                && text.is_char_boundary(text.len() - *length)
                 && tokens
                     .iter()
                     .any(|token| token.starts_with(&text[text.len() - *length..]))
@@ -1579,6 +1580,14 @@ mod tests {
             split_reasoning("<think>why</think>Hello"),
             ("why".into(), "Hello".into())
         );
+    }
+
+    #[test]
+    fn split_reasoning_handles_multibyte_utf8_without_panic() {
+        let text = "<think>The user wants me to test \"tất cả\" sự ổn định";
+        let (reasoning, prefix) = split_reasoning(text);
+        assert_eq!(reasoning, "The user wants me to test \"tất cả\" sự ổn định");
+        assert_eq!(prefix, "");
     }
 
     #[test]
