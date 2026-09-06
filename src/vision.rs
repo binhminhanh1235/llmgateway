@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn image_artifact_collection_ignores_file_attachment_uris() {
-        let body = json!({
+        let body = serde_json::json!({
             "messages":[{
                 "role":"user",
                 "content":[
