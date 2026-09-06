@@ -138,7 +138,6 @@ impl Drop for ExecutionStreamGuard {
         }
     }
 }
-}
 
 fn observe_terminal_sse_completion(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
     buffer.extend_from_slice(chunk);
