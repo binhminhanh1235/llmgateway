@@ -332,7 +332,68 @@ printf '%s' "$ENABLE" | python3 -c 'import json,sys; x=json.load(sys.stdin); ass
 REENABLED=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain   "${AUTH[@]}" "${JSON[@]}"   -d '{"model":"llmgateway-auto","body":{"messages":[{"role":"user","content":"re-enabled"}]}}')
 printf '%s' "$REENABLED" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["selected_route"] == "qwen-ci-route", x'
 
-curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/qwen-ci/driver/stop "${AUTH[@]}" >/dev/null
+DELETE_ACCOUNT=$(curl -fsS -X DELETE \
+  http://127.0.0.1:7331/_llmgateway/accounts/qwen-ci \
+  "${AUTH[@]}")
+printf '%s' "$DELETE_ACCOUNT" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["deleted"] is True, x
+assert x["account_id"] == "qwen-ci", x
+assert "qwen-ci-route" in x["removed_routes"], x
+assert x["browser_session_id"] == "qwen-ci", x
+assert x["browser_profile_removed"] is True, x
+assert x["cleanup_warnings"] == [], x
+assert x["restart_required"] is False, x
+'
 BROWSER_PID=""
 
-echo "llmgateway v0.29 browser account hot activation + lifecycle E2E smoke test passed"
+test ! -d "$PROFILE_ROOT/qwen-ci"
+
+python3 - "$LLMGATEWAY_CONFIG" <<'PY'
+import sys,tomllib
+with open(sys.argv[1], "rb") as f: x=tomllib.load(f)
+assert all(a["id"] != "qwen-ci" for a in x["accounts"]), x["accounts"]
+assert all(r["id"] != "qwen-ci-route" for r in x["routes"]), x["routes"]
+assert "qwen-ci" not in x.get("browser", {}).get("bindings", {}), x.get("browser", {})
+assert "qwen-ci" not in x.get("browser", {}).get("sessions", {}), x.get("browser", {})
+assert "qwen-ci" not in x.get("chromium", {}).get("sessions", {}), x.get("chromium", {})
+for group in x["virtual_models"].values():
+    assert "qwen-ci-route" not in group.get("routes", []), group
+    for tier in group.get("tiers", []):
+        assert "qwen-ci-route" not in tier.get("routes", []), tier
+PY
+
+AFTER_DELETE_ACCOUNTS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/accounts "${AUTH[@]}")
+printf '%s' "$AFTER_DELETE_ACCOUNTS" | python3 -c '
+import json,sys
+ids={a["id"] for a in json.load(sys.stdin)["data"]}
+assert "qwen-ci" not in ids, ids
+'
+
+AFTER_DELETE_SESSIONS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions "${AUTH[@]}")
+printf '%s' "$AFTER_DELETE_SESSIONS" | python3 -c '
+import json,sys
+ids={s["id"] for s in json.load(sys.stdin)["sessions"]}
+assert "qwen-ci" not in ids, ids
+'
+
+AFTER_DELETE_CATALOG=$(curl -fsS http://127.0.0.1:7331/_llmgateway/models "${AUTH[@]}")
+printf '%s' "$AFTER_DELETE_CATALOG" | python3 -c '
+import json,sys
+for model in json.load(sys.stdin)["data"]:
+    assert all(a["account_id"] != "qwen-ci" for a in model.get("accounts", [])), model
+    assert "qwen-ci-route" not in model.get("routes", []), model
+'
+
+AFTER_DELETE_ROUTE=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain \
+  "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model":"llmgateway-auto","body":{"messages":[{"role":"user","content":"after account delete"}]}}')
+printf '%s' "$AFTER_DELETE_ROUTE" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] == "api-route", x
+assert all(c["route_id"] != "qwen-ci-route" for c in x["candidates"]), x
+'
+
+echo "llmgateway browser account hot activation + delete lifecycle E2E smoke test passed"

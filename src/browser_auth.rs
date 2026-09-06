@@ -232,6 +232,15 @@ impl BrowserAuthVault {
         Ok(material)
     }
 
+    pub fn remove(&self, session_id: &str) -> Result<bool, BrowserAuthVaultError> {
+        let path = self.entry_path(session_id)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(path)?;
+        Ok(true)
+    }
+
      fn entry_path(&self, session_id: &str) -> Result<PathBuf, BrowserAuthVaultError> {
         validate_session_id(session_id)?;
         Ok(self.root.join(format!("{session_id}.auth")))
