@@ -632,6 +632,7 @@
     el(`${view}View`)?.classList.add("active-view");
     if (view === "accounts") loadAccounts();
     if (view === "models") loadCatalog();
+    window.dispatchEvent(new CustomEvent("llmgateway:view-changed", { detail: { view } }));
   }
 
   async function checkHealth() {
@@ -696,6 +697,8 @@
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); openModelModal(); }
     });
   }
+
+  window.llmgatewayUI = { apiFetch, extractError, escapeHtml, escapeAttr, toast };
 
   async function init() {
     bindEvents(); checkHealth(); setInterval(checkHealth, 30_000);

@@ -23,6 +23,7 @@ jobs:
       - run: node --check ui/account-control.js
       - run: node --check ui/account-intelligence.js
       - run: node --check ui/browser-control.js
+      - run: node --check ui/model-groups.js
       - run: node --check ui/trace-console.js
       - run: node --check adapters/gemini-web.js
       - run: node --check adapters/chatgpt-web.js
@@ -54,6 +55,7 @@ jobs:
       - run: bash scripts/smoke-browser-routing-intelligence.sh
       - run: bash scripts/smoke-account-intelligence.sh
       - run: bash scripts/smoke-routing-trace.sh
+      - run: bash scripts/smoke-model-groups.sh
       - run: bash scripts/smoke-execution-trace.sh
       - run: bash scripts/smoke-adaptive-routing.sh
       - run: bash scripts/smoke-task-aware-routing.sh

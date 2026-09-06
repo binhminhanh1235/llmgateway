@@ -39,6 +39,7 @@ mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
 mod memory_provenance_runtime;
+mod model_group_api;
 mod quota_usage;
 mod quota_usage_runtime;
 mod response_state;
@@ -96,6 +97,7 @@ use live_config::LiveConfig;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
+use model_group_api::{create_model_group, delete_model_group, list_model_groups, update_model_group};
 use quota_usage::{QuotaUsageStore, UsageConfig};
 use retrieval_api::inspect_thread_retrieval;
 use routing_api::explain_routes;
@@ -106,7 +108,7 @@ use tracing_subscriber::EnvFilter;
 use ui::{
     account_control_css, account_control_js, account_intelligence_css, account_intelligence_js,
     app_css, app_js, browser_control_css, browser_control_js, index as ui_index,
-    trace_console_css, trace_console_js,
+    model_groups_css, model_groups_js, trace_console_css, trace_console_js,
 };
 use usage_api::{get_account_usage, get_usage, reset_account_quota};
 
@@ -284,6 +286,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui/account-intelligence.js", get(account_intelligence_js))
         .route("/ui/browser-control.css", get(browser_control_css))
         .route("/ui/browser-control.js", get(browser_control_js))
+        .route("/ui/model-groups.css", get(model_groups_css))
+        .route("/ui/model-groups.js", get(model_groups_js))
         .route("/ui/trace-console.css", get(trace_console_css))
         .route("/ui/trace-console.js", get(trace_console_js))
         .route("/v1/chat/completions", post(openai_chat))
@@ -308,6 +312,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_llmgateway/account-intelligence", get(account_intelligence))
         .route("/_llmgateway/clients", get(list_client_policies))
         .route("/_llmgateway/routes/explain", post(explain_routes))
+        .route("/_llmgateway/model-groups", get(list_model_groups).post(create_model_group))
+        .route(
+            "/_llmgateway/model-groups/{group_id}",
+            axum::routing::put(update_model_group).delete(delete_model_group),
+        )
         .route("/_llmgateway/executions", get(list_executions))
         .route("/_llmgateway/executions/{request_id}", get(get_execution))
         .route(

@@ -47,6 +47,8 @@ pub struct RouteCandidateDecision {
     pub browser_fairness_rank: Option<u64>,
     pub browser_recovery_penalty: i32,
     pub base_priority: i32,
+    pub group_tier_priority: Option<i32>,
+    pub group_model_order: Option<usize>,
     pub eligible: bool,
     pub exclusion_reasons: Vec<String>,
     pub warnings: Vec<String>,
@@ -137,11 +139,24 @@ impl Router {
         best: &RouteConfig,
     ) -> bool {
         let resolved_model = config.resolve_model_alias(requested_model);
-        if config.virtual_models.contains_key(resolved_model)
-            && self.transport_preference_rank(config, preferred)
+        if let Some(group) = config.virtual_models.get(resolved_model) {
+            if group.is_tiered()
+                && group.tier_priority_for_route(config, preferred)
+                    != group.tier_priority_for_route(config, best)
+            {
+                return false;
+            }
+            if group.is_model_tiered()
+                && group.model_order_for_route(config, preferred)
+                    != group.model_order_for_route(config, best)
+            {
+                return false;
+            }
+            if self.transport_preference_rank(config, preferred)
                 != self.transport_preference_rank(config, best)
-        {
-            return false;
+            {
+                return false;
+            }
         }
         if self.route_transport(config, preferred) == "browser"
             && !config.routing.browser_sticky_affinity
@@ -256,6 +271,14 @@ impl Router {
                 0
             };
             let policy_reason = self.policy_reason(config.as_ref(), transport).to_string();
+            let group_tier_priority = config
+                .virtual_models
+                .get(&resolved_model)
+                .and_then(|group| group.tier_priority_for_route(config.as_ref(), &route));
+            let group_model_order = config
+                .virtual_models
+                .get(&resolved_model)
+                .and_then(|group| group.model_order_for_route(config.as_ref(), &route));
             let task_fit = evaluate_task_fit(&task, &route, &config.routing);
             let task_adjustment = task_fit.snapshot.adjustment;
             let mut exclusion_reasons = Vec::new();
@@ -400,6 +423,8 @@ impl Router {
                     browser_fairness_rank,
                     browser_recovery_penalty,
                     base_priority: route.priority,
+                    group_tier_priority,
+                    group_model_order,
                     eligible,
                     exclusion_reasons,
                     warnings,
@@ -426,6 +451,8 @@ impl Router {
             .map(|(index, candidate)| {
                 (
                     index,
+                    candidate.decision.group_tier_priority.unwrap_or(0),
+                    candidate.decision.group_model_order.unwrap_or(0),
                     candidate.decision.transport_preference,
                     candidate.decision.final_score.unwrap_or(i32::MAX),
                     candidate.original_index,
@@ -433,7 +460,8 @@ impl Router {
             })
             .collect::<Vec<_>>();
         ranked_indices.sort_by(|left, right| {
-            let base = (left.1, left.2).cmp(&(right.1, right.2));
+            let base = (left.1, left.2, left.3, left.4)
+                .cmp(&(right.1, right.2, right.3, right.4));
             if base != std::cmp::Ordering::Equal {
                 return base;
             }
@@ -458,9 +486,11 @@ impl Router {
                 }
             }
 
-            left.3.cmp(&right.3)
+            left.5.cmp(&right.5)
         });
-        for (rank_index, (candidate_index, _, _, _)) in ranked_indices.into_iter().enumerate() {
+        for (rank_index, (candidate_index, _, _, _, _, _)) in
+            ranked_indices.into_iter().enumerate()
+        {
             let candidate = &mut evaluated[candidate_index];
             candidate.decision.rank = Some(rank_index + 1);
             candidate.decision.selected = rank_index == 0;
@@ -510,11 +540,31 @@ impl Router {
         resolved: &str,
     ) -> Vec<RouteConfig> {
         if let Some(vm) = config.virtual_models.get(resolved) {
-            let routes = vm
-                .routes
-                .iter()
-                .filter_map(|id| config.route(id).cloned())
-                .collect();
+            let route_ids = vm
+                .route_ids()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let model_ids = vm
+                .model_ids()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+
+            let mut routes = route_ids
+                .into_iter()
+                .filter_map(|id| config.route(&id).cloned())
+                .collect::<Vec<_>>();
+
+            for model_id in model_ids {
+                routes.extend(
+                    self.routes_for_physical_model(config.clone(), &model_id)
+                        .await,
+                );
+            }
+
+            let mut seen = HashSet::new();
+            routes.retain(|route| seen.insert(route.id.clone()));
             self.enrich_configured_routes(config.as_ref(), routes).await
         } else if let Some(route) = config.route(resolved) {
             self.enrich_configured_routes(config.as_ref(), vec![route.clone()])

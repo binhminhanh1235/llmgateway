@@ -407,8 +407,20 @@ capabilities = ["chat", "tools", "coding", "reasoning", "long-context", "premium
 [virtual_models.llmgateway-auto]
 routes = ["gemini-primary", "gemini-secondary", "qwen-coder", "openrouter-fallback"]
 
-[virtual_models.llmgateway-coding]
-routes = ["qwen-coder", "gemini-primary", "gemini-secondary", "openrouter-fallback"]
+# Tiered model groups use hard fallback boundaries: all eligible routes in a lower
+# numeric tier are exhausted before the next tier is considered. Existing adaptive,
+# quota, task-aware, transport and fairness scoring still rank routes inside each tier.
+[[virtual_models.llmgateway-coding.tiers]]
+priority = 10
+routes = ["qwen-coder"]
+
+[[virtual_models.llmgateway-coding.tiers]]
+priority = 20
+routes = ["gemini-primary", "gemini-secondary"]
+
+[[virtual_models.llmgateway-coding.tiers]]
+priority = 30
+routes = ["openrouter-fallback"]
 
 [virtual_models.llmgateway-best]
 routes = ["openrouter-fallback", "gemini-primary", "qwen-coder"]
