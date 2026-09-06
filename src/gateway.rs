@@ -100,7 +100,6 @@ impl ExecutionStreamGuard {
         }
     }
 }
-}
 
 impl Drop for ExecutionStreamGuard {
     fn drop(&mut self) {
