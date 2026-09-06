@@ -135,6 +135,10 @@ runtime() {
   api_json GET "/_llmgateway/browser-accounts/$ACCOUNT_ID/runtime" "$1"
 }
 
+affinity() {
+  api_json GET "/_llmgateway/threads/$THREAD_ID/browser-affinity/$ACCOUNT_ID" "$1"
+}
+
 driver_status() {
   api_json GET "/_llmgateway/browser-sessions/$SESSION_ID/driver/status" "$1"
 }
@@ -424,10 +428,41 @@ if not found:
     raise SystemExit(f"FILE ACCEPTANCE FAILED: thread did not persist {uri}")
 PY
 
+step "Capturing native conversation affinity after the PDF turn"
+affinity "$TMP_DIR/affinity-pdf.json"
+json_assert "$TMP_DIR/affinity-pdf.json" "x.get('mapping') is not None and bool(x.get('mapping',{}).get('conversation_url'))" "PDF thread turn did not establish native conversation affinity"
+json_assert "$TMP_DIR/affinity-pdf.json" "int(x.get('mapping',{}).get('last_synced_ordinal',0)) > 0" "PDF thread turn did not advance native sync ordinal"
+NATIVE_URL="$(json_value "$TMP_DIR/affinity-pdf.json" "str(x.get('mapping',{}).get('conversation_url') or '')")"
+SYNC_ORDINAL="$(json_value "$TMP_DIR/affinity-pdf.json" "int(x.get('mapping',{}).get('last_synced_ordinal',0))")"
+[[ -n "$NATIVE_URL" && "$SYNC_ORDINAL" -gt 0 ]] || {
+  echo "FILE ACCEPTANCE FAILED: invalid native affinity checkpoint after PDF turn" >&2
+  exit 1
+}
+
 step "Scenario 3/3: Native thread follow-up does not reattach the historical PDF"
 FOLLOW_UP='{"stream":false,"content":[{"type":"input_text","text":"Follow up on the same PDF without attaching it again. Answer in one short sentence."}]}'
 api_json POST "/v1/threads/$THREAD_ID/messages" "$TMP_DIR/thread-follow-up.json" "$FOLLOW_UP"
 json_assert "$TMP_DIR/thread-follow-up.json" "bool((((x.get('choices') or [{}])[0].get('message') or {}).get('content')))" "native thread follow-up returned empty assistant text"
+
+affinity "$TMP_DIR/affinity-follow-up.json"
+python3 - "$TMP_DIR/affinity-follow-up.json" "$NATIVE_URL" "$SYNC_ORDINAL" <<'PY'
+import json,sys
+path,expected_url,previous_ordinal=sys.argv[1:4]
+payload=json.load(open(path,encoding="utf-8"))
+mapping=payload.get("mapping") or {}
+actual_url=str(mapping.get("conversation_url") or "")
+actual_ordinal=int(mapping.get("last_synced_ordinal") or 0)
+if actual_url != expected_url:
+    raise SystemExit(
+        "FILE ACCEPTANCE FAILED: text-only follow-up changed native conversation affinity"
+    )
+if actual_ordinal <= int(previous_ordinal):
+    raise SystemExit(
+        "FILE ACCEPTANCE FAILED: text-only follow-up did not advance native sync ordinal"
+    )
+PY
+FOLLOW_UP_ORDINAL="$(json_value "$TMP_DIR/affinity-follow-up.json" "int(x.get('mapping',{}).get('last_synced_ordinal',0))")"
+step "Native affinity reused; synced ordinal advanced from $SYNC_ORDINAL to $FOLLOW_UP_ORDINAL without a new file in the follow-up request"
 
 step "Verifying reference-safe delete while thread owns the PDF"
 STATUS="$(curl -sS -o "$TMP_DIR/delete-in-use.json" -w '%{http_code}' -X DELETE \
