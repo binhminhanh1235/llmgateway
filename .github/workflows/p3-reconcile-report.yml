@@ -1,4 +1,4 @@
-name: P3 reconcile conflict report
+name: P3 reconcile current main
 
 on:
   push:
@@ -8,48 +8,158 @@ on:
       - .github/workflows/p3-reconcile-report.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  report:
+  reconcile:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Merge current main without committing
+      - name: Merge and resolve P3 semantic conflicts
         shell: bash
         run: |
-          set +e
+          set -euo pipefail
           git config user.name "llmgateway-reconcile"
           git config user.email "llmgateway-reconcile@users.noreply.github.com"
           git fetch origin main
+          set +e
           git merge --no-ff --no-commit origin/main
           merge_rc=$?
-          echo "merge_rc=$merge_rc"
-          echo "=== UNMERGED FILES ==="
-          git diff --name-only --diff-filter=U
+          set -e
+          if [ "$merge_rc" -ne 0 ] && [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+            echo "merge failed without resolvable content conflicts"
+            exit "$merge_rc"
+          fi
+
           python3 - <<'PY'
           from pathlib import Path
-          import subprocess
-          files=subprocess.check_output(["git","diff","--name-only","--diff-filter=U"], text=True).splitlines()
-          for f in files:
-              print(f"===== {f} =====")
-              lines=Path(f).read_text().splitlines()
-              i=0
-              block=0
-              while i < len(lines):
-                  if lines[i].startswith("<<<<<<<"):
-                      block += 1
-                      start=max(0,i-18)
-                      j=i
-                      while j < len(lines) and not lines[j].startswith(">>>>>>>"):
-                          j += 1
-                      end=min(len(lines),j+19)
-                      print(f"--- conflict {block}, lines {i+1}-{j+1} ---")
-                      for n in range(start,end):
-                          print(f"{n+1:5}: {lines[n]}")
-                      i=j
-                  i += 1
+
+          def blocks(path):
+              text = Path(path).read_text()
+              out = []
+              pos = 0
+              while True:
+                  a = text.find("<<<<<<< HEAD\n", pos)
+                  if a < 0:
+                      break
+                  b = text.find("=======\n", a)
+                  c = text.find(">>>>>>> origin/main\n", b)
+                  if b < 0 or c < 0:
+                      raise SystemExit(f"incomplete conflict marker in {path}")
+                  ours = text[a + len("<<<<<<< HEAD\n"):b]
+                  theirs = text[b + len("=======\n"):c]
+                  out.append((a, c + len(">>>>>>> origin/main\n"), ours, theirs))
+                  pos = c + len(">>>>>>> origin/main\n")
+              return text, out
+
+          def resolve(path, resolver):
+              text, found = blocks(path)
+              if not found:
+                  raise SystemExit(f"expected conflicts in {path}")
+              pieces = []
+              last = 0
+              for idx, (a, end, ours, theirs) in enumerate(found, 1):
+                  pieces.append(text[last:a])
+                  pieces.append(resolver(idx, ours, theirs))
+                  last = end
+              pieces.append(text[last:])
+              merged = "".join(pieces)
+              if "<<<<<<<" in merged or "=======" in merged or ">>>>>>>" in merged:
+                  raise SystemExit(f"unresolved marker in {path}")
+              Path(path).write_text(merged)
+
+          def api_resolver(idx, ours, theirs):
+              if idx == 1:
+                  return (
+                      "    artifact_store::ArtifactStore,\n"
+                      "    browser_provider_runtime,\n"
+                      "    catalog::{canonical_model_id, CatalogError, ModelCatalog},\n"
+                  )
+              if idx == 2:
+                  return "    collections::{BTreeMap, BTreeSet, HashSet},\n"
+              if idx == 3:
+                  merged = theirs
+                  merged = merged.replace(
+                      "    for (id, group) in &config.virtual_models {\n"
+                      "        if !group.enabled || !group_has_viable_targets(group) {\n",
+                      "    for (id, virtual_model) in &config.virtual_models {\n"
+                      "        if !virtual_model.enabled || !group_has_viable_targets(virtual_model) {\n",
+                  )
+                  if "for (id, virtual_model)" not in merged:
+                      raise SystemExit("failed to adapt virtual model viability conflict")
+                  return merged
+              raise SystemExit(f"unexpected api conflict {idx}")
+
+          resolve("src/api.rs", api_resolver)
+
+          resolve(
+              "src/browser_account_setup.rs",
+              lambda idx, ours, theirs: ours if idx == 1 else (_ for _ in ()).throw(SystemExit("unexpected browser_account_setup conflict")),
+          )
+
+          resolve(
+              "src/browser_provider.rs",
+              lambda idx, ours, theirs: ours if idx == 1 else (_ for _ in ()).throw(SystemExit("unexpected browser_provider conflict")),
+          )
+
+          resolve(
+              "src/config.rs",
+              lambda idx, ours, theirs: ours if idx == 1 else (_ for _ in ()).throw(SystemExit("unexpected config conflict")),
+          )
+
+          def conversation_resolver(idx, ours, theirs):
+              if idx != 1:
+                  raise SystemExit(f"unexpected conversation_api conflict {idx}")
+              return (
+                  "    api::{authorize, gateway_error, json_error, json_response, response_with_route, vision_error, AppState},\n"
+                  "    browser_provider_runtime,\n"
+              )
+          resolve("src/conversation_api.rs", conversation_resolver)
+
+          def trace_resolver(idx, ours, theirs):
+              if idx != 1:
+                  raise SystemExit(f"unexpected execution_trace conflict {idx}")
+              old = "    pub async fn record_attempt(&self, record: AttemptRecord<'_>) -> Result<(), ExecutionTraceError> {\n"
+              new = (
+                  "    pub async fn record_attempt(\n"
+                  "        &self,\n"
+                  "        record: AttemptRecord<'_>,\n"
+                  "    ) -> Result<(), ExecutionTraceError> {\n"
+              )
+              if old not in ours:
+                  raise SystemExit("execution trace signature not found in ours")
+              return ours.replace(old, new)
+
+          resolve("src/execution_trace.rs", trace_resolver)
+
+          def main_resolver(idx, ours, theirs):
+              if idx != 1:
+                  raise SystemExit(f"unexpected main conflict {idx}")
+              if "mod mimo_web_transport;" not in theirs:
+                  raise SystemExit("MiMo module missing from main side")
+              return ours + "mod mimo_web_transport;\n"
+          resolve("src/main.rs", main_resolver)
           PY
-          exit 0
+
+          git add src/api.rs src/browser_account_setup.rs src/browser_provider.rs src/config.rs             src/conversation_api.rs src/execution_trace.rs src/main.rs
+
+          unresolved="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$unresolved" ]; then
+            echo "unresolved files:"
+            echo "$unresolved"
+            exit 1
+          fi
+
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+          RUSTFLAGS="-D warnings" cargo check --all-targets
+
+          rm .github/workflows/p3-reconcile-report.yml
+          git add -A
+          git status --short
+          git commit -m "chore(multimodal): reconcile current main for P3 verification"
+          git push origin HEAD:feat/multimodal-gateway
