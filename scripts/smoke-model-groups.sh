@@ -173,6 +173,15 @@ assert set(g["ignored_models"]) == {"fake/model-primary","fake/model-fallback"},
 assert g["tiers"][0]["models"] == ["fake/model-primary","fake/model-fallback"], g
 '
 
+CATALOG=$(curl -fsS http://127.0.0.1:7331/_llmgateway/models "${AUTH[@]}")
+printf '%s' "$CATALOG" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+models={m["id"]:m for m in x["data"]}
+assert models["fake/model-primary"]["fallback_eligible"] is False, models["fake/model-primary"]
+assert models["fake/model-fallback"]["fallback_eligible"] is False, models["fake/model-fallback"]
+'
+
 EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain "${AUTH[@]}" "${JSON[@]}" \
   -d '{"model":"ci-tiered"}')
 printf '%s' "$EXPLAIN" | python3 -c '
@@ -191,6 +200,43 @@ import json,sys
 x=json.load(sys.stdin)
 g=next(g for g in x["data"] if g["id"]=="ci-tiered")
 assert g["ignored_models"] == [], g
+'
+
+# Disabling a model on one account must move it out of effective Enabled state
+# and out of the group picker, while preserving its existing group membership.
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/accounts/group-account/models "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model_id":"fake/model-primary","enabled":false}' >/dev/null
+
+GROUP_PAYLOAD=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
+CATALOG=$(curl -fsS http://127.0.0.1:7331/_llmgateway/models "${AUTH[@]}")
+printf '%s\n%s' "$GROUP_PAYLOAD" "$CATALOG" | python3 -c '
+import json,sys
+group_payload=json.loads(sys.stdin.readline())
+catalog=json.loads(sys.stdin.readline())
+g=next(g for g in group_payload["data"] if g["id"]=="ci-tiered")
+assert g["tiers"][0]["models"] == ["fake/model-primary","fake/model-fallback"], g
+assert g["ignored_models"] == ["fake/model-primary"], g
+gm=next(m for m in group_payload["models"] if m["id"]=="fake/model-primary")
+cm=next(m for m in catalog["data"] if m["id"]=="fake/model-primary")
+assert gm["fallback_eligible"] is False, gm
+assert cm["fallback_eligible"] is False, cm
+'
+
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/accounts/group-account/models "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model_id":"fake/model-primary","enabled":true}' >/dev/null
+
+GROUP_PAYLOAD=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
+CATALOG=$(curl -fsS http://127.0.0.1:7331/_llmgateway/models "${AUTH[@]}")
+printf '%s\n%s' "$GROUP_PAYLOAD" "$CATALOG" | python3 -c '
+import json,sys
+group_payload=json.loads(sys.stdin.readline())
+catalog=json.loads(sys.stdin.readline())
+g=next(g for g in group_payload["data"] if g["id"]=="ci-tiered")
+gm=next(m for m in group_payload["models"] if m["id"]=="fake/model-primary")
+cm=next(m for m in catalog["data"] if m["id"]=="fake/model-primary")
+assert g["ignored_models"] == [], g
+assert gm["fallback_eligible"] is True, gm
+assert cm["fallback_eligible"] is True, cm
 '
 
 # A disabled group remains configured, but is hidden from model discovery and never routed.
