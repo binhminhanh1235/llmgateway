@@ -116,27 +116,27 @@
     const selectedId = mode === "explicit" ? browserRuntime?.selected_browser_id : "auto";
     const effective = browserRuntime?.effective_executable || "";
     const options = [
-      \`<option value="auto" ${selectedId === "auto" ? "selected" : ""}>Auto · Google Chrome preferred</option>\`,
-      ...detected.map((browser) => \`
+      `<option value="auto" ${selectedId === "auto" ? "selected" : ""}>Auto · Google Chrome preferred</option>`,
+      ...detected.map((browser) => `
         <option value="${escapeAttr(browser.id)}" ${selectedId === browser.id ? "selected" : ""}>
           ${escapeHtml(browser.label)}${browser.recommended ? " · Recommended" : ""}
-        </option>\`)
+        </option>`)
     ].join("");
 
-    return \`
+    return `
       <div class="browser-runtime-settings">
         <div class="browser-runtime-copy">
           <strong>Browser runtime</strong>
           <span>${detected.length
-            ? \`${detected.length} compatible browser${detected.length === 1 ? "" : "s"} detected on this machine.\`
+            ? `${detected.length} compatible browser${detected.length === 1 ? "" : "s"} detected on this machine.`
             : "No compatible browser detected. Install Google Chrome, Edge, Brave, or Chromium."}</span>
-          ${effective ? \`<code title="${escapeAttr(effective)}">${escapeHtml(shorten(effective, 86))}</code>\` : ""}
+          ${effective ? `<code title="${escapeAttr(effective)}">${escapeHtml(shorten(effective, 86))}</code>` : ""}
         </div>
         <label class="browser-runtime-picker">
           <span>Use browser</span>
           <select data-browser-runtime-select ${detected.length ? "" : "disabled"}>${options}</select>
         </label>
-      </div>\`;
+      </div>`;
   }
 
   async function selectBrowserRuntime(browserId, select) {
@@ -149,11 +149,11 @@
       });
       const selected = browserRuntime?.browsers?.find((browser) => browser.selected);
       browserToast(browserId === "auto"
-        ? \`Browser runtime set to auto · ${selected?.label || "best compatible browser"}\`
-        : \`Browser runtime set to ${selected?.label || browserId}. Applies on next browser launch.\`);
+        ? `Browser runtime set to auto · ${selected?.label || "best compatible browser"}`
+        : `Browser runtime set to ${selected?.label || browserId}. Applies on next browser launch.`);
       await loadBrowserSessions(true);
     } catch (error) {
-      browserToast(\`Browser selection failed: ${cleanError(error)}\`, true);
+      browserToast(`Browser selection failed: ${cleanError(error)}`, true);
       await loadBrowserSessions(true);
     } finally {
       select.disabled = false;
