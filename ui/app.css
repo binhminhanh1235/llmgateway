@@ -438,3 +438,85 @@ button { cursor: pointer; }
   .content-scroll { padding: 16px 12px 40px; }
   .account-grid, .catalog-grid { grid-template-columns: 1fr; }
 }
+
+/* Entity enable/disable status controls */
+.status-tabs {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 28px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 96%, transparent);
+  overflow-x: auto;
+}
+.status-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 720;
+}
+.status-tab:hover {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--panel-soft);
+}
+.status-tab.active {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: 0 1px 4px rgba(0,0,0,.04);
+}
+.status-tab [data-status-count] {
+  min-width: 20px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  text-align: center;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.status-tab.active [data-status-count] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.entity-state-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.account-card.is-disabled,
+.catalog-card.is-disabled {
+  opacity: .72;
+}
+.account-card.is-disabled .account-models,
+.account-card.is-disabled .account-transport-panel {
+  filter: saturate(.72);
+}
+.catalog-card.is-disabled {
+  border-style: dashed;
+}
+.toggle input:focus-visible + .toggle-track {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+.toggle input:disabled + .toggle-track {
+  opacity: .5;
+  cursor: not-allowed;
+}
+@media (max-width: 640px) {
+  .status-tabs { padding-inline: 16px; }
+  .account-card-header,
+  .catalog-card-top { align-items: stretch; flex-direction: column; }
+  .entity-state-actions { justify-content: flex-start; }
+}
