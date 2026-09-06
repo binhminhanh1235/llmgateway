@@ -33,6 +33,7 @@ Nhánh `main` hiện đã có:
   - DeepSeek Web
   - Xiaomi MiMo Studio Web
 - UI local tích hợp sẵn, không cần build frontend riêng
+- portable **Agent Skill** để Codex/ChatGPT/Claude-style agent dùng llmgateway như model runtime
 - bộ smoke test, live acceptance runner, Linux/macOS/Windows CI
 
 ### Multimodal
@@ -470,27 +471,80 @@ Xem: [docs/client-policies.md](docs/client-policies.md).
 
 ---
 
-## AI Agent Skill
+## AI Agent Skill ✅
 
-Repo có portable Agent Skill tại:
+Agent-Native P0 đã **shipped trên `main`** qua PR #91.
+
+Bundle portable nằm tại:
 
 ```text
 skills/llmgateway/
 ├── SKILL.md
 ├── references/
+│   ├── api.md
+│   ├── diagnostics.md
+│   ├── operations.md
+│   └── routing.md
 ├── scripts/llmgateway_agent.py
-└── tests/
+└── tests/test_llmgateway_agent.py
 ```
 
-Mục tiêu của skill là để Codex/ChatGPT/Claude-style agent dùng llmgateway như **model runtime**, thay vì hard-code provider/model và tự dựng fallback riêng.
+Mục tiêu là để Codex/ChatGPT/Claude-style agent dùng llmgateway như **model runtime**, còn Router của llmgateway tiếp tục là nơi duy nhất quyết định readiness, policy, quota, tier, health và fallback.
 
-Nguyên tắc chọn model:
+### Quick start cho agent
+
+Gateway phải đang chạy trước:
+
+```bash
+cargo run --release
+```
+
+Thiết lập credential. Với normal inference nên dùng scoped client key; admin key chỉ cần cho diagnostics quản trị:
+
+```bash
+export LLMGATEWAY_CLIENT_API_KEY="client-key"
+export LLMGATEWAY_API_KEY="admin-key"
+export LLMGATEWAY_BASE_URL="http://127.0.0.1:7331"
+```
+
+Kiểm tra health và model mà client thực sự được phép dùng:
+
+```bash
+python3 skills/llmgateway/scripts/llmgateway_agent.py health
+python3 skills/llmgateway/scripts/llmgateway_agent.py models
+```
+
+Gọi Responses hoặc Chat:
+
+```bash
+python3 skills/llmgateway/scripts/llmgateway_agent.py responses \
+  llmgateway-auto "Giải thích kiến trúc hiện tại"
+
+python3 skills/llmgateway/scripts/llmgateway_agent.py chat \
+  llmgateway-coding "Review đoạn code này"
+```
+
+Anthropic Messages:
+
+```bash
+python3 skills/llmgateway/scripts/llmgateway_agent.py messages \
+  llmgateway-coding "Giải thích Java CAS" --max-tokens 1024
+```
+
+Khi cần hiểu vì sao route được hoặc không được chọn:
+
+```bash
+python3 skills/llmgateway/scripts/llmgateway_agent.py explain \
+  llmgateway-auto --prompt "debug Rust"
+```
+
+### Quy tắc chọn model
 
 ```text
-discover /v1/models
+GET /v1/models
       |
       v
-prefer logical model/group
+ưu tiên logical model / model group
       |
       v
 llmgateway Router
@@ -498,28 +552,33 @@ llmgateway Router
       +-- client policy
       +-- readiness
       +-- ordered fallback tiers
-      +-- quota/cooldown
-      +-- health/task fit/fairness
+      +-- quota / cooldown
+      +-- task fit / health / fairness
       |
       v
-provider route
+physical provider route
 ```
 
-Helper CLI chỉ có **READ + EXECUTE**, không có lệnh delete/disable:
+Agent không nên hard-code provider/model chỉ vì route đó từng chạy được ở một phiên trước. Nếu client policy không expose model qua `/v1/models`, agent không được cố bypass bằng physical route ID.
 
-```bash
-export LLMGATEWAY_CLIENT_API_KEY="client-key"
-export LLMGATEWAY_API_KEY="admin-key"   # chỉ cần cho diagnostics admin
+### Permission boundary
 
-python3 skills/llmgateway/scripts/llmgateway_agent.py health
-python3 skills/llmgateway/scripts/llmgateway_agent.py models
-python3 skills/llmgateway/scripts/llmgateway_agent.py explain llmgateway-auto --prompt "debug Rust"
-python3 skills/llmgateway/scripts/llmgateway_agent.py responses llmgateway-auto "xin chào"
-```
+| Mức | Ví dụ | Mặc định của helper |
+|---|---|---|
+| READ | health, models, accounts, groups, route explain, execution trace | Có |
+| EXECUTE | Responses, Chat Completions, Anthropic Messages | Có |
+| OPERATE | enable/disable, refresh models, restart browser runtime | Không |
+| ADMIN | delete account, thay credential/policy, destructive config | Không |
 
-Với Agent Skills-compatible client, import/copy cả folder `skills/llmgateway` để giữ `SKILL.md`, references và helper cùng nhau.
+Helper CLI cố ý chỉ expose **READ + EXECUTE**. Các mutation quản trị phải dùng API/UI tương ứng và cần đúng mức phê duyệt của người dùng.
 
-Chi tiết kiến trúc và roadmap: [docs/agent-native-gateway.md](docs/agent-native-gateway.md).
+### Dùng với Agent Skills-compatible client
+
+Import/copy **toàn bộ folder `skills/llmgateway`**, không chỉ riêng `SKILL.md`, vì skill dùng progressive disclosure qua `references/` và helper trong `scripts/`.
+
+Skill không tự quản credential, không lấy raw cookie/token, không bypass CAPTCHA/2FA/passkey và không tạo một routing engine thứ hai.
+
+Chi tiết: [docs/agent-native-gateway.md](docs/agent-native-gateway.md).
 
 ---
 
@@ -580,6 +639,7 @@ Chạy container cần mount config/data và truyền env phù hợp. Với brow
 ├── docs/            # kiến trúc, routing, browser, memory, roadmap
 ├── examples/        # ví dụ
 ├── scripts/         # smoke/live/stress runners
+├── skills/          # portable AI Agent Skills
 ├── src/             # Rust gateway
 ├── ui/              # local embedded UI
 ├── Cargo.toml
