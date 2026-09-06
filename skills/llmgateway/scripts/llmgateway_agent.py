@@ -171,34 +171,94 @@ class GatewayClient:
             "POST", "/_llmgateway/routes/explain", body=body, auth="admin"
         )
 
-    def responses(self, model: str, prompt: str) -> Any:
+    @staticmethod
+    def _routing_hints(
+        body: dict[str, Any],
+        *,
+        task: str | None = None,
+        capabilities: list[str] | None = None,
+        min_context_window: int | None = None,
+    ) -> dict[str, Any]:
+        if task:
+            body["llmgateway_task"] = task
+        if capabilities or min_context_window is not None:
+            body["llmgateway_requirements"] = {
+                "capabilities": capabilities or [],
+                "min_context_window": min_context_window,
+            }
+        return body
+
+    def responses(
+        self,
+        model: str,
+        prompt: str,
+        *,
+        task: str | None = None,
+        capabilities: list[str] | None = None,
+        min_context_window: int | None = None,
+    ) -> Any:
+        body = self._routing_hints(
+            {"model": model, "input": prompt},
+            task=task,
+            capabilities=capabilities,
+            min_context_window=min_context_window,
+        )
         return self._request(
             "POST",
             "/v1/responses",
-            body={"model": model, "input": prompt},
+            body=body,
             auth="execution",
         )
 
-    def chat(self, model: str, prompt: str) -> Any:
-        return self._request(
-            "POST",
-            "/v1/chat/completions",
-            body={
+    def chat(
+        self,
+        model: str,
+        prompt: str,
+        *,
+        task: str | None = None,
+        capabilities: list[str] | None = None,
+        min_context_window: int | None = None,
+    ) -> Any:
+        body = self._routing_hints(
+            {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
             },
+            task=task,
+            capabilities=capabilities,
+            min_context_window=min_context_window,
+        )
+        return self._request(
+            "POST",
+            "/v1/chat/completions",
+            body=body,
             auth="execution",
         )
 
-    def messages(self, model: str, prompt: str, max_tokens: int) -> Any:
-        return self._request(
-            "POST",
-            "/v1/messages",
-            body={
+    def messages(
+        self,
+        model: str,
+        prompt: str,
+        max_tokens: int,
+        *,
+        task: str | None = None,
+        capabilities: list[str] | None = None,
+        min_context_window: int | None = None,
+    ) -> Any:
+        body = self._routing_hints(
+            {
                 "model": model,
                 "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
             },
+            task=task,
+            capabilities=capabilities,
+            min_context_window=min_context_window,
+        )
+        return self._request(
+            "POST",
+            "/v1/messages",
+            body=body,
             auth="execution",
             anthropic=True,
         )
@@ -249,18 +309,26 @@ def build_parser() -> argparse.ArgumentParser:
     explain.add_argument("--client-id")
     explain.add_argument("--prompt")
 
+    def add_routing_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--task")
+        command.add_argument("--capability", action="append", default=[])
+        command.add_argument("--min-context-window", type=int)
+
     responses = sub.add_parser("responses")
     responses.add_argument("model")
     responses.add_argument("prompt")
+    add_routing_arguments(responses)
 
     chat = sub.add_parser("chat")
     chat.add_argument("model")
     chat.add_argument("prompt")
+    add_routing_arguments(chat)
 
     messages = sub.add_parser("messages")
     messages.add_argument("model")
     messages.add_argument("prompt")
     messages.add_argument("--max-tokens", type=int, default=1024)
+    add_routing_arguments(messages)
 
     return parser
 
@@ -302,11 +370,30 @@ def run(args: argparse.Namespace) -> Any:
             args.model, client_id=args.client_id, prompt=args.prompt
         )
     if args.command == "responses":
-        return client.responses(args.model, args.prompt)
+        return client.responses(
+            args.model,
+            args.prompt,
+            task=args.task,
+            capabilities=args.capability,
+            min_context_window=args.min_context_window,
+        )
     if args.command == "chat":
-        return client.chat(args.model, args.prompt)
+        return client.chat(
+            args.model,
+            args.prompt,
+            task=args.task,
+            capabilities=args.capability,
+            min_context_window=args.min_context_window,
+        )
     if args.command == "messages":
-        return client.messages(args.model, args.prompt, args.max_tokens)
+        return client.messages(
+            args.model,
+            args.prompt,
+            args.max_tokens,
+            task=args.task,
+            capabilities=args.capability,
+            min_context_window=args.min_context_window,
+        )
     raise GatewayError(f"unsupported command: {args.command}")
 
 
