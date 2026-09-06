@@ -370,49 +370,85 @@ Different local tools can safely share one llmgateway process without sharing id
 
 ## Agent-Native llmgateway
 
-Tracking: issue #90.
+Tracking: issue #90 for P0; issue #92 / PR #93 for P1-P3.
 
-Goal: let AI agents use llmgateway as a model runtime through stable abstractions instead of provider-specific prompt logic.
+Goal: expose llmgateway to AI agents through stable, capability-aware abstractions while preserving a single Router and a single production executable.
 
 ### P0 - Portable Agent Skill ✅
 
 **Status: shipped on `main`**
 
-Merged via PR #91 as `777c7cf3fa8b9d25a4d49ea46c2e5822e88548d3`.
+PR #91 established:
 
-Shipped scope:
-
-- Agent Skills-compatible `skills/llmgateway/SKILL.md`;
-- progressive-disclosure API/routing/diagnostics/operations references;
-- stdlib-only READ + EXECUTE helper CLI;
-- client-policy-aware model discovery;
+- Agent Skills-compatible `SKILL.md`;
+- progressive-disclosure references;
+- client-policy-aware discovery;
 - logical model/group-first selection;
-- deterministic offline tests in CI;
-- explicit READ / EXECUTE / OPERATE / ADMIN safety boundary.
+- READ / EXECUTE / OPERATE / ADMIN boundary.
 
-The skill reuses the existing Router, model groups, client policies, readiness, quota, route explain and execution trace. It is not a second routing engine.
+PR #93 migrates the old P0 Python helper out of production so the Skill becomes instruction/reference only.
 
 ### P1 - Agent Control API
 
-**Status: DONE / VERIFIED on `feat/agent-native-runtime`, not merged to `main`**
+**Status: implemented on `feat/agent-native-runtime`; final exact-head re-verification pending**
 
-Adds client-scoped capability summary, dry-run resolve and normalized diagnostics on top of the existing Router.
+Adds client-scoped:
 
-### P2 - MCP server
+- capability summary;
+- dry-run semantic resolve;
+- normalized diagnostics.
 
-**Status: DONE / VERIFIED on `feat/agent-native-runtime`, not merged to `main`**
+All reuse the existing Router and ClientPolicy contracts.
 
-Adds a dependency-free stdio MCP bridge with READ + EXECUTE tools only, including capability resolve/diagnostics and compatibility inference.
+### P2 - Native MCP + single executable
+
+**Status: implemented on `feat/agent-native-runtime`; final exact-head re-verification pending**
+
+Target runtime:
+
+```text
+llmgateway
+llmgateway agent ...
+llmgateway mcp --stdio
+POST /mcp
+```
+
+Properties:
+
+- native Rust Agent CLI;
+- native MCP HTTP in the main server;
+- native MCP stdio from the same binary;
+- no Python/pip/Node/npm runtime dependency;
+- no separately installed MCP bridge;
+- READ + EXECUTE MCP tools only;
+- Python bridge/tests removed from `skills/llmgateway`.
 
 ### P3 - Capability-based Agent Routing
 
-**Status: DONE / VERIFIED on `feat/agent-native-runtime`, not merged to `main`**
+**Status: implemented on `feat/agent-native-runtime`; final exact-head re-verification pending**
 
-Adds hard capability/context requirements inside the existing Router, preserves client/model-group/policy boundaries, and carries the same constraints through Chat, Responses, Anthropic Messages and MCP execution.
+Adds hard semantic requirements inside the Router:
 
-Tracking for P1-P3: issue #92.
+- required capabilities;
+- minimum context window;
+- machine-readable rejected candidate reasons;
+- same constraints across Chat, Responses, Anthropic Messages, Agent CLI and MCP.
 
-Security invariants remain unchanged: no credential export, no CAPTCHA/2FA bypass, no unrestricted autonomous admin.
+Requirements may narrow eligibility but cannot broaden client/model/route/transport policy.
+
+### Browser runtime integration
+
+The same PR also removes hard product coupling to a single browser name:
+
+- WebUI detects compatible installed browsers;
+- Google Chrome is Auto priority #1;
+- Edge, Brave and Chromium are selectable when installed;
+- user selection persists and hot-reloads for next browser launch;
+- legacy internal `[chromium]` config/module naming is retained for compatibility.
+
+P1-P3 are not shipped until PR #93 is merged and post-merge main verification passes.
+
+Security invariants remain unchanged: no credential export, CAPTCHA/2FA/passkey bypass, or unrestricted autonomous admin.
 
 ---
 
