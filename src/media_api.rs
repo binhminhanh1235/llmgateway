@@ -159,9 +159,10 @@ pub async fn responses_image_output(
     }
 
     let mut response = json_response(StatusCode::OK, response, Some(&generated.route_id));
-    response
-        .headers_mut()
-        .insert("x-llmgateway-media-task", HeaderValue::from_static("image_generation"));
+    response.headers_mut().insert(
+        "x-llmgateway-media-task",
+        HeaderValue::from_static("image_generation"),
+    );
     response
 }
 
@@ -331,10 +332,11 @@ pub async fn image_edits(
         return client_policy_error(error);
     }
 
-    let routes = match media_routes(&state, access.policy(), &requested_model, "image_editing").await {
-        Ok(routes) => routes,
-        Err(response) => return response,
-    };
+    let routes =
+        match media_routes(&state, access.policy(), &requested_model, "image_editing").await {
+            Ok(routes) => routes,
+            Err(response) => return response,
+        };
     let started = Instant::now();
     let mut last_error = String::new();
     for candidate in routes {
@@ -347,7 +349,9 @@ pub async fn image_edits(
                 Part::bytes(input.bytes.clone())
                     .file_name(input.file_name.clone())
                     .mime_str(&input.mime_type)
-                    .unwrap_or_else(|_| Part::bytes(input.bytes.clone()).file_name(input.file_name.clone())),
+                    .unwrap_or_else(|_| {
+                        Part::bytes(input.bytes.clone()).file_name(input.file_name.clone())
+                    }),
             )
             .text("prompt", input.prompt.clone())
             .text("model", candidate.route.model.clone())
@@ -359,16 +363,27 @@ pub async fn image_edits(
         if let Some(quality) = &input.quality {
             form = form.text("quality", quality.clone());
         }
-        let url = format!("{}/images/edits", candidate.provider.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/images/edits",
+            candidate.provider.base_url.trim_end_matches('/')
+        );
         let response = send_multipart(&candidate.account, &url, form).await;
         match response {
             Ok(response) if response.status().is_success() => {
                 let route_id = candidate.route.id.clone();
-                state.gateway.router.mark_success(&route_id, elapsed_ms(started)).await;
+                state
+                    .gateway
+                    .router
+                    .mark_success(&route_id, elapsed_ms(started))
+                    .await;
                 let value = match response.json::<Value>().await {
                     Ok(value) => value,
                     Err(error) => {
-                        return json_error(StatusCode::BAD_GATEWAY, "upstream_error", &error.to_string())
+                        return json_error(
+                            StatusCode::BAD_GATEWAY,
+                            "upstream_error",
+                            &error.to_string(),
+                        )
                     }
                 };
                 let images = match persist_images(
@@ -391,7 +406,13 @@ pub async fn image_edits(
                 state
                     .gateway
                     .router
-                    .mark_failure(&candidate.route.id, last_error.clone(), 0, elapsed_ms(started), status.is_server_error())
+                    .mark_failure(
+                        &candidate.route.id,
+                        last_error.clone(),
+                        0,
+                        elapsed_ms(started),
+                        status.is_server_error(),
+                    )
                     .await;
                 if !retryable_status(status) {
                     return json_error(status, "upstream_error", &last_error);
@@ -402,7 +423,13 @@ pub async fn image_edits(
                 state
                     .gateway
                     .router
-                    .mark_failure(&candidate.route.id, last_error.clone(), 2, elapsed_ms(started), true)
+                    .mark_failure(
+                        &candidate.route.id,
+                        last_error.clone(),
+                        2,
+                        elapsed_ms(started),
+                        true,
+                    )
                     .await;
             }
         }
@@ -432,7 +459,10 @@ pub async fn audio_transcriptions(
         let name = field.name().unwrap_or("").to_string();
         if name == "file" {
             input.file_name = field.file_name().unwrap_or("audio.webm").to_string();
-            input.mime_type = field.content_type().unwrap_or("application/octet-stream").to_string();
+            input.mime_type = field
+                .content_type()
+                .unwrap_or("application/octet-stream")
+                .to_string();
             match field.bytes().await {
                 Ok(bytes) => input.bytes = bytes.to_vec(),
                 Err(error) => {
@@ -490,7 +520,11 @@ pub async fn audio_transcriptions(
         )
         .await
     {
-        return json_error(StatusCode::BAD_REQUEST, "artifact_error", &error.to_string());
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "artifact_error",
+            &error.to_string(),
+        );
     }
 
     let config = state.gateway.config_snapshot();
@@ -506,7 +540,14 @@ pub async fn audio_transcriptions(
     {
         return client_policy_error(error);
     }
-    let routes = match media_routes(&state, access.policy(), &requested_model, "audio_transcription").await {
+    let routes = match media_routes(
+        &state,
+        access.policy(),
+        &requested_model,
+        "audio_transcription",
+    )
+    .await
+    {
         Ok(routes) => routes,
         Err(response) => return response,
     };
@@ -522,7 +563,11 @@ pub async fn audio_transcriptions(
         {
             Ok(part) => part,
             Err(error) => {
-                return json_error(StatusCode::BAD_REQUEST, "invalid_request_error", &error.to_string())
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    &error.to_string(),
+                )
             }
         };
         let mut form = Form::new()
@@ -547,7 +592,11 @@ pub async fn audio_transcriptions(
         match send_multipart(&candidate.account, &url, form).await {
             Ok(response) if response.status().is_success() => {
                 let route_id = candidate.route.id.clone();
-                state.gateway.router.mark_success(&route_id, elapsed_ms(started)).await;
+                state
+                    .gateway
+                    .router
+                    .mark_success(&route_id, elapsed_ms(started))
+                    .await;
                 let status = response.status();
                 let content_type = response
                     .headers()
@@ -558,7 +607,11 @@ pub async fn audio_transcriptions(
                 let bytes = match response.bytes().await {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        return json_error(StatusCode::BAD_GATEWAY, "upstream_error", &error.to_string())
+                        return json_error(
+                            StatusCode::BAD_GATEWAY,
+                            "upstream_error",
+                            &error.to_string(),
+                        )
                     }
                 };
                 return response_with_route(status, &content_type, Body::from(bytes), &route_id);
@@ -569,7 +622,13 @@ pub async fn audio_transcriptions(
                 state
                     .gateway
                     .router
-                    .mark_failure(&candidate.route.id, last_error.clone(), 0, elapsed_ms(started), status.is_server_error())
+                    .mark_failure(
+                        &candidate.route.id,
+                        last_error.clone(),
+                        0,
+                        elapsed_ms(started),
+                        status.is_server_error(),
+                    )
                     .await;
                 if !retryable_status(status) {
                     return json_error(status, "upstream_error", &last_error);
@@ -580,7 +639,13 @@ pub async fn audio_transcriptions(
                 state
                     .gateway
                     .router
-                    .mark_failure(&candidate.route.id, last_error.clone(), 2, elapsed_ms(started), true)
+                    .mark_failure(
+                        &candidate.route.id,
+                        last_error.clone(),
+                        2,
+                        elapsed_ms(started),
+                        true,
+                    )
                     .await;
             }
         }
@@ -637,11 +702,19 @@ async fn generate_images(
         match send_json(&candidate.account, &url, &upstream).await {
             Ok(response) if response.status().is_success() => {
                 let route_id = candidate.route.id.clone();
-                state.gateway.router.mark_success(&route_id, elapsed_ms(started)).await;
+                state
+                    .gateway
+                    .router
+                    .mark_success(&route_id, elapsed_ms(started))
+                    .await;
                 let value = match response.json::<Value>().await {
                     Ok(value) => value,
                     Err(error) => {
-                        return Err(json_error(StatusCode::BAD_GATEWAY, "upstream_error", &error.to_string()))
+                        return Err(json_error(
+                            StatusCode::BAD_GATEWAY,
+                            "upstream_error",
+                            &error.to_string(),
+                        ))
                     }
                 };
                 let images = persist_images(
@@ -660,7 +733,13 @@ async fn generate_images(
                 state
                     .gateway
                     .router
-                    .mark_failure(&candidate.route.id, last_error.clone(), 0, elapsed_ms(started), status.is_server_error())
+                    .mark_failure(
+                        &candidate.route.id,
+                        last_error.clone(),
+                        0,
+                        elapsed_ms(started),
+                        status.is_server_error(),
+                    )
                     .await;
                 if !retryable_status(status) {
                     return Err(json_error(status, "upstream_error", &last_error));
@@ -671,7 +750,13 @@ async fn generate_images(
                 state
                     .gateway
                     .router
-                    .mark_failure(&candidate.route.id, last_error.clone(), 2, elapsed_ms(started), true)
+                    .mark_failure(
+                        &candidate.route.id,
+                        last_error.clone(),
+                        2,
+                        elapsed_ms(started),
+                        true,
+                    )
                     .await;
             }
         }
@@ -789,7 +874,11 @@ async fn persist_images(
         let indexed_filename = if data.len() == 1 {
             filename.to_string()
         } else {
-            format!("generated-image-{}.{}", index + 1, extension_for_mime(mime_type))
+            format!(
+                "generated-image-{}.{}",
+                index + 1,
+                extension_for_mime(mime_type)
+            )
         };
         let record = state
             .artifacts
@@ -853,8 +942,12 @@ async fn send_json(
     url: &str,
     value: &Value,
 ) -> Result<reqwest::Response, String> {
-    let key = env::var(&account.api_key_env)
-        .map_err(|_| format!("missing credential environment variable '{}'", account.api_key_env))?;
+    let key = env::var(&account.api_key_env).map_err(|_| {
+        format!(
+            "missing credential environment variable '{}'",
+            account.api_key_env
+        )
+    })?;
     let client = reqwest::Client::new();
     let request = apply_auth(client.post(url).json(value), account, &key)?;
     request.send().await.map_err(|error| error.to_string())
@@ -865,8 +958,12 @@ async fn send_multipart(
     url: &str,
     form: Form,
 ) -> Result<reqwest::Response, String> {
-    let key = env::var(&account.api_key_env)
-        .map_err(|_| format!("missing credential environment variable '{}'", account.api_key_env))?;
+    let key = env::var(&account.api_key_env).map_err(|_| {
+        format!(
+            "missing credential environment variable '{}'",
+            account.api_key_env
+        )
+    })?;
     let client = reqwest::Client::new();
     let request = apply_auth(client.post(url).multipart(form), account, &key)?;
     request.send().await.map_err(|error| error.to_string())
@@ -986,7 +1083,10 @@ mod tests {
 
     #[test]
     fn generated_image_bytes_must_have_supported_signature() {
-        assert_eq!(detect_image_mime(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(
+            detect_image_mime(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
         assert_eq!(detect_image_mime(b"not-an-image"), None);
     }
 }
