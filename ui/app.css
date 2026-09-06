@@ -292,6 +292,17 @@ button { cursor: pointer; }
   object-fit: cover;
   background: var(--panel-soft);
 }
+.attachment-file-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 20px;
+  font-weight: 760;
+}
 .attachment-copy { min-width: 0; }
 .attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 680; }
 .attachment-state { margin-top: 3px; color: var(--muted); font-size: 9px; }
