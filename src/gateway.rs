@@ -438,6 +438,21 @@ impl Gateway {
             }
         };
 
+        if let Some(strategy) = file_attachments::execution_strategy(body) {
+            if let Err(error) = self
+                .execution_traces
+                .set_attachment_strategy(&request_id, strategy)
+                .await
+            {
+                warn!(
+                    %error,
+                    request_id = %request_id,
+                    strategy,
+                    "failed to record attachment execution strategy; continuing request"
+                );
+            }
+        }
+
         let base_config = self.live_config.snapshot();
         if let Some(policy) = client_policy {
             let resolved = base_config.resolve_model_alias(requested_model);
@@ -1026,6 +1041,7 @@ fn sanitized_upstream_body(body: &Value) -> Value {
         object.remove("llmgateway_task");
         object.remove("llmgateway_execution_preference");
         object.remove("llmgateway_api_fallback");
+        object.remove(file_attachments::ATTACHMENT_STRATEGY_FIELD);
     }
     sanitized
 }
