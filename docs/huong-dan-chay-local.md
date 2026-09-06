@@ -486,6 +486,8 @@ Nếu dùng Agent Skills-compatible client, copy/import toàn bộ folder `skill
 
 Xem thêm: [agent-native-gateway.md](agent-native-gateway.md) và [mcp-server.md](mcp-server.md).
 
+Nếu dùng Hermes Agent, xem [hermes-agent-mcp.md](hermes-agent-mcp.md). Hướng dẫn này dùng trực tiếp `llmgateway` binary, không dùng `uv run`, `pytest` hay Python module cho Agent/MCP.
+
 ## 18. Basic Rust quality gate
 
 ```bash
