@@ -66,10 +66,14 @@
             <input id="documentFileInput" class="hidden" type="file" accept=".pdf,.txt,.md,.markdown,.docx,.csv,.json,application/pdf,text/plain,text/markdown,text/csv,application/json,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple />
             <button id="attachImageButton" class="attach-button" type="button" title="Attach image" aria-label="Attach image">＋</button>
             <button id="attachFileButton" class="attach-button file-attach-button" type="button" title="Attach document" aria-label="Attach document">▤</button>
+            <button id="micButton" class="attach-button voice-button" type="button" title="Record voice" aria-label="Record voice">🎙</button>
+            <button id="voiceModeButton" class="voice-mode-button" type="button" title="Toggle dictation or command mode">Dictate</button>
             <textarea id="composerInput" rows="1" placeholder="Ask anything…" aria-label="Message"></textarea>
+            <button id="generateImageButton" class="attach-button image-generate-button" type="button" title="Generate image from current prompt" aria-label="Generate image">✦</button>
             <button id="sendButton" class="send-button" type="button" title="Send">↑</button>
           </div>
           <div id="composerHelp" class="composer-help">Enter to send · Shift+Enter for a new line · Paste images or drop attachments</div>
+          <div id="voiceStatus" class="voice-status" aria-live="polite"></div>
         </div>
       </section>
 
@@ -275,6 +279,7 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <script src="/ui/voice.js" defer></script>
   <script src="/ui/app.js" defer></script>
   <script src="/ui/account-control.js" defer></script>
   <script src="/ui/account-intelligence.js" defer></script>
