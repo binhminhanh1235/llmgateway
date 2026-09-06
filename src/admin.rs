@@ -92,12 +92,13 @@ pub async fn set_model_enabled(
     .await
     .map_err(|error| error.to_string())?;
 
-    sqlx::query("UPDATE account_models SET enabled = ? WHERE canonical_model_id = ?")
-        .bind(if enabled { 1_i64 } else { 0_i64 })
-        .bind(model_id)
-        .execute(&pool)
-        .await
-        .map_err(|error| error.to_string())?;
+    if enabled {
+        sqlx::query("UPDATE account_models SET enabled = 1 WHERE canonical_model_id = ?")
+            .bind(model_id)
+            .execute(&pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
 
     pool.close().await;
     Ok(result.rows_affected())

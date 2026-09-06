@@ -29,7 +29,7 @@ use axum::{
 use futures_util::TryStreamExt;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
 use tokio::sync::oneshot;
@@ -692,66 +692,8 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         enriched_route_capabilities.insert(route.id.clone(), capabilities.into_iter().collect());
     }
 
-    let eligible_models: HashSet<&str> = physical.iter().map(|m| m.id.as_str()).collect();
-    let eligible_external_models: HashSet<(&str, &str)> = physical
-        .iter()
-        .map(|m| (m.provider.as_str(), m.external_id.as_str()))
-        .collect();
-
-    let route_is_valid = |route: &crate::config::RouteConfig| -> bool {
-        if !route.enabled {
-            return false;
-        }
-        let Some(account) = config.account(&route.account) else {
-            return false;
-        };
-        if !account.enabled {
-            return false;
-        }
-        physical.iter().any(|model| {
-            model.provider == account.provider
-                && (model.external_id == route.model || model.id == route.model)
-                && model.accounts.iter().any(|binding| {
-                    binding.account_id == route.account
-                        && binding.enabled
-                        && matches!(binding.availability.as_str(), "available" | "unknown")
-                })
-        })
-    };
-
-    let group_has_viable_targets = |group: &crate::config::VirtualModelConfig| -> bool {
-        let member_models = group.model_ids();
-        let member_routes = group.route_ids();
-
-        if member_models.is_empty() && member_routes.is_empty() {
-            return false;
-        }
-
-        let has_viable_model = member_models.iter().any(|model_id| {
-            if eligible_models.contains(model_id) {
-                return true;
-            }
-            if let Some((provider, external)) = model_id.split_once('/') {
-                eligible_external_models.contains(&(provider, external))
-            } else {
-                eligible_external_models
-                    .iter()
-                    .any(|(_, ext)| ext == model_id)
-            }
-        });
-        if has_viable_model {
-            return true;
-        }
-
-        member_routes.iter().any(|route_id| {
-            config
-                .route(route_id)
-                .is_some_and(|route| route_is_valid(route))
-        })
-    };
-
     for (id, virtual_model) in &config.virtual_models {
-        if !virtual_model.enabled || !group_has_viable_targets(virtual_model) {
+        if !virtual_model.enabled {
             continue;
         }
         if access
@@ -1579,7 +1521,7 @@ mod tests {
     use crate::{config::AppConfig, execution_trace::ExecutionTraceStore, live_config::LiveConfig};
     use axum::body::to_bytes;
     use sqlx::sqlite::SqlitePoolOptions;
-    use std::fs;
+    use std::{collections::HashSet, fs};
     use uuid::Uuid;
 
     #[tokio::test]
@@ -1761,7 +1703,7 @@ models = ["p1/model-disabled"]
             "p1/model-disabled should NOT be present"
         );
 
-        // Virtual model (group): viable enabled group should be present; disabled group or empty group should NOT
+        // Virtual model (group): enabled groups should be present; disabled groups should NOT
         assert!(
             ids.contains("group-viable"),
             "group-viable should be present"
@@ -1771,8 +1713,8 @@ models = ["p1/model-disabled"]
             "group-disabled should NOT be present"
         );
         assert!(
-            !ids.contains("group-no-viable-models"),
-            "group-no-viable-models should NOT be present"
+            ids.contains("group-no-viable-models"),
+            "group-no-viable-models should be present because it is enabled"
         );
 
         // Routes: active route on enabled account with enabled model should be present
