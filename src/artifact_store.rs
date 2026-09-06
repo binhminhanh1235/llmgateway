@@ -791,7 +791,10 @@ mod tests {
             sniff_mime(&[0x1a, 0x45, 0xdf, 0xa3, 0x00], Some("audio/webm")).as_deref(),
             Some("audio/webm")
         );
-        assert_eq!(sniff_mime(b"OggSstub", Some("audio/ogg")).as_deref(), Some("audio/ogg"));
+        assert_eq!(
+            sniff_mime(b"OggSstub", Some("audio/ogg")).as_deref(),
+            Some("audio/ogg")
+        );
         assert_eq!(
             sniff_mime(b"\0\0\0\x18ftypM4A stub", Some("audio/mp4")).as_deref(),
             Some("audio/mp4")
