@@ -27,9 +27,55 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        raw = self.rfile.read(length)
+        path = self.path.rstrip("/")
 
-        if self.path.rstrip("/").endswith("/embeddings"):
+        if path.endswith("/audio/transcriptions"):
+            payload = json.dumps({
+                "text": "fake transcription: create a new chat",
+                "language": "en",
+            }).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if path.endswith("/images/edits"):
+            payload = json.dumps({
+                "created": int(time.time()),
+                "data": [{
+                    "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl90AAAAASUVORK5CYII=",
+                    "revised_prompt": "fake edited image",
+                }],
+            }).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        body = json.loads(raw or b"{}")
+
+        if path.endswith("/images/generations"):
+            count = max(1, min(int(body.get("n", 1)), 8))
+            payload = json.dumps({
+                "created": int(time.time()),
+                "data": [{
+                    "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl90AAAAASUVORK5CYII=",
+                    "revised_prompt": f"fake generated image {index + 1}",
+                } for index in range(count)],
+            }).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if path.endswith("/embeddings"):
             inputs = body.get("input", [])
             if isinstance(inputs, str):
                 inputs = [inputs]
