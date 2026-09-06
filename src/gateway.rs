@@ -461,9 +461,7 @@ impl Gateway {
         if vision::request_has_image(body) {
             let eligible_before_vision = routes.len();
             routes.retain(|route| {
-                if !vision::route_supports_image(&route.capabilities) {
-                    return false;
-                }
+                let route_declares_image = vision::route_supports_image(&route.capabilities);
                 let Some(account) = config.account(&route.account) else {
                     return false;
                 };
@@ -471,7 +469,7 @@ impl Gateway {
                     return false;
                 };
                 if !BrowserProviderRegistry::is_browser_kind(&provider.kind) {
-                    return true;
+                    return route_declares_image;
                 }
                 browser_provider_runtime::get()
                     .is_some_and(|registry| registry.supports_image_input(&provider.kind))
