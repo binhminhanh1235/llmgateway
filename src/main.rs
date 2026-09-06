@@ -58,7 +58,7 @@ mod usage_api;
 mod vision;
 
 use account_intelligence_api::account_intelligence;
-use admin_api::set_account_model;
+use admin_api::{set_account, set_account_model, set_model};
 use artifact_store::ArtifactStore;
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
@@ -106,7 +106,10 @@ use live_config::LiveConfig;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
-use model_group_api::{create_model_group, delete_model_group, list_model_groups, update_model_group};
+use model_group_api::{
+    create_model_group, delete_model_group, list_model_groups, set_model_group_enabled,
+    update_model_group,
+};
 use quota_usage::{QuotaUsageStore, UsageConfig};
 use retrieval_api::inspect_thread_retrieval;
 use routing_api::explain_routes;
@@ -330,14 +333,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/threads/{thread_id}/compact", post(compact_thread_context))
         .route("/_llmgateway/health", get(health))
         .route("/_llmgateway/models", get(admin_models))
+        .route(
+            "/_llmgateway/models/{model_id}",
+            axum::routing::patch(set_model),
+        )
         .route("/_llmgateway/accounts", get(admin_accounts))
+        .route(
+            "/_llmgateway/accounts/{account_id}",
+            axum::routing::patch(set_account),
+        )
         .route("/_llmgateway/account-intelligence", get(account_intelligence))
         .route("/_llmgateway/clients", get(list_client_policies))
         .route("/_llmgateway/routes/explain", post(explain_routes))
         .route("/_llmgateway/model-groups", get(list_model_groups).post(create_model_group))
         .route(
             "/_llmgateway/model-groups/{group_id}",
-            axum::routing::put(update_model_group).delete(delete_model_group),
+            axum::routing::put(update_model_group)
+                .patch(set_model_group_enabled)
+                .delete(delete_model_group),
         )
         .route("/_llmgateway/executions", get(list_executions))
         .route("/_llmgateway/executions/{request_id}", get(get_execution))
