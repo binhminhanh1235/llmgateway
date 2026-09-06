@@ -5,6 +5,7 @@ use std::error::Error;
 
 #[derive(Default)]
 struct AgentOptions {
+    model: Option<String>,
     task: Option<String>,
     capabilities: Vec<String>,
     min_context_window: Option<i64>,
@@ -167,6 +168,9 @@ fn parse_options(args: &[String]) -> Result<AgentOptions, Box<dyn Error>> {
     while index < args.len() {
         let flag = args[index].as_str();
         match flag {
+            "--model" => {
+                options.model = Some(take_value(args, &mut index, flag)?);
+            }
             "--task" => {
                 options.task = Some(take_value(args, &mut index, flag)?);
             }
@@ -235,6 +239,9 @@ fn resolve_body(options: AgentOptions) -> Value {
             "min_context_window": options.min_context_window
         }),
     );
+    if let Some(model) = options.model {
+        body.insert("model".into(), Value::String(model));
+    }
     if let Some(task) = options.task {
         body.insert("task".into(), Value::String(task));
     }
@@ -292,8 +299,8 @@ READ + EXECUTE:
   llmgateway agent health
   llmgateway agent models
   llmgateway agent capabilities
-  llmgateway agent resolve [--model is intentionally omitted; use gateway default] [--task TASK] [--capability NAME]... [--min-context-window N] [--prompt TEXT]
-  llmgateway agent diagnostics [--task TASK] [--capability NAME]... [--min-context-window N] [--prompt TEXT]
+  llmgateway agent resolve [--model MODEL] [--task TASK] [--capability NAME]... [--min-context-window N] [--prompt TEXT]
+  llmgateway agent diagnostics [--model MODEL] [--task TASK] [--capability NAME]... [--min-context-window N] [--prompt TEXT]
   llmgateway agent responses MODEL PROMPT [routing options]
   llmgateway agent chat MODEL PROMPT [routing options]
   llmgateway agent messages MODEL PROMPT [--max-tokens N] [routing options]
