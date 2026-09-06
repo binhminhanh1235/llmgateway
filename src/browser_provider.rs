@@ -4143,6 +4143,60 @@ mod tests {
     }
 
     #[test]
+    fn incremental_browser_body_does_not_replay_synced_file_attachments() {
+        let body = json!({
+            "model":"chatgpt-web-default",
+            "messages":[
+                {
+                    "role":"user",
+                    "content":[
+                        {"type":"text","text":"summarize old file"},
+                        {
+                            "type":"input_file",
+                            "file_data":"data:application/pdf;base64,JVBERi0=",
+                            "filename":"old.pdf"
+                        }
+                    ]
+                },
+                {"role":"assistant","content":"old answer"},
+                {"role":"user","content":"follow up without reattaching"}
+            ],
+            "stream":false
+        });
+        let delta = incremental_browser_body(&body, &[]);
+        assert_eq!(delta["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(delta["messages"][0]["content"], "follow up without reattaching");
+        assert!(!file_attachments::request_has_file(&delta));
+    }
+
+    #[test]
+    fn incremental_browser_body_replays_only_unsynced_file_turns() {
+        let body = json!({
+            "model":"gemini-web-default",
+            "messages":[
+                {"role":"user","content":"old synced turn"},
+                {"role":"assistant","content":"old synced answer"},
+                {"role":"user","content":"current turn"}
+            ],
+            "stream":false
+        });
+        let missed = vec![json!({
+            "role":"user",
+            "content":[
+                {"type":"text","text":"missed file turn"},
+                {
+                    "type":"input_file",
+                    "file_data":"data:application/pdf;base64,JVBERi0=",
+                    "filename":"missed.pdf"
+                }
+            ]
+        })];
+        let delta = incremental_browser_body(&body, &missed);
+        assert_eq!(delta["messages"].as_array().unwrap().len(), 2);
+        assert!(file_attachments::request_has_file(&delta));
+    }
+
+    #[test]
     fn browser_stream_progress_heartbeat_advances_without_output_events() {
         let mut last = None;
         let first = CdpStreamPoll {
