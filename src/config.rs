@@ -344,6 +344,8 @@ pub struct RouteConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct VirtualModelConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub routes: Vec<String>,
     #[serde(default)]
