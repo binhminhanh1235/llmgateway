@@ -1360,7 +1360,16 @@ impl BrowserProviderRegistry {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
             })?;
-        if requires_image && session.enabled && session.status != "ready" {
+        let image_browser_was_live = if requires_image && browser_adapter.is_cdp() {
+            self.cdp_session_live(&binding.session).await
+        } else {
+            false
+        };
+        if requires_image
+            && browser_adapter.is_cdp()
+            && session.enabled
+            && !image_browser_was_live
+        {
             let _ = self.ensure_cdp_session_ready(&binding.session).await;
             session = store
                 .session(&binding.session)
@@ -1397,8 +1406,17 @@ impl BrowserProviderRegistry {
             thread_id: thread_id.map(str::to_string),
         };
 
+        let image_forced_browser_fallback = requires_image
+            && direct_adapter.is_some()
+            && !direct_adapter
+                .as_ref()
+                .is_some_and(|adapter| adapter.supports_image_input());
+        let image_browser_is_ephemeral = image_forced_browser_fallback
+            && !image_browser_was_live
+            && !matches!(binding.transport_mode, BrowserTransportMode::BrowserOnly);
+
         let mut used_adapter = browser_adapter.clone();
-        let mut browser_fallback_used = false;
+        let mut browser_fallback_used = image_forced_browser_fallback;
         let result = if direct_snapshot_ready {
             let direct = direct_adapter.expect("direct adapter checked above");
             used_adapter = direct.clone();
@@ -1457,7 +1475,21 @@ impl BrowserProviderRegistry {
                 direct_result
             }
         } else {
-            browser_adapter.execute_chat(adapter_request).await
+            let browser_result = browser_adapter.execute_chat(adapter_request).await;
+            if image_browser_is_ephemeral {
+                match browser_result {
+                    Ok(response) => wrap_response_with_browser_stop(
+                        response,
+                        binding.session.clone(),
+                    ),
+                    Err(error) => {
+                        stop_browser_runtime_soon(binding.session.clone());
+                        Err(error)
+                    }
+                }
+            } else {
+                browser_result
+            }
         };
 
         match &result {
