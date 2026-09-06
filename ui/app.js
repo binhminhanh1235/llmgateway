@@ -902,6 +902,19 @@
         toast(`Selected ${displayModel(candidates[0].id)}.`);
         break;
       }
+      case "set_provider": {
+        const query = String(command.query || "").toLowerCase();
+        const candidates = state.models.filter((model) => {
+          if (model.llmgateway?.kind === "route") return false;
+          const provider = String(model.llmgateway?.provider || "").toLowerCase();
+          return provider === query || provider.includes(query);
+        });
+        if (candidates.length !== 1) return toast(candidates.length ? "Provider selection is ambiguous; name a model instead." : "No matching provider found.");
+        ensureThread().model = candidates[0].id;
+        renderChat();
+        toast(`Selected ${displayModel(candidates[0].id)}.`);
+        break;
+      }
       case "attach_artifact": {
         const query = String(command.query || "").toLowerCase();
         const matches = state.recentArtifacts.filter((artifact) => artifact.name.toLowerCase().includes(query));
