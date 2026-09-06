@@ -59,9 +59,18 @@ pub struct RouteCandidateDecision {
     pub adaptive: AdaptiveRouteSnapshot,
     pub task_adjustment: i32,
     pub task_fit: TaskFitSnapshot,
+    pub capabilities: Vec<String>,
+    pub context_window: Option<i64>,
+    pub missing_required_capabilities: Vec<String>,
     pub final_score: Option<i32>,
     pub rank: Option<usize>,
     pub selected: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RouteRequirements {
+    pub capabilities: Vec<String>,
+    pub min_context_window: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,6 +81,7 @@ pub struct RouteDecisionTrace {
     pub execution_policy: String,
     pub api_fallback: bool,
     pub task: TaskProfile,
+    pub requirements: RouteRequirements,
     pub selected_route: Option<String>,
     pub candidates: Vec<RouteCandidateDecision>,
 }
@@ -203,6 +213,7 @@ impl Router {
             execution_policy: config.routing.execution_policy().to_string(),
             api_fallback: config.routing.api_fallback,
             task: evaluation.task,
+            requirements: requirements_from_body(body),
             selected_route,
             candidates: evaluation
                 .candidates
@@ -220,6 +231,7 @@ impl Router {
     ) -> RouteEvaluation {
         let resolved_model = config.resolve_model_alias(requested_model).to_string();
         let task = classify_task(body, &config.routing);
+        let requirements = requirements_from_body(body);
         let candidates = self.candidate_routes(config.clone(), &resolved_model).await;
         let apply_execution_policy = config.virtual_models.contains_key(&resolved_model);
         let group_enabled = config
@@ -290,6 +302,13 @@ impl Router {
                 .and_then(|group| group.model_order_for_route(config.as_ref(), &route));
             let task_fit = evaluate_task_fit(&task, &route, &config.routing);
             let task_adjustment = task_fit.snapshot.adjustment;
+            let route_capabilities = normalized_route_capabilities(&route.capabilities);
+            let missing_required_capabilities = requirements
+                .capabilities
+                .iter()
+                .filter(|required| !route_capabilities.iter().any(|value| value == *required))
+                .cloned()
+                .collect::<Vec<_>>();
             let mut exclusion_reasons = Vec::new();
             let mut warnings = Vec::new();
             let (model_enabled, model_binding_enabled) = catalog_snapshot
@@ -338,6 +357,17 @@ impl Router {
             }
             if let Some(reason) = task_fit.exclusion_reason {
                 push_unique(&mut exclusion_reasons, reason);
+            }
+            if !missing_required_capabilities.is_empty() {
+                push_unique(&mut exclusion_reasons, "required_capability_missing");
+            }
+            if requirements.min_context_window.is_some_and(|minimum| {
+                route.context_window.is_some_and(|window| window < minimum)
+            }) {
+                push_unique(&mut exclusion_reasons, "minimum_context_window_not_met");
+            }
+            if requirements.min_context_window.is_some() && route.context_window.is_none() {
+                push_unique(&mut exclusion_reasons, "context_window_unknown");
             }
             if route_health
                 .cooldown_until
@@ -465,6 +495,9 @@ impl Router {
                     adaptive,
                     task_adjustment,
                     task_fit: task_fit.snapshot,
+                    capabilities: route_capabilities,
+                    context_window: route.context_window,
+                    missing_required_capabilities,
                     final_score,
                     rank: None,
                     selected: false,
@@ -879,6 +912,52 @@ fn execution_policy_exclusion(
         ("prefer-browser", "api") if !api_fallback => Some("api_fallback_disabled"),
         _ => None,
     }
+}
+
+fn requirements_from_body(body: Option<&Value>) -> RouteRequirements {
+    let Some(requirements) = body
+        .and_then(|value| value.get("llmgateway_requirements"))
+        .and_then(Value::as_object)
+    else {
+        return RouteRequirements::default();
+    };
+
+    let mut capabilities = requirements
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(normalize_capability)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    capabilities.sort();
+    capabilities.dedup();
+
+    let min_context_window = requirements
+        .get("min_context_window")
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0);
+
+    RouteRequirements {
+        capabilities,
+        min_context_window,
+    }
+}
+
+fn normalized_route_capabilities(values: &[String]) -> Vec<String> {
+    let mut out = values
+        .iter()
+        .map(|value| normalize_capability(value))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn normalize_capability(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('_', "-")
 }
 
 fn push_unique(values: &mut Vec<String>, value: &str) {
