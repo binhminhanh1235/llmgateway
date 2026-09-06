@@ -149,6 +149,24 @@ impl ModelCapabilities {
         capabilities
     }
 
+    pub fn attachment_execution() -> Self {
+        let mut capabilities = Self::vision_execution();
+        capabilities.input_modalities.push(Modality::File);
+        capabilities.supported_mime_types = vec![
+            "image/png".into(),
+            "image/jpeg".into(),
+            "image/gif".into(),
+            "image/webp".into(),
+            "application/pdf".into(),
+            "text/plain".into(),
+            "text/markdown".into(),
+            "text/csv".into(),
+            "application/json".into(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+        ];
+        capabilities
+    }
+
     pub fn from_legacy_tags(tags: &[String]) -> Self {
         let normalized = tags
             .iter()
