@@ -1213,6 +1213,54 @@ routes = ["api"]
     }
 
     #[test]
+    fn creates_mimo_browser_account_with_dynamic_models_and_browserless_policy() {
+        let path = temp_config();
+        apply_browser_account_setup(
+            &path,
+            CreateBrowserAccountRequest {
+                provider: "mimo".into(),
+                account_id: Some("mimo-a".into()),
+                label: Some("MiMo A".into()),
+                model_id: None,
+                model_label: None,
+                priority: Some(7),
+            },
+        )
+        .unwrap();
+
+        let raw = fs::read_to_string(&path).unwrap();
+        let parsed = AppConfig::parse(&raw).unwrap();
+        assert_eq!(parsed.provider("mimo-web").unwrap().kind, "browser-mimo");
+        assert!(parsed.account("mimo-a").unwrap().discover_models);
+        let route = parsed.route("mimo-a-route").unwrap();
+        assert_eq!(route.model, "mimo-web-default");
+        assert_eq!(route.priority, 7);
+        assert!(route.capabilities.iter().any(|capability| capability == "reasoning"));
+        assert!(parsed.virtual_models["llmgateway-coding"]
+            .routes
+            .contains(&"mimo-a-route".to_string()));
+        assert!(parsed.virtual_models["llmgateway-best"]
+            .routes
+            .contains(&"mimo-a-route".to_string()));
+
+        let browser: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(
+            browser["browser"]["sessions"]["mimo-a"]["login_url"].as_str(),
+            Some("https://aistudio.xiaomimimo.com/#/c")
+        );
+        assert_eq!(
+            browser["browser"]["bindings"]["mimo-a"]["transport_mode"].as_str(),
+            Some("http-preferred")
+        );
+        assert_eq!(
+            browser["chromium"]["sessions"]["mimo-a"]["ready_url_prefixes"][0].as_str(),
+            Some("https://aistudio.xiaomimimo.com/")
+        );
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn creates_qwen_route_for_coding_virtual_model() {
         let path = temp_config();
         apply_browser_account_setup(
