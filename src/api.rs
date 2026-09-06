@@ -674,6 +674,9 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     }
 
     for (id, virtual_model) in &config.virtual_models {
+        if !virtual_model.enabled {
+            continue;
+        }
         if access.policy().is_some_and(|policy| !policy.model_allowed(id, id)) {
             continue;
         }
