@@ -9,7 +9,7 @@
     const text = normalize(transcript);
     if (!text) return null;
 
-    if (/^(new|create|start) (chat|thread|conversation)$/.test(text)) {
+    if (/^(?:new|(?:create|start)(?: new)?) (?:chat|thread|conversation)$/.test(text)) {
       return { type: "new_thread" };
     }
     if (/^(stop|stop generation|stop response|cancel response)$/.test(text)) {
