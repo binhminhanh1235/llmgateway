@@ -143,6 +143,9 @@ pub async fn openai_chat(
         .await
     {
         Ok(routed) => {
+            if routed.response.status().is_success() {
+                sync_native_file_provider_bindings(&state, &execution_body, &routed.route).await;
+            }
             let route_id = routed.route.id.clone();
             let request_id = routed.request_id.clone();
             if is_stream {
@@ -317,6 +320,9 @@ pub async fn openai_responses(
         .await
     {
         Ok(routed) => {
+            if routed.response.status().is_success() {
+                sync_native_file_provider_bindings(&state, &execution_body, &routed.route).await;
+            }
             let route_id = routed.route.id.clone();
             let request_id = routed.request_id.clone();
             if is_stream {
@@ -1039,6 +1045,52 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "threads":threads,
         "routes":routes
     }))
+}
+
+pub(crate) async fn sync_native_file_provider_bindings(
+    state: &AppState,
+    body: &Value,
+    route: &crate::config::RouteConfig,
+) {
+    let config = state.gateway.config_snapshot();
+    let Some(account) = config.account(&route.account) else {
+        tracing::warn!(
+            route_id = %route.id,
+            account_id = %route.account,
+            "cannot persist native file binding because route account is missing"
+        );
+        return;
+    };
+    match file_attachments::sync_native_provider_bindings(
+        body,
+        &state.artifacts,
+        &account.provider,
+        &route.account,
+        &route.id,
+    )
+    .await
+    {
+        Ok(summary) if summary.created > 0 || summary.reused > 0 => {
+            tracing::debug!(
+                route_id = %route.id,
+                provider = %account.provider,
+                account_id = %route.account,
+                created = summary.created,
+                reused = summary.reused,
+                "synchronized native file provider bindings"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                route_id = %route.id,
+                provider = %account.provider,
+                account_id = %route.account,
+                "failed to persist native file provider bindings"
+            );
+        }
+    }
 }
 
 fn artifact_ids_in_messages(messages: &[Value]) -> Vec<String> {

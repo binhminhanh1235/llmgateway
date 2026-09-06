@@ -466,6 +466,40 @@ impl ArtifactStore {
         .transpose()
     }
 
+    pub async fn ensure_provider_binding(
+        &self,
+        artifact_id: &str,
+        provider: &str,
+        account_id: &str,
+        metadata_json: Option<&str>,
+    ) -> Result<bool, ArtifactError> {
+        self.get(artifact_id, None, true).await?;
+        if let Some(existing) = self.provider_binding(artifact_id, provider, account_id).await? {
+            self.upsert_provider_binding(
+                artifact_id,
+                provider,
+                account_id,
+                &existing.provider_file_id,
+                metadata_json,
+            )
+            .await?;
+            return Ok(true);
+        }
+
+        let seed = format!("{artifact_id}\0{provider}\0{account_id}");
+        let digest = sha256_hex(seed.as_bytes());
+        let provider_file_id = format!("binding_{}", &digest[..32]);
+        self.upsert_provider_binding(
+            artifact_id,
+            provider,
+            account_id,
+            &provider_file_id,
+            metadata_json,
+        )
+        .await?;
+        Ok(false)
+    }
+
     pub async fn cleanup_orphan_blobs(&self) -> Result<usize, ArtifactError> {
         let rows = sqlx::query(
             "SELECT b.sha256, b.relative_path
@@ -821,68 +855,68 @@ mod tests {
             .await
             .unwrap();
 
-        store
-            .upsert_provider_binding(
+        let reused_first = store
+            .ensure_provider_binding(
                 &artifact.id,
                 "chatgpt-web",
                 "account-a",
-                "provider-file-a1",
-                Some(r#"{"strategy":"native"}"#),
+                Some(r#"{"strategy":"native","route_id":"route-a"}"#),
             )
             .await
             .unwrap();
+        assert!(!reused_first);
         let first = store
             .provider_binding(&artifact.id, "chatgpt-web", "account-a")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(first.provider_file_id, "provider-file-a1");
+        assert!(first.provider_file_id.starts_with("binding_"));
 
-        store
-            .upsert_provider_binding(
+        let reused_same_affinity = store
+            .ensure_provider_binding(
                 &artifact.id,
                 "chatgpt-web",
                 "account-a",
-                "provider-file-a2",
-                Some(r#"{"strategy":"native","refreshed":true}"#),
+                Some(r#"{"strategy":"native","route_id":"route-b"}"#),
             )
             .await
             .unwrap();
-        let reused = store
+        assert!(reused_same_affinity);
+        let refreshed = store
             .provider_binding(&artifact.id, "chatgpt-web", "account-a")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(reused.provider_file_id, "provider-file-a2");
+        assert_eq!(refreshed.provider_file_id, first.provider_file_id);
+        assert_eq!(
+            refreshed.metadata_json.as_deref(),
+            Some(r#"{"strategy":"native","route_id":"route-b"}"#)
+        );
 
-        assert!(store
+        let reused_account_b = store
+            .ensure_provider_binding(&artifact.id, "chatgpt-web", "account-b", None)
+            .await
+            .unwrap();
+        assert!(!reused_account_b);
+        let account_b = store
             .provider_binding(&artifact.id, "chatgpt-web", "account-b")
             .await
             .unwrap()
-            .is_none());
-        assert!(store
-            .provider_binding(&artifact.id, "gemini-web", "account-a")
-            .await
-            .unwrap()
-            .is_none());
+            .unwrap();
+        assert_ne!(account_b.provider_file_id, first.provider_file_id);
 
-        store
-            .upsert_provider_binding(
-                &artifact.id,
-                "gemini-web",
-                "account-a",
-                "gemini-file-a1",
-                None,
-            )
+        let reused_gemini = store
+            .ensure_provider_binding(&artifact.id, "gemini-web", "account-a", None)
             .await
             .unwrap();
+        assert!(!reused_gemini);
         let gemini = store
             .provider_binding(&artifact.id, "gemini-web", "account-a")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(gemini.provider_file_id, "gemini-file-a1");
-        assert_eq!(reused.provider, "chatgpt-web");
+        assert_ne!(gemini.provider_file_id, first.provider_file_id);
+        assert_eq!(refreshed.provider, "chatgpt-web");
         assert_eq!(gemini.provider, "gemini-web");
 
         let _ = std::fs::remove_dir_all(root);

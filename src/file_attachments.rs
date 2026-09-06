@@ -159,6 +159,49 @@ pub async fn materialize_file_inputs(
     Ok(materialized)
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderBindingSync {
+    pub created: usize,
+    pub reused: usize,
+}
+
+pub async fn sync_native_provider_bindings(
+    body: &Value,
+    store: &ArtifactStore,
+    provider: &str,
+    account_id: &str,
+    route_id: &str,
+) -> Result<ProviderBindingSync, FileAttachmentError> {
+    if !matches!(execution_strategy(body), Some("native_upload" | "mixed")) {
+        return Ok(ProviderBindingSync::default());
+    }
+
+    let metadata = json!({
+        "strategy":"native_upload",
+        "binding_kind":"gateway_opaque_native_attachment",
+        "native_file_id_available":false,
+        "route_id":route_id,
+    })
+    .to_string();
+    let mut summary = ProviderBindingSync::default();
+    for artifact_id in file_artifact_ids(body) {
+        if store
+            .ensure_provider_binding(
+                &artifact_id,
+                provider,
+                account_id,
+                Some(&metadata),
+            )
+            .await?
+        {
+            summary.reused += 1;
+        } else {
+            summary.created += 1;
+        }
+    }
+    Ok(summary)
+}
+
 pub fn execution_strategy(body: &Value) -> Option<&str> {
     body.get(ATTACHMENT_STRATEGY_FIELD)
         .and_then(Value::as_str)

@@ -424,6 +424,9 @@ pub async fn send_thread_message(
         Ok(routed) => routed,
         Err(error) => return gateway_error(error),
     };
+    if routed.response.status().is_success() {
+        crate::api::sync_native_file_provider_bindings(&state, &request, &routed.route).await;
+    }
     let route_id = routed.route.id.clone();
     let provider_affinity = {
         let config = state.gateway.config_snapshot();
