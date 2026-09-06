@@ -260,6 +260,15 @@ pub fn validate_vision_execution(
     validate_execution_modalities(request, &[Modality::Text, Modality::Image])
 }
 
+pub fn validate_attachment_execution(
+    request: &MultimodalRequest,
+) -> Result<(), MultimodalError> {
+    validate_execution_modalities(
+        request,
+        &[Modality::Text, Modality::Image, Modality::File],
+    )
+}
+
 fn validate_execution_modalities(
     request: &MultimodalRequest,
     allowed_inputs: &[Modality],
