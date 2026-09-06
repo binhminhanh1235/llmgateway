@@ -1,195 +1,407 @@
 # llmgateway
 
-A local-first universal LLM gateway written in Rust.
+**llmgateway** là một universal LLM gateway chạy local, viết bằng Rust, tập trung vào mô hình **browser-first**: dùng các tài khoản LLM đã đăng nhập trên trình duyệt như ChatGPT, Gemini, Qwen, DeepSeek hoặc Xiaomi MiMo làm execution backend, đồng thời vẫn hỗ trợ API provider khi cần.
 
-Point Claude Code, Codex, OpenCode, OpenAI-compatible clients, Anthropic-compatible clients, or the built-in local chat UI at one endpoint. llmgateway owns durable conversation state while routing each turn across providers, accounts, and models with failover.
+> Một endpoint local, nhiều provider/model/account, có routing, fallback và conversation state thống nhất.
 
-> One conversation. Any model. Context intact.
+## Trạng thái hiện tại của nhánh `main`
 
-## Current highlights (v0.32)
+Tài liệu này được đồng bộ với code `main` ngày **06/09/2026**.
 
-- OpenAI-compatible `POST /v1/chat/completions`
-- OpenAI-compatible `POST /v1/responses`
-- Anthropic-compatible `POST /v1/messages`
-- OpenAI-compatible `GET /v1/models`
-- Persistent server-side threads in SQLite
-- Stateful `previous_response_id` chains
-- Multi-provider and multi-account routing
-- Browser-first virtual-model routing with optional API fallback
-- Browser session startup reconciliation and automatic crash recovery
-- First-class `browser-gemini`, `browser-chatgpt`, and `browser-qwen` providers
-- Browser Accounts wizard for managed Gemini/ChatGPT/Qwen account creation
-- Hot activation of new browser accounts, routes, sessions, and catalog entries without gateway restart
-- Browser account disable/re-enable, re-authenticate, restart, stop, and recovery controls
-- Request-pinned immutable config snapshots during hot reload
-- True incremental Gemini/ChatGPT/Qwen browser streaming through CDP
-- Downstream disconnect cancellation with ephemeral-tab cleanup
-- Browser stream first-byte/idle timeouts and partial-response execution traces
-- OpenAI Chat, Responses, Anthropic Messages, and persistent-thread browser streaming
-- Equal-quality browser-account LRU fairness with persistent-thread sticky affinity
-- Browser cooldown recovery scoring and deterministic browser-to-browser failover
-- Explicit `prefer-browser`, `browser-only`, `prefer-api`, and `api-only` routing policies
-- Model-catalog capability/context enrichment for configured browser routes
-- Browser-aware route-explain policy, fairness, and recovery diagnostics
-- Per-client API keys for OpenAI/Anthropic-compatible local tools
-- Per-client model/route allowlists and browser/API routing boundaries
-- Persistent daily/monthly request and token budgets with restart-safe enforcement
-- Client-scoped route explain plus secret-free admin policy diagnostics
-- Versioned browser adapter contract with page-drift diagnostics
-- Stateless per-request browser chat tabs for built-in providers
-- Sticky route affinity with automatic fallback
-- Model catalog and per-account model discovery
-- Canonical physical model IDs plus virtual routing models
-- Structured Memory IR for durable cross-model context
-- Rolling context checkpoints with immutable full transcripts
-- Tool-call/tool-result atomicity during context compaction
-- Model-aware input budgets
-- v0.7 local semantic/hybrid retrieval over checkpointed transcript history
-- Retrieval inspector API and diagnostic response headers
-- Embedded local UI with no frontend build step
-- Docker build and end-to-end CI smoke tests
+Nhánh `main` hiện đã có:
 
-The common upstream protocol is currently OpenAI Chat Completions. Responses API and Anthropic Messages requests are normalized before routing.
+- OpenAI Chat Completions: `POST /v1/chat/completions`
+- OpenAI Responses: `POST /v1/responses`
+- Anthropic Messages: `POST /v1/messages`
+- OpenAI-compatible model discovery: `GET /v1/models`
+- persistent threads và `previous_response_id`
+- SQLite conversation history, Structured Memory IR, compaction, semantic/hybrid retrieval
+- multi-provider, multi-account routing và failover
+- route affinity, task-aware routing, adaptive scoring, quota/cooldown
+- browser account lifecycle và Chromium/CDP runtime
+- browser streaming/cancellation
+- provider-native conversation affinity cho các adapter đã hỗ trợ
+- per-client API key, allowlist và request/token budget
+- model groups với **strict ordered fallback tiers**
+- enable/disable đồng bộ giữa account, model và group
+- xóa account trực tiếp từ UI
+- browserless/direct HTTP transport cho các provider đã hỗ trợ
+- browser adapters tích hợp sẵn:
+  - ChatGPT Web
+  - Gemini Web
+  - Qwen Web
+  - DeepSeek Web
+  - Xiaomi MiMo Studio Web
+- UI local tích hợp sẵn, không cần build frontend riêng
+- bộ smoke test, live acceptance runner, Linux/macOS/Windows CI
 
-## Architecture
+### Multimodal
+
+Multimodal Gateway gồm file/image attachment, vision, voice và image generation hiện vẫn đang phát triển trên nhánh `feat/multimodal-gateway`.
+
+**Không coi multimodal là tính năng của `main` cho tới khi nhánh đó được merge.**
+
+Chi tiết trạng thái tổng thể: [docs/project-status.md](docs/project-status.md).
+
+---
+
+## Kiến trúc tổng quan
 
 ```text
 Claude Code ─ Anthropic Messages ─┐
 Codex ───── OpenAI Responses ─────┤
 OpenCode ───── OpenAI Chat ───────┤
-Local UI ───── Persistent Threads ─┤
+Local UI ───── Persistent Threads ┤
                                   ▼
                            ┌──────────────┐
                            │  llmgateway  │
                            └──────┬───────┘
                                   │
-              ┌───────────────────┴───────────────────┐
-              │                                       │
-      Conversation Engine                       Model Catalog
-              │                                       │
-       immutable transcript                    account models
-              │                                       │
-       Structured Memory IR                          routes
-              │                                       │
-       rolling checkpoint                             │
-              │                                       │
-       semantic retrieval                             │
-              │                                       │
-          recent turns                                │
-              └───────────────────┬───────────────────┘
-                                  │
+       ┌──────────────────────────┼──────────────────────────┐
+       ▼                          ▼                          ▼
+Conversation Engine        Model Catalog / Groups      Client Policies
+       │                          │                          │
+ transcript + memory       models/routes/accounts      keys/allowlists
+ compaction/retrieval      priority/fallback tiers     budgets/policies
+       └──────────────────────────┼──────────────────────────┘
+                                  ▼
                             Route Planner
                                   │
-                 ┌────────────────┼────────────────┐
-                 ▼                ▼                ▼
-            Gemini × N       ChatGPT × N       Qwen × N       OpenRouter
-                                             other APIs
+          ┌───────────────┬───────┼─────────┬───────────────┐
+          ▼               ▼       ▼         ▼               ▼
+      ChatGPT Web      Gemini Web Qwen Web DeepSeek Web  MiMo Studio
+          │               │       │         │               │
+          └──────────── browser/CDP or browserless ─────────┘
+                                  │
+                                  └──── optional API routes
 ```
 
-The ownership rule is deliberate: **the conversation belongs to llmgateway, not to a provider-native chat ID**. Providers are execution engines for individual turns.
+llmgateway là nơi sở hữu conversation state chuẩn. Provider chỉ là execution backend cho từng turn. Khi provider-native affinity được bật, gateway vẫn giữ transcript canonical trong SQLite.
 
-## Quick start
+---
+
+## Yêu cầu môi trường
+
+Tối thiểu:
+
+- **Rust stable** và Cargo
+- Git
+- curl
+- một trình duyệt Chromium-compatible nếu dùng browser account:
+  - Google Chrome
+  - Chromium
+  - Microsoft Edge có thể dùng nếu cấu hình executable phù hợp
+
+Khuyến nghị cho test/dev đầy đủ:
+
+- Node.js 20+ để chạy fixture/UI checks
+- Python 3 để chạy fake provider/stress tools
+- Bash trên macOS/Linux hoặc Git Bash/WSL trên Windows
+- Docker nếu muốn test image/container
+
+Kiểm tra:
+
+```bash
+rustc --version
+cargo --version
+git --version
+curl --version
+node --version
+python3 --version
+docker --version
+```
+
+---
+
+## Chạy nhanh local
+
+### 1. Clone repository
+
+```bash
+git clone https://github.com/binhminhanh1235/llmgateway.git
+cd llmgateway
+git switch main
+git pull
+```
+
+### 2. Tạo config và env local
 
 ```bash
 cp config/llmgateway.example.toml config/llmgateway.toml
 cp .env.example .env
+```
+
+Sửa `.env`:
+
+```dotenv
+LLMGATEWAY_API_KEY=thay_bang_key_local_cua_ban
+OPENROUTER_API_KEY=
+GEMINI_API_KEY_PRIMARY=
+GEMINI_API_KEY_SECONDARY=
+QWEN_API_KEY=
+```
+
+Nếu chỉ dùng browser account, các API key upstream có thể để trống. `LLMGATEWAY_API_KEY` vẫn nên được đặt để bảo vệ local API.
+
+### 3. Build và chạy
+
+Development:
+
+```bash
+cargo run
+```
+
+Release:
+
+```bash
 cargo run --release
 ```
 
-Set `LLMGATEWAY_API_KEY`. API-backed accounts also need their configured upstream credentials; first-class browser accounts do not require dummy API keys.
-
-Default endpoint:
+Gateway mặc định:
 
 ```text
 http://127.0.0.1:7331
 ```
 
-Default database:
-
-```text
-data/llmgateway.db
-```
-
-Open the local UI at:
+UI:
 
 ```text
 http://127.0.0.1:7331/
 ```
 
-## Built-in browser providers
+Health:
 
-Built-in browser execution includes first-class Gemini Web, ChatGPT Web, and Qwen Web providers:
-
-```toml
-[[providers]]
-id = "gemini-web"
-kind = "browser-gemini"
-
-[[providers]]
-id = "chatgpt-web"
-kind = "browser-chatgpt"
-
-[[providers]]
-id = "qwen-web"
-kind = "browser-qwen"
+```bash
+curl http://127.0.0.1:7331/_llmgateway/health
 ```
 
-Bind each account to an isolated browser session, enable the corresponding Chromium session, sign in normally, and let the adapter probe decide whether the provider page is compatible before Router makes it eligible. No dummy upstream API key is required.
-
-In v0.29, the normal setup path is the **Accounts** UI: choose **Add browser account**, select Gemini Web, ChatGPT Web, or Qwen Web, and llmgateway safely writes the linked session/binding/Chromium/provider/account/route configuration and hot-activates it. The gateway process does not need to restart. From the same account card you can disable/re-enable routing, re-authenticate, restart Chromium, stop the browser, and inspect lifecycle/adapter state. Isolated Chromium profiles are preserved when an account is disabled or stopped.
-
-See [Browser Accounts UX](docs/browser-accounts-ux.md) for the managed setup lifecycle and admin endpoints.
-
-v0.30 streaming primitives also power built-in Gemini/ChatGPT/Qwen responses incrementally from the provider page rather than waiting for the full DOM answer. Browser stream polling is downstream-driven, so a slow client naturally applies backpressure. Disconnecting a client cancels the browser operation and closes the ephemeral provider tab. First-byte/idle timeouts and partial/cancelled stream metadata are visible through Execution Trace and Trace Console.
-
-See [Browser streaming and cancellation](docs/browser-streaming.md) for the stream contract, timeout settings, cleanup guarantees, and compatibility behavior.
-
-v0.31 makes multiple browser accounts behave like a smart local pool. Equal-quality browser routes rotate by least-recent successful account use, persistent threads can keep a healthy browser session sticky, recently failed browser routes re-enter with a bounded recovery penalty, and execution policy can be expressed as `prefer-browser`, `browser-only`, `balanced`, `prefer-api`, or `api-only`. The old `browser-first` / `api-first` names remain accepted aliases.
-
-Persistent llmgateway threads can also keep provider-native Gemini and ChatGPT conversations: the first turn captures the native chat identity, later turns reuse the same open provider tab when available, and only reopen the persisted native conversation after tab/runtime loss. New llmgateway chats get separate provider tabs/threads, while llmgateway remains the canonical history store.
-
-See [Browser-aware routing intelligence](docs/browser-aware-routing.md) for policy semantics, scoring order, fairness, recovery, context enforcement, and route-explain fields.
-
-## Client policies and budgets
-
-v0.32 lets each local tool use its own environment-backed gateway key instead of sharing the unrestricted admin key. A client policy can restrict requested/virtual models, physical route IDs, browser/API transport behavior, and daily/monthly request or token budgets.
-
-```toml
-[clients.claude-code]
-key_env = "LLMGATEWAY_CLAUDE_CODE_KEY"
-allowed_models = ["claude-*", "llmgateway-coding"]
-execution_preference = "prefer-browser"
-api_fallback = true
-daily_request_limit = 2000
-```
-
-Client keys work on the compatibility surface (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and `/v1/models`). The global `LLMGATEWAY_API_KEY` remains the admin/legacy credential. Request-level `llmgateway_execution_preference` and `llmgateway_api_fallback` controls may make routing more restrictive, but a client cannot use them to expand its configured transport permissions.
-
-See [Client policies and budgets](docs/client-policies.md) for presets, budget semantics, diagnostics, and security behavior.
-
-Built-in adapters default to fresh provider chat tabs per request while reusing the authenticated Chromium profile. Optional `model_labels` select provider UI models explicitly; without a mapping, the current provider UI model is preserved.
-
-See [Browser provider adapters](docs/browser-provider-adapters.md) for complete Gemini/ChatGPT/Qwen configuration, adapter diagnostics, page-drift recovery, and the coding-agent tool bridge.
-
-## Gateway APIs
-
-By default, llmgateway keeps its local auto-routing extension for Chat Completions: a request that omits `model` uses `[api].default_model`. To enforce the stricter OpenAI Chat Completions contract, set:
-
-```toml
-[api]
-strict_openai_compatibility = true
-```
-
-With strict mode enabled, `POST /v1/chat/completions` requires a non-empty string `model` and returns HTTP 400 `invalid_request_error` when it is missing or invalid. Persistent thread APIs continue to use llmgateway defaults independently.
+Database mặc định:
 
 ```text
-POST /v1/chat/completions
-POST /v1/responses
-POST /v1/messages
-GET  /v1/models
+data/llmgateway.db
 ```
 
-Thread APIs:
+### macOS: chạy một click
+
+Repo có `start.command`:
+
+```bash
+chmod +x start.command
+./start.command
+```
+
+Script sẽ:
+
+1. giải phóng port 7331 nếu có process cũ;
+2. dùng binary `target/release/llmgateway` nếu đã build;
+3. nếu chưa có binary thì chạy `cargo run --release`;
+4. chờ health endpoint sẵn sàng rồi mở UI.
+
+> Lưu ý: script hiện dùng `kill -9` với process chiếm port 7331. Chỉ dùng khi bạn chắc port này dành cho llmgateway.
+
+Hướng dẫn đầy đủ cho macOS, Linux, Windows, Docker, test và browser accounts: [docs/huong-dan-chay-local.md](docs/huong-dan-chay-local.md).
+
+---
+
+## Thêm browser account từ UI
+
+Mở:
+
+```text
+http://127.0.0.1:7331/
+```
+
+Vào **Accounts** → **Add browser account**.
+
+Managed presets hiện có:
+
+| Preset | Provider kind | Login |
+|---|---|---|
+| ChatGPT | `browser-chatgpt` | chatgpt.com |
+| Gemini | `browser-gemini` | gemini.google.com |
+| Qwen | `browser-qwen` | chat.qwen.ai |
+| DeepSeek | `browser-deepseek` | chat.deepseek.com |
+| Xiaomi MiMo | `browser-mimo` | aistudio.xiaomimimo.com |
+
+Flow chuẩn:
+
+1. tạo browser account;
+2. llmgateway tạo isolated Chromium profile;
+3. bấm login/open browser;
+4. đăng nhập provider bình thường;
+5. tự xử lý CAPTCHA/2FA nếu provider yêu cầu;
+6. verify session;
+7. refresh model catalog;
+8. enable model mong muốn;
+9. thêm model vào group hoặc gọi trực tiếp.
+
+Cookies/auth state không được trả ra qua API.
+
+---
+
+## Browserless transport
+
+Một số provider có thể dùng session đã đăng nhập để gọi trực tiếp provider web backend mà không cần giữ Chromium chạy cho mỗi request.
+
+Trong Accounts UI có thể bật/tắt transport policy khi adapter hỗ trợ.
+
+Khái niệm chính:
+
+- `browser-only`: dùng browser/CDP
+- `browserless-preferred`: ưu tiên direct HTTP/browserless nếu session và adapter hỗ trợ
+- nếu direct transport không còn hợp lệ, runtime có thể yêu cầu re-auth tùy provider
+
+Browserless không có nghĩa là bỏ qua đăng nhập. User vẫn phải đăng nhập hợp lệ bằng browser trước để tạo auth state.
+
+---
+
+## Enable/disable và đồng bộ model
+
+Trạng thái hiện tại được đồng bộ theo chuỗi:
+
+```text
+Account
+  └─ Model của account
+       └─ Catalog model
+            └─ Model group eligibility
+```
+
+Khi disable account hoặc model:
+
+- model vẫn có thể được giữ trong cấu hình group;
+- model đó bị đánh dấu không eligible cho fallback;
+- `GET /v1/models` chỉ expose model/group còn khả dụng;
+- khi enable lại, group tự bỏ trạng thái ignore nếu model đã hợp lệ trở lại.
+
+UI mặc định mở tab **Enabled**.
+
+---
+
+## Model groups và ordered fallback
+
+Model group là virtual model có thể đại diện cho nhiều physical model.
+
+Ví dụ mong muốn:
+
+```text
+Tier 10: GPT-5.6 Sol
+   ↓ nếu không dùng được
+Tier 20: Gemini Pro
+   ↓
+Tier 30: Qwen Coder
+```
+
+TOML:
+
+```toml
+[[virtual_models.llmgateway-coding.tiers]]
+priority = 10
+routes = ["chatgpt-sol"]
+
+[[virtual_models.llmgateway-coding.tiers]]
+priority = 20
+routes = ["gemini-pro"]
+
+[[virtual_models.llmgateway-coding.tiers]]
+priority = 30
+routes = ["qwen-coder"]
+```
+
+Tất cả route eligible ở tier nhỏ hơn phải được thử/hết khả năng trước khi chuyển sang tier tiếp theo. Adaptive scoring, quota, readiness và fairness vẫn xếp hạng bên trong cùng một tier.
+
+Xem: [docs/model-groups.md](docs/model-groups.md).
+
+---
+
+## API tương thích
+
+### OpenAI Chat Completions
+
+```bash
+curl -X POST http://127.0.0.1:7331/v1/chat/completions \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llmgateway-auto",
+    "messages": [
+      {"role": "user", "content": "Xin chào"}
+    ]
+  }'
+```
+
+Streaming:
+
+```bash
+curl -N -X POST http://127.0.0.1:7331/v1/chat/completions \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llmgateway-auto",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "Giải thích optimistic locking"}
+    ]
+  }'
+```
+
+### OpenAI Responses
+
+```bash
+curl -X POST http://127.0.0.1:7331/v1/responses \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llmgateway-auto",
+    "input": "Viết một ví dụ Rust ngắn"
+  }'
+```
+
+### Anthropic Messages
+
+```bash
+curl -X POST http://127.0.0.1:7331/v1/messages \
+  -H "x-api-key: $LLMGATEWAY_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llmgateway-coding",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "Explain Java virtual threads"}
+    ]
+  }'
+```
+
+### Model discovery
+
+```bash
+curl http://127.0.0.1:7331/v1/models \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
+```
+
+---
+
+## Persistent Threads
+
+Tạo thread:
+
+```bash
+curl -X POST http://127.0.0.1:7331/v1/threads \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Demo","model":"llmgateway-auto"}'
+```
+
+Gửi turn mới:
+
+```bash
+curl -N -X POST http://127.0.0.1:7331/v1/threads/<thread_id>/messages \
+  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Tiếp tục chủ đề trước","stream":true}'
+```
+
+Một số API thread:
 
 ```text
 POST   /v1/threads
@@ -203,259 +415,163 @@ POST   /v1/threads/{thread_id}/compact
 POST   /v1/threads/{thread_id}/retrieve
 ```
 
-Admin/model APIs:
+---
+
+## Admin APIs quan trọng
 
 ```text
-GET   /_llmgateway/health
-GET   /_llmgateway/models
-GET   /_llmgateway/accounts
-GET   /_llmgateway/clients
-GET   /_llmgateway/accounts/{account_id}/models
-PATCH /_llmgateway/accounts/{account_id}/models
-POST  /_llmgateway/accounts/{account_id}/models/refresh
+GET    /_llmgateway/health
+GET    /_llmgateway/models
+GET    /_llmgateway/accounts
+GET    /_llmgateway/clients
+
+GET    /_llmgateway/accounts/{account_id}/models
+PATCH  /_llmgateway/accounts/{account_id}/models
+POST   /_llmgateway/accounts/{account_id}/models/refresh
+
+GET    /_llmgateway/browser-account-setup/providers
+POST   /_llmgateway/browser-account-setup
+PATCH  /_llmgateway/browser-account-setup/{account_id}
+
+GET    /_llmgateway/browser-sessions
+POST   /_llmgateway/browser-sessions/{session_id}/driver/launch
+POST   /_llmgateway/browser-sessions/{session_id}/driver/verify
+POST   /_llmgateway/browser-sessions/{session_id}/driver/stop
 ```
 
-## Persistent threads
+UI dùng thêm các admin endpoint cho account lifecycle, model/group state, tracing và diagnostics.
 
-Create a thread:
+---
 
-```bash
-curl -X POST http://127.0.0.1:7331/v1/threads \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Kafka deep dive","model":"llmgateway-auto"}'
-```
+## Client policies và budgets
 
-Send only the new turn:
-
-```bash
-curl -N -X POST http://127.0.0.1:7331/v1/threads/<thread_id>/messages \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"content":"Explain Kafka zero copy","stream":true}'
-```
-
-llmgateway loads and compiles prior context from SQLite, routes the request, and appends the completed assistant message to the immutable transcript.
-
-## Context pipeline
-
-Long-running persistent threads use four context layers:
-
-```text
-Structured Memory IR
-        +
-Relevant retrieved historical excerpts
-        +
-Recent verbatim turns
-        +
-Current user turn
-```
-
-Older turns are never deleted. A checkpoint only changes what is sent to the next model.
-
-### Structured Memory IR
-
-The current durable memory schema is:
-
-```json
-{
-  "facts": [],
-  "decisions": [],
-  "constraints": [],
-  "user_preferences": [],
-  "entities": [],
-  "code_context": [],
-  "open_questions": [],
-  "rolling_summary": ""
-}
-```
-
-Memory snapshots are stored separately from the full transcript and include schema version, `through_ordinal`, model, route provenance, and update time.
-
-Inspect memory:
-
-```bash
-curl http://127.0.0.1:7331/v1/threads/<thread_id>/memory \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY"
-```
-
-### Semantic context retrieval
-
-v0.7 retrieves exact historical details from the part of the transcript already represented by a checkpoint. It uses a local hybrid scorer with:
-
-- query-term overlap
-- within-thread rarity/IDF weighting
-- repeated-term weighting
-- bigram/phrase overlap
-- query coverage
-- a small recency tie-breaker
-
-There is no embedding API requirement and therefore no extra network call or retrieval billing.
-
-Retrieval only consumes **spare** context budget after durable memory, recent messages, and the current turn are fitted. An augmented context is accepted only when it remains inside the model-aware budget.
-
-Default configuration:
+Có thể cấp key riêng cho Claude Code, Codex, OpenCode hoặc client khác:
 
 ```toml
-[context]
+[clients.codex]
+key_env = "LLMGATEWAY_CODEX_KEY"
 enabled = true
-target_tokens = 16000
-reserve_output_tokens = 4000
-recent_messages = 12
-compaction_trigger_ratio = 0.85
-summary_input_tokens = 12000
-summary_max_tokens = 1200
-# summary_model = "llmgateway-auto"
-
-retrieval_enabled = true
-retrieval_max_chunks = 3
-retrieval_max_tokens = 2400
-retrieval_min_score = 0.35
+allowed_models = ["llmgateway-coding", "llmgateway-auto"]
+execution_preference = "prefer-browser"
+api_fallback = true
+daily_request_limit = 2000
 ```
 
-Inspect retrieval without calling an LLM:
+Client policy có thể giới hạn:
+
+- model
+- route
+- browser/API transport
+- API fallback
+- daily/monthly request budget
+- daily/monthly token budget
+
+Xem: [docs/client-policies.md](docs/client-policies.md).
+
+---
+
+## Test nhanh
+
+Format/check:
 
 ```bash
-curl -X POST http://127.0.0.1:7331/v1/threads/<thread_id>/retrieve \
-  -H "Authorization: Bearer $LLMGATEWAY_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query":"How did we handle optimistic locking conflicts?"}'
+cargo fmt --check
+RUSTFLAGS="-D warnings" cargo check --all-targets
+cargo clippy --all-targets
+cargo test --all-targets
 ```
 
-See [`docs/semantic-retrieval.md`](docs/semantic-retrieval.md) for scoring, budget rules, diagnostics, and limitations.
-
-### Context diagnostics
-
-Persistent-thread responses may include:
-
-```text
-x-llmgateway-context: full | compressed
-x-llmgateway-context-source-tokens: <estimated source tokens>
-x-llmgateway-context-tokens: <prepared tokens>
-x-llmgateway-context-budget: <budget tokens>
-x-llmgateway-context-checkpoint: <checkpoint id>
-x-llmgateway-retrieved-chunks: <count>
-x-llmgateway-route: <actual route>
-```
-
-Clients do not need to understand these headers.
-
-## Model and account routing
-
-`GET /v1/models` exposes:
-
-- virtual policies such as `llmgateway-auto`, `llmgateway-coding`, and `llmgateway-best`
-- canonical physical models such as `gemini/gemini-3.7-flash`
-- explicit route IDs retained for compatibility
-
-A physical model can be available through multiple accounts/routes. The user selects the model; llmgateway selects the account.
-
-Example:
-
-```text
-Gemini model
-   │
-   ├─ account A   healthy
-   ├─ account B   rate limited
-   └─ OpenRouter  paid fallback
-   │
-   ▼
-best eligible route
-```
-
-When a sticky route fails with a retryable condition, fallback continues through other eligible routes and the successful route becomes the new affinity. Task-aware routing can override an old sticky route when a materially better task fit exists. v0.31 keeps a healthy browser route sticky for persistent threads by default, while ordinary equal-quality requests rotate across browser accounts.
-
-Virtual-model execution remains browser-first by default. The preferred v0.31 policy name is `routing.execution_preference = "prefer-browser"`; `"browser-first"` remains a compatible alias. Use `"browser-only"` to forbid API fallback, `"balanced"` to remove transport preference, `"prefer-api"` to put API routes first, or `"api-only"` to forbid browser routes. Under `prefer-browser`, `routing.api_fallback = false` also excludes API candidates.
-
-Browser sessions are reconciled with the live Chromium/CDP runtime at startup and periodically afterward. A still-running browser is reconnected after a gateway restart. A previously-ready browser that crashes can be relaunched with the same isolated profile and re-verified automatically; a deliberate Stop, login-required state, or attention state is not auto-launched.
-
-v0.28 adds built-in Gemini Web and Qwen Web adapters behind a versioned contract. Each adapter is probed before it becomes routable. Missing/changed provider UI controls are surfaced as `browser_adapter_incompatible` rather than generic transport failures. Built-in requests default to a fresh provider chat tab inside the same authenticated profile, so provider-native conversation history does not silently compete with llmgateway's own persistent context. Optional `model_labels` map logical route models to provider UI model names, while selector overrides provide a local escape hatch when a provider changes DOM details.
-
-v0.26 added task-aware routing on top of readiness, quota, configured priority, and adaptive latency/reliability. Requests are classified locally as coding, reasoning, long-context, simple chat, or general. Routes can advertise policy metadata such as `coding`, `reasoning`, `long-context`, `cheap`, and `fast`; unknown metadata remains neutral for backward compatibility. A known `context_window` that cannot fit the request is excluded before ranking.
-
-The route score remains explainable:
-
-```text
-final_score = base_priority + quota_penalty + adaptive_penalty + browser_recovery_penalty + task_adjustment
-```
-
-Lower scores win. For equal transport preference and equal score, v0.31 applies least-recently-used fairness only between browser peers, then preserves stable configured order. See [`docs/browser-aware-routing.md`](docs/browser-aware-routing.md) for the complete decision order and [`docs/task-aware-routing.md`](docs/task-aware-routing.md) for classifier signals.
-
-## Claude Code
+Smoke chính:
 
 ```bash
-export LLMGATEWAY_API_KEY=tmx_change_me
-export ANTHROPIC_BASE_URL=http://127.0.0.1:7331
-export ANTHROPIC_AUTH_TOKEN="$LLMGATEWAY_API_KEY"
-claude
+bash scripts/smoke-local.sh
+bash scripts/smoke-openai-sdk.sh
+bash scripts/smoke-model-groups.sh
+bash scripts/smoke-browser-account-ux.sh
+bash scripts/smoke-browser-provider.sh
+bash scripts/smoke-browser-streaming.sh
 ```
 
-Model aliases can map Claude model names to virtual routing policies.
+Full CI parity được liệt kê trong [docs/huong-dan-chay-local.md](docs/huong-dan-chay-local.md).
 
-## Codex
+Live browserless acceptance chỉ chạy khi đã có account thật đăng nhập:
 
-Use [`examples/codex-config.toml`](examples/codex-config.toml). Codex uses the Responses wire protocol. `previous_response_id` chains are persisted by llmgateway.
+```bash
+scripts/live-browserless-acceptance.sh --account <account-id>
+scripts/live-qwen-browserless-acceptance.sh --account <account-id>
+scripts/live-mimo-browserless-acceptance.sh --account <account-id>
+```
 
-## OpenCode
+Không dùng mock/fake-CDP test làm bằng chứng live provider acceptance.
 
-Use [`examples/opencode-config.json`](examples/opencode-config.json). OpenCode can enumerate `/v1/models` and select virtual or discovered physical models.
+---
 
-## Authentication and security
+## Docker
 
-The unrestricted admin/legacy credential is `LLMGATEWAY_API_KEY`. The compatibility APIs also accept enabled v0.32 client keys configured under `[clients.<id>]`. Both credential types may be sent as:
+Build:
+
+```bash
+docker build -t llmgateway:local .
+```
+
+Chạy container cần mount config/data và truyền env phù hợp. Với browser/CDP local, chạy native thường đơn giản hơn container vì Chromium profile và GUI login cần lifecycle riêng.
+
+---
+
+## Cấu trúc repository
 
 ```text
-Authorization: Bearer <key>
+.
+├── adapters/        # browser adapter JavaScript
+├── config/          # config mẫu
+├── docs/            # kiến trúc, routing, browser, memory, roadmap
+├── examples/        # ví dụ
+├── scripts/         # smoke/live/stress runners
+├── src/             # Rust gateway
+├── ui/              # local embedded UI
+├── Cargo.toml
+├── Dockerfile
+├── start.command
+└── README.md
 ```
 
-or:
+---
 
-```text
-x-api-key: <key>
-```
+## Tài liệu nên đọc
 
-Admin and persistent-thread management APIs continue to require the global key. Client key values and provider credentials are never returned by diagnostics. The default bind address is `127.0.0.1`. Active config, provider keys, and SQLite data are gitignored.
+- [Trạng thái tổng thể main](docs/project-status.md)
+- [Hướng dẫn chạy local đầy đủ](docs/huong-dan-chay-local.md)
+- [Roadmap](docs/roadmap.md)
+- [Browser Accounts UX](docs/browser-accounts-ux.md)
+- [Browser Provider Adapters](docs/browser-provider-adapters.md)
+- [Browser Streaming](docs/browser-streaming.md)
+- [Browser-aware Routing](docs/browser-aware-routing.md)
+- [Model Groups](docs/model-groups.md)
+- [Client Policies](docs/client-policies.md)
+- [Provider Conversation Affinity](docs/provider-conversation-affinity.md)
+- [Semantic Retrieval](docs/semantic-retrieval.md)
+- [Hybrid Retrieval](docs/hybrid-retrieval.md)
+- [Memory Provenance](docs/memory-provenance.md)
+- [Quota/Usage](docs/quota-usage.md)
 
-Do not expose the service publicly without TLS, network controls, authentication, and rate limiting.
+---
 
-## Context guarantees
+## Security
 
-1. Compaction never deletes or rewrites the original transcript.
-2. Recent messages remain verbatim after a checkpoint.
-3. The current user turn is part of budget fitting and remains highest priority.
-4. Tool calls and their tool results remain atomic during compaction/trimming.
-5. Structured memory is provider independent.
-6. Retrieval searches only the checkpointed historical region, so recent messages are not duplicated.
-7. Retrieval is accepted only when the final prepared context remains within budget.
-8. A recent explicit correction outranks older retrieved history.
-9. Memory/checkpoints record model and route provenance but do not depend on that route later.
+llmgateway không được dùng để bypass cơ chế bảo vệ của provider.
 
-## Current retrieval limitation
+Nguyên tắc:
 
-v0.7 uses a local lexical/hybrid scorer rather than vector embeddings. It is intentionally excellent at concrete technical referents such as symbols, APIs, error codes, model names, filenames, and architecture terms while remaining zero-config and cheap.
+- CAPTCHA/2FA/passkey do người dùng hoàn thành bình thường;
+- không export raw cookies qua API;
+- browser profile tách biệt theo session/account;
+- CDP bind loopback;
+- provider auth failure phải chuyển thành trạng thái cần user attention;
+- tôn trọng quota, rate limit và điều khoản của provider;
+- browserless chỉ dùng auth state hợp lệ đã được tạo qua login bình thường.
 
-A future retriever can add local/remote embeddings and reranking behind the same context-layer contract.
-
-## Roadmap
-
-The roadmap is now **browser-first** because authenticated browser accounts are the primary local execution path. API-key accounts remain supported as optional fallbacks.
-
-Current browser milestones:
-
-- **v0.27 Browser Account Reliability** ✅ - startup reconciliation, reconnect/recovery, explicit lifecycle states, live CDP readiness, browser-first preference, and failover/recovery E2E.
-- **v0.28 Production-grade Browser Provider Adapters** ✅ - first-class Gemini/Qwen providers, contract v1, adapter health/page-drift diagnostics, model mapping, stateless provider tabs, and deterministic fake-page/CDP fixtures.
-- **v0.29 Browser Accounts UX** ✅ - managed Gemini/Qwen account wizard, safe config persistence, hot activation, lifecycle controls, immutable request snapshots, and deterministic hot-activation E2E coverage.
-- **v0.30 True Browser Streaming and Cancellation** ✅ - incremental CDP streaming, downstream-driven backpressure, disconnect cancellation, first-byte/idle timeouts, stream traces, and Chat/Responses/Anthropic E2E coverage.
-- **v0.31 Browser-aware Routing Intelligence** ✅ - browser-account fairness, session-aware affinity, recovery scoring, explicit transport policies, catalog-enriched task/context routing, and deterministic API fallback.
-- **v0.32 Client Policies and Budgets** ✅ - per-client credentials, model/route permissions, transport policy boundaries, persistent budgets, diagnostics, and deterministic policy E2E coverage.
-
-Next milestones:
-
-1. **v0.33 Usage, Cost and Savings Intelligence** - normalized usage, browser/API breakdown, avoided API spend, and routing analytics.
-2. **v0.34+** - model/cost intelligence, production hardening, distribution, and v1.0.
-
-See the detailed [browser-first roadmap](docs/roadmap.md), including release gates for v1.0.
+---
 
 ## License
 
-MIT
+MIT.
