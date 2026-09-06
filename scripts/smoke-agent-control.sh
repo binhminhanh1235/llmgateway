@@ -181,4 +181,10 @@ curl -fsS -D /tmp/llmgateway-agent-control.headers \
   -d '{"model":"llmgateway-auto","llmgateway_requirements":{"capabilities":["coding"]},"messages":[{"role":"user","content":"hello"}]}'
 grep -qi '^x-llmgateway-route: coder-route' /tmp/llmgateway-agent-control.headers
 
+curl -fsS -D /tmp/llmgateway-agent-responses.headers   -o /tmp/llmgateway-agent-responses.json   -X POST http://127.0.0.1:7331/v1/responses   "${ADMIN[@]}" "${JSON[@]}"   -d '{"model":"llmgateway-auto","llmgateway_requirements":{"capabilities":["coding"]},"input":"hello"}'
+grep -qi '^x-llmgateway-route: coder-route' /tmp/llmgateway-agent-responses.headers
+
+curl -fsS -D /tmp/llmgateway-agent-messages.headers   -o /tmp/llmgateway-agent-messages.json   -X POST http://127.0.0.1:7331/v1/messages   "${ADMIN[@]}" "${JSON[@]}"   -H "anthropic-version: 2023-06-01"   -d '{"model":"llmgateway-auto","max_tokens":128,"llmgateway_requirements":{"capabilities":["coding"]},"messages":[{"role":"user","content":"hello"}]}'
+grep -qi '^x-llmgateway-route: coder-route' /tmp/llmgateway-agent-messages.headers
+
 echo "llmgateway Agent Control API + capability routing smoke test passed"
