@@ -41,6 +41,7 @@ mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
 mod memory_provenance_runtime;
+mod media_api;
 mod mimo_web_transport;
 mod model_group_api;
 pub mod multimodal;
@@ -107,6 +108,7 @@ use live_config::LiveConfig;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
+use media_api::{audio_transcriptions, image_edits, image_generations};
 use model_group_api::{
     create_model_group, delete_model_group, list_model_groups, set_model_group_enabled,
     update_model_group,
@@ -370,6 +372,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/models", get(models))
         .route("/v1/capabilities", get(capabilities))
+        .route(
+            "/v1/audio/transcriptions",
+            post(audio_transcriptions).layer(DefaultBodyLimit::max(artifact_request_hard_limit)),
+        )
+        .route("/v1/images/generations", post(image_generations))
+        .route(
+            "/v1/images/edits",
+            post(image_edits).layer(DefaultBodyLimit::max(artifact_request_hard_limit)),
+        )
         .route(
             "/v1/files",
             post(upload_file).layer(DefaultBodyLimit::max(artifact_request_hard_limit)),
