@@ -744,7 +744,7 @@ fn provider_preset(id: &str) -> Option<BrowserAccountProviderPreset> {
             login_url: "https://chatgpt.com/",
             ready_url_prefix: "https://chatgpt.com/",
             default_model_id: "chatgpt-web-default",
-            default_capabilities: &["chat", "coding", "reasoning"],
+            default_capabilities: &["chat", "coding", "reasoning", "vision"],
             discover_models: true,
             initial_transport_mode: Some(BrowserTransportMode::HttpPreferred),
             extra_virtual_models: &["llmgateway-best"],
@@ -757,7 +757,7 @@ fn provider_preset(id: &str) -> Option<BrowserAccountProviderPreset> {
             login_url: "https://gemini.google.com/app",
             ready_url_prefix: "https://gemini.google.com/app",
             default_model_id: "gemini-web-default",
-            default_capabilities: &["chat", "reasoning", "long-context"],
+            default_capabilities: &["chat", "reasoning", "long-context", "vision"],
             discover_models: true,
             initial_transport_mode: Some(BrowserTransportMode::HttpPreferred),
             extra_virtual_models: &["llmgateway-best"],
@@ -1046,6 +1046,7 @@ routes = ["api"]
         assert_eq!(route.model, "chatgpt-web-default");
         assert_eq!(route.priority, 4);
         assert!(route.capabilities.iter().any(|capability| capability == "coding"));
+        assert!(route.capabilities.iter().any(|capability| capability == "vision"));
         assert!(parsed.virtual_models["llmgateway-auto"]
             .routes
             .contains(&"chatgpt-a-route".to_string()));
@@ -1094,6 +1095,7 @@ routes = ["api"]
         let route = parsed.route("gemini-a-route").unwrap();
         assert_eq!(route.model, "gemini-web-pro");
         assert_eq!(route.priority, 5);
+        assert!(route.capabilities.iter().any(|capability| capability == "vision"));
         assert!(parsed.virtual_models["llmgateway-auto"]
             .routes
             .contains(&"gemini-a-route".to_string()));
