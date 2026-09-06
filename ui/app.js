@@ -12,8 +12,8 @@
     models: [],
     catalog: [],
     accounts: [],
-    accountStatus: "all",
-    modelStatus: "all",
+    accountStatus: "enabled",
+    modelStatus: "enabled",
     sending: false,
     currentView: "chat",
   };
@@ -661,10 +661,17 @@
 
   function renderCatalog() {
     const query = (elements.modelCatalogSearch.value || "").trim().toLowerCase();
-    updateStatusTabs(elements.modelStatusTabs, state.modelStatus, state.catalog, (model) => model.enabled === true);
+    updateStatusTabs(
+      elements.modelStatusTabs,
+      state.modelStatus,
+      state.catalog,
+      (model) => model.fallback_eligible === true
+    );
     const visible = state.catalog.filter((model) => {
       const matchesSearch = `${model.id} ${model.display_name} ${model.provider}`.toLowerCase().includes(query);
-      const matchesStatus = state.modelStatus === "all" || (state.modelStatus === "enabled") === (model.enabled === true);
+      const effectiveEnabled = model.fallback_eligible === true;
+      const matchesStatus = state.modelStatus === "all" ||
+        (state.modelStatus === "enabled") === effectiveEnabled;
       return matchesSearch && matchesStatus;
     });
     const cards = visible.map((model) => {
@@ -672,12 +679,15 @@
       const badges = (model.capabilities || []).map((capability) => `<span class="badge">${escapeHtml(capability)}</span>`).join("");
       const context = model.context_window ? `<span class="badge">${Number(model.context_window).toLocaleString()} ctx</span>` : "";
       const accountText = (model.accounts || []).map((account) => `${account.account_id}: ${account.availability}${account.enabled ? "" : " (model off)"}`).join(" · ") || "No account bindings";
-      const enabled = model.enabled === true;
-      const eligible = model.fallback_eligible === true;
-      const fallbackBadge = eligible
+      const globalEnabled = model.enabled === true;
+      const effectiveEnabled = model.fallback_eligible === true;
+      const statusLabel = effectiveEnabled
+        ? "Enabled"
+        : (globalEnabled ? "Disabled by account" : "Disabled");
+      const fallbackBadge = effectiveEnabled
         ? '<span class="badge available">Fallback ready</span>'
         : '<span class="badge unavailable">Ignored by fallback</span>';
-      return `<article class="catalog-card ${enabled ? "" : "is-disabled"}"><div class="catalog-card-top"><div><div class="catalog-provider">${escapeHtml(model.provider)}</div><div class="catalog-title">${escapeHtml(model.display_name || model.external_id)}</div></div><div class="entity-state-actions"><span class="badge ${enabled ? "available" : "unavailable"}">${enabled ? "Enabled" : "Disabled"}</span><label class="toggle" title="${enabled ? "Disable model on every account" : "Enable model on every account"}"><input type="checkbox" data-toggle-catalog-model="${escapeAttr(model.id)}" ${enabled ? "checked" : ""}/><span class="toggle-track"></span></label></div></div><div class="catalog-details">${context}${fallbackBadge}<span class="badge">${bindings.length} enabled binding${bindings.length === 1 ? "" : "s"}</span>${badges}</div><div class="catalog-accounts">${escapeHtml(accountText)}</div></article>`;
+      return `<article class="catalog-card ${effectiveEnabled ? "" : "is-disabled"}"><div class="catalog-card-top"><div><div class="catalog-provider">${escapeHtml(model.provider)}</div><div class="catalog-title">${escapeHtml(model.display_name || model.external_id)}</div></div><div class="entity-state-actions"><span class="badge ${effectiveEnabled ? "available" : "unavailable"}">${escapeHtml(statusLabel)}</span><label class="toggle" title="${globalEnabled ? "Disable model globally" : "Enable model globally"}"><input type="checkbox" data-toggle-catalog-model="${escapeAttr(model.id)}" ${globalEnabled ? "checked" : ""}/><span class="toggle-track"></span></label></div></div><div class="catalog-details">${context}${fallbackBadge}<span class="badge">${bindings.length} enabled binding${bindings.length === 1 ? "" : "s"}</span>${badges}</div><div class="catalog-accounts">${escapeHtml(accountText)}</div></article>`;
     }).join("");
     elements.modelsContent.innerHTML = cards ? `<div class="catalog-grid">${cards}</div>` : '<div class="loading-box">No matching models in this status</div>';
     elements.modelsContent.querySelectorAll("[data-toggle-catalog-model]").forEach((checkbox) =>
