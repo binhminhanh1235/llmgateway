@@ -11,12 +11,14 @@ The security and ownership boundary is deliberate:
 
 ## v0.28 provider kinds
 
-v0.28 adds two built-in browser provider kinds:
+Built-in browser provider kinds include:
 
 ```text
 browser-gemini
 browser-chatgpt
 browser-qwen
+browser-deepseek
+browser-mimo
 ```
 
 The generic integration lanes remain available:
@@ -147,6 +149,38 @@ capabilities = ["chat", "coding", "reasoning"]
 ```
 
 Browser accounts need no dummy API key and API model discovery is disabled automatically.
+
+## Xiaomi MiMo Studio Web
+
+Xiaomi MiMo is registered as a managed browser account preset:
+
+```text
+preset:         mimo
+provider:       mimo-web
+provider kind:  browser-mimo
+direct adapter: mimo-web-http
+login URL:      https://aistudio.xiaomimimo.com/#/c
+```
+
+This integration targets the authenticated **MiMo Studio Web** application. It is intentionally separate from Xiaomi's official developer API at `api.xiaomimimo.com/v1`; calls to that developer API are not accepted as evidence that Studio browserless transport works.
+
+After interactive Xiaomi login, llmgateway stores the normal encrypted browser auth snapshot. The direct adapter requires the Studio session cookies it actually needs but never returns their values through runtime diagnostics. A healthy account can use `browserless-preferred`: Chromium may remain stopped while the adapter validates the saved Studio session, refreshes the account-visible model catalog, and sends chat requests to the Studio backend.
+
+Model discovery reads the Studio bot configuration at runtime instead of hard-coding a fixed model list. The gateway keeps the selected Studio model ID inside the adapter wire request and persists MiMo-native conversation state per `(thread_id, provider_id, account_id)`. A model change on an already-bound MiMo native conversation is rejected as `model_binding_conflict` rather than silently changing model or falling back to a different transport.
+
+Current verified implementation scope is text chat, streaming/non-streaming normalization, reasoning text when the Studio stream exposes it, usage metadata, browserless transport, model discovery, and conversation affinity contracts. Image/file/audio capabilities are **not advertised** until their Studio upload/input protocol is live-verified.
+
+Live acceptance runners:
+
+```bash
+scripts/live-mimo-browserless-acceptance.sh --account <mimo-account-id>
+```
+
+```powershell
+scripts/live-mimo-browserless-acceptance.ps1 -AccountId <mimo-account-id>
+```
+
+They require a real authenticated MiMo Studio account and verify that Chromium stays stopped during model refresh and direct chat. Automated/mock tests must not be reported as live Studio acceptance.
 
 ## Adapter contract v1
 
@@ -343,7 +377,7 @@ v0.28 does not depend on live Gemini/Qwen websites in CI.
 
 The suite includes:
 
-- Node fake-page fixtures for Gemini/ChatGPT/Qwen probe behavior;
+- Node fake-page fixtures for Gemini/ChatGPT/Qwen/DeepSeek/MiMo probe behavior;
 - healthy composer detection;
 - login-required detection;
 - page-drift / missing-selector detection;
