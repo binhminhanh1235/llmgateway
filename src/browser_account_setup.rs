@@ -372,6 +372,13 @@ pub async fn delete_account(
         Err(BrowserAccountSetupError::Invalid(message)) => {
             return json_error(StatusCode::BAD_REQUEST, "account_delete_error", &message)
         }
+        Err(BrowserAccountSetupError::InvalidGatewayConfig(error)) => {
+            return json_error(
+                StatusCode::CONFLICT,
+                "account_delete_would_invalidate_config",
+                &error.to_string(),
+            )
+        }
         Err(error) => {
             return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1501,6 +1508,21 @@ routes = ["api"]
             tier["models"].as_array().unwrap().get(0).and_then(Value::as_str),
             Some("gemini-web/gemini-3.1-pro")
         );
+    }
+
+    #[test]
+    fn rejects_deleting_the_last_account_without_overwriting_config() {
+        let path = temp_config();
+        let before = fs::read_to_string(&path).unwrap();
+
+        let error = apply_account_delete(&path, "api").unwrap_err();
+        assert!(matches!(
+            error,
+            BrowserAccountSetupError::InvalidGatewayConfig(_)
+        ));
+        assert_eq!(before, fs::read_to_string(&path).unwrap());
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
