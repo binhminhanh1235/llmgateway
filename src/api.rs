@@ -12,6 +12,7 @@ use crate::{
     },
     multimodal_compat,
     quota_usage_runtime,
+    file_attachments::{self, FileAttachmentError},
     response_state::{response_to_openai_assistant, responses_stream_with_capture},
     vision::{self, VisionError},
 };
@@ -85,6 +86,16 @@ pub async fn openai_chat(
     {
         return vision_error(error);
     }
+    if let Err(error) = file_attachments::resolve_file_inputs(
+        &mut body,
+        &state.artifacts,
+        access.client_id(),
+        access.client_id().is_none(),
+    )
+    .await
+    {
+        return file_attachment_error(error);
+    }
     let normalized = match multimodal_compat::normalize_chat_request(&body, &requested_model) {
         Ok(normalized) => normalized,
         Err(error) => return multimodal_error(error),
@@ -113,6 +124,17 @@ pub async fn openai_chat(
     {
         Ok(body) => body,
         Err(error) => return vision_error(error),
+    };
+    let execution_body = match file_attachments::materialize_file_inputs(
+        &execution_body,
+        &state.artifacts,
+        access.client_id(),
+        access.client_id().is_none(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(error) => return file_attachment_error(error),
     };
 
     match state
@@ -187,6 +209,16 @@ pub async fn openai_responses(
     .await
     {
         return vision_error(error);
+    }
+    if let Err(error) = file_attachments::resolve_file_inputs(
+        &mut body,
+        &state.artifacts,
+        access.client_id(),
+        access.client_id().is_none(),
+    )
+    .await
+    {
+        return file_attachment_error(error);
     }
 
     let previous_response_id = body
@@ -263,6 +295,17 @@ pub async fn openai_responses(
         Ok(body) => body,
         Err(error) => return vision_error(error),
     };
+    let execution_body = match file_attachments::materialize_file_inputs(
+        &execution_body,
+        &state.artifacts,
+        access.client_id(),
+        access.client_id().is_none(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(error) => return file_attachment_error(error),
+    };
     match state
         .gateway
         .execute_openai_chat_with_affinity_for_client(
@@ -290,6 +333,7 @@ pub async fn openai_responses(
                 let (tx, rx) = oneshot::channel();
                 let stream = responses_stream_with_capture(stream, tx);
                 let conversations = state.conversations.clone();
+                let artifacts = state.artifacts.clone();
                 let client_policies = state.client_policies.clone();
                 let model_for_task = requested_model.clone();
                 let route_for_task = route_id.clone();
@@ -306,7 +350,7 @@ pub async fn openai_responses(
                             history.push(assistant);
                         }
                         if let Some(response_id) = response.get("id").and_then(Value::as_str) {
-                            let _ = conversations
+                            let saved = conversations
                                 .save_response_context(
                                     response_id,
                                     &model_for_task,
@@ -315,6 +359,12 @@ pub async fn openai_responses(
                                     owner_for_task.as_deref(),
                                 )
                                 .await;
+                            if saved.is_ok() {
+                                let artifact_ids = artifact_ids_in_messages(&history);
+                                let _ = artifacts
+                                    .sync_references("response", response_id, &artifact_ids)
+                                    .await;
+                            }
                         }
                     }
                 });
@@ -361,6 +411,18 @@ pub async fn openai_responses(
                             .await
                         {
                             return conversation_state_error(error);
+                        }
+                        let artifact_ids = artifact_ids_in_messages(&history);
+                        if let Err(error) = state
+                            .artifacts
+                            .sync_references("response", response_id, &artifact_ids)
+                            .await
+                        {
+                            return json_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "artifact_reference_error",
+                                &error.to_string(),
+                            );
                         }
                         json_response_with_request(
                             StatusCode::OK,
@@ -460,6 +522,58 @@ pub async fn anthropic_messages(
             }
         }
         Err(error) => gateway_error(error),
+    }
+}
+
+pub(crate) fn file_attachment_error(error: FileAttachmentError) -> Response<Body> {
+    match error {
+        FileAttachmentError::Artifact(crate::artifact_store::ArtifactError::NotFound(_)) => {
+            json_error(StatusCode::NOT_FOUND, "not_found_error", "file artifact was not found")
+        }
+        FileAttachmentError::Artifact(crate::artifact_store::ArtifactError::TooLarge { limit }) => {
+            json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "file_too_large",
+                &format!("file exceeds configured limit of {limit} bytes"),
+            )
+        }
+        FileAttachmentError::Artifact(crate::artifact_store::ArtifactError::MimeDenied(mime))
+        | FileAttachmentError::UnsupportedMime(mime) => json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            &format!("MIME type '{mime}' is not supported for file attachments"),
+        ),
+        FileAttachmentError::Artifact(crate::artifact_store::ArtifactError::MimeMismatch {
+            declared,
+            detected,
+        }) => json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "mime_type_mismatch",
+            &format!("declared MIME '{declared}' does not match detected MIME '{detected}'"),
+        ),
+        FileAttachmentError::ExtractionTooLarge(id) => json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "file_extraction_too_large",
+            &format!("file '{id}' exceeds the safe extraction limit"),
+        ),
+        FileAttachmentError::InvalidText(id) => json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            &format!("file '{id}' is not valid UTF-8 text"),
+        ),
+        FileAttachmentError::UnsupportedCapability(capability) => json_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_capability",
+            &format!("unsupported capability '{capability}'"),
+        ),
+        FileAttachmentError::Invalid(message) => {
+            json_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message)
+        }
+        FileAttachmentError::Artifact(error) => json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &error.to_string(),
+        ),
     }
 }
 
@@ -871,6 +985,17 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "threads":threads,
         "routes":routes
     }))
+}
+
+fn artifact_ids_in_messages(messages: &[Value]) -> Vec<String> {
+    let mut artifact_ids = Vec::new();
+    for message in messages {
+        artifact_ids.extend(vision::image_artifact_ids(message));
+        artifact_ids.extend(file_attachments::file_artifact_ids(message));
+    }
+    artifact_ids.sort();
+    artifact_ids.dedup();
+    artifact_ids
 }
 
 async fn update_provider_usage(event_id: Option<&str>, response: &Value) {
