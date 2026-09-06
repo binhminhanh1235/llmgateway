@@ -162,6 +162,37 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(request["path"], "/_llmgateway/agent/capabilities")
         self.assertEqual(request["headers"]["authorization"], "Bearer client-secret")
 
+    def test_chat_tool_keeps_requirements_for_execution(self):
+        response = self.rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "llmgateway_chat",
+                    "arguments": {
+                        "model": "llmgateway-auto",
+                        "prompt": "implement retry",
+                        "task": "coding",
+                        "capabilities": ["coding"],
+                        "min_context_window": 32000,
+                    },
+                },
+            }
+        )
+        self.assertFalse(response["result"]["isError"])
+        request = Handler.requests[-1]
+        self.assertEqual(request["path"], "/v1/chat/completions")
+        self.assertEqual(request["body"]["llmgateway_task"], "coding")
+        self.assertEqual(
+            request["body"]["llmgateway_requirements"]["capabilities"],
+            ["coding"],
+        )
+        self.assertEqual(
+            request["body"]["llmgateway_requirements"]["min_context_window"],
+            32000,
+        )
+
     def test_resolve_tool_forwards_semantic_requirements(self):
         response = self.rpc(
             {
