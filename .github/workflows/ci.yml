@@ -32,8 +32,8 @@ jobs:
       - run: node --check adapters/deepseek-web.js
       - run: node --check adapters/mimo-web.js
       - run: node scripts/test-browser-adapter-fixtures.mjs
-      - run: python3 -m unittest skills/llmgateway/tests/test_llmgateway_agent.py skills/llmgateway/tests/test_llmgateway_mcp.py
       - run: bash -n scripts/smoke-agent-control.sh
+      - run: bash -n scripts/smoke-native-agent-mcp.sh
       - run: bash -n scripts/live-browserless-acceptance.sh
       - run: bash -n scripts/live-gemini-model-selection.sh
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
@@ -65,6 +65,7 @@ jobs:
       - run: bash scripts/smoke-adaptive-routing.sh
       - run: bash scripts/smoke-task-aware-routing.sh
       - run: bash scripts/smoke-agent-control.sh
+      - run: bash scripts/smoke-native-agent-mcp.sh
       - run: bash scripts/smoke-client-policies.sh
       - run: docker build -t llmgateway:ci .
 
