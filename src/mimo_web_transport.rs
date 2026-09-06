@@ -700,7 +700,8 @@ impl MimoWebHttpAdapter {
             let mut seen_bytes = false;
 
             loop {
-                let wait = if seen_bytes {
+                let has_content = !state.output.is_empty() || !state.reasoning.is_empty();
+                let wait = if has_content {
                     idle_timeout(&request.binding)
                 } else {
                     first_byte_timeout(&request.binding)
@@ -708,6 +709,14 @@ impl MimoWebHttpAdapter {
                 let next = match timeout(wait, upstream.next()).await {
                     Ok(value) => value,
                     Err(_) => {
+                        if has_content {
+                            tracing::warn!(
+                                account_id = %request.account.id,
+                                model = %model,
+                                "MiMo stream timed out after emitting content; finalizing gracefully"
+                            );
+                            break;
+                        }
                         yield Err(std::io::Error::other(if seen_bytes {
                             "idle_stream_timeout: MiMo direct stream was idle too long"
                         } else {
@@ -720,6 +729,15 @@ impl MimoWebHttpAdapter {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
+                        if has_content {
+                            tracing::warn!(
+                                account_id = %request.account.id,
+                                model = %model,
+                                error = %error,
+                                "MiMo stream dropped after emitting content; finalizing gracefully"
+                            );
+                            break;
+                        }
                         yield Err(std::io::Error::other(format!(
                             "upstream_stream_dropped: MiMo direct stream body error: {error}"
                         )));
@@ -805,8 +823,17 @@ impl MimoWebHttpAdapter {
             }
 
             if let Err(error) = state.validate_completion() {
-                yield Err(std::io::Error::other(error));
-                return;
+                if !state.output.is_empty() {
+                    tracing::warn!(
+                        account_id = %request.account.id,
+                        model = %model,
+                        error = %error,
+                        "MiMo stream completed without formal finish marker; finalizing gracefully"
+                    );
+                } else {
+                    yield Err(std::io::Error::other(error));
+                    return;
+                }
             }
             if let Err(error) = Self::persist_conversation_state(
                 &request,
@@ -820,12 +847,13 @@ impl MimoWebHttpAdapter {
                 return;
             }
 
+            let finish_reason = if state.completed { "stop" } else { "length" };
             let mut final_event = json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
             });
             if let Some(usage) = &state.usage {
                 final_event["usage"] = normalize_usage(usage);
@@ -1207,6 +1235,7 @@ fn partial_suffix_len(text: &str, tokens: &[&str]) -> usize {
         .flat_map(|token| 1..token.len())
         .filter(|length| {
             text.len() >= *length
+                && text.is_char_boundary(text.len() - *length)
                 && tokens
                     .iter()
                     .any(|token| token.starts_with(&text[text.len() - *length..]))
@@ -1397,11 +1426,11 @@ fn response_timeout(binding: &BrowserAccountBinding) -> Duration {
 }
 
 fn first_byte_timeout(binding: &BrowserAccountBinding) -> Duration {
-    Duration::from_millis(binding.first_byte_timeout_ms.unwrap_or(30_000))
+    Duration::from_millis(binding.first_byte_timeout_ms.unwrap_or(60_000))
 }
 
 fn idle_timeout(binding: &BrowserAccountBinding) -> Duration {
-    Duration::from_millis(binding.idle_stream_timeout_ms.unwrap_or(30_000))
+    Duration::from_millis(binding.idle_stream_timeout_ms.unwrap_or(60_000))
 }
 
 fn login_required(account_id: &str, message: &str) -> BrowserProviderError {
@@ -1579,6 +1608,14 @@ mod tests {
             split_reasoning("<think>why</think>Hello"),
             ("why".into(), "Hello".into())
         );
+    }
+
+    #[test]
+    fn split_reasoning_handles_multibyte_utf8_without_panic() {
+        let text = "<think>The user wants me to test \"tất cả\" sự ổn định";
+        let (reasoning, prefix) = split_reasoning(text);
+        assert_eq!(reasoning, "The user wants me to test \"tất cả\" sự ổn định");
+        assert_eq!(prefix, "");
     }
 
     #[test]
