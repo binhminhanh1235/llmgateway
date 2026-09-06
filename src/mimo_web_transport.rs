@@ -542,17 +542,10 @@ impl MimoWebHttpAdapter {
             .and_then(Value::as_f64)
             .unwrap_or(0.95)
             .clamp(0.0, 1.0);
-        let body = json!({
+        let mut body = json!({
             "msgId": Uuid::new_v4().simple().to_string(),
             "conversationId": conversation_id,
             "query": prompt,
-            "messages": [],
-            "parentId": parent_id.unwrap_or("0"),
-            "save": true,
-            "isEditedQuery": false,
-            "source": "STATION",
-            "scene": "STATION",
-            "isLocal": false,
             "modelConfig": {
                 "enableThinking": model.enable_thinking,
                 "webSearchStatus": "disabled",
@@ -562,6 +555,9 @@ impl MimoWebHttpAdapter {
             },
             "multiMedias": []
         });
+        if let Some(parent_id) = parent_id.filter(|value| !value.trim().is_empty()) {
+            body["parentId"] = Value::String(parent_id.to_string());
+        }
 
         let response = self
             .common_headers(
@@ -1057,6 +1053,14 @@ fn parse_model_catalog(
             .and_then(Value::as_str)
             .unwrap_or("chat");
         if !page_type.eq_ignore_ascii_case("chat") {
+            continue;
+        }
+        if entry.get("isNew").and_then(Value::as_bool) == Some(false)
+            && !entry
+                .get("isDefault")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
             continue;
         }
         let Some(external_id) = entry
