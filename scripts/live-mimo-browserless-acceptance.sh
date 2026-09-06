@@ -84,6 +84,27 @@ api() {
   curl "${args[@]}" "$BASE_URL$path" -o "$output"
 }
 
+public_api_call() {
+  local path="$1"
+  local body="$2"
+  local output="$3"
+  local headers="$4"
+  curl -fsS -D "$headers" -o "$output"     -X POST     -H "Authorization: Bearer $API_KEY"     -H "Content-Type: application/json"     --data-binary "$body"     "$BASE_URL$path"
+  local routed
+  routed="$(python3 - "$headers" <<'PY'
+import sys
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    if line.lower().startswith("x-llmgateway-route:"):
+        print(line.split(":", 1)[1].strip())
+        break
+PY
+)"
+  [[ "$routed" == "$ROUTE_ID" ]] || {
+    echo "ACCEPTANCE FAILED: $path routed through '$routed' instead of '$ROUTE_ID'" >&2
+    exit 1
+  }
+}
+
 json_eval() {
   local file="$1"
   local expr="$2"
@@ -246,6 +267,90 @@ assert_python "$TMP_DIR/runtime-after-refresh.json" "not bool(x.get('browser_run
 assert_python "$TMP_DIR/runtime-after-refresh.json" "int(x.get('model_catalog',{}).get('count',0)) >= 1" "MiMo model refresh discovered no selectable Studio models"
 assert_python "$TMP_DIR/runtime-after-refresh.json" "not bool(x.get('model_catalog',{}).get('refresh_required', True))" "MiMo model catalog still requires refresh"
 assert_python "$TMP_DIR/runtime-after-refresh.json" "bool(x.get('model_catalog',{}).get('discovered_at'))" "MiMo model catalog has no discovered_at timestamp"
+
+
+step "Compatibility surface: /v1/chat/completions buffered"
+CHAT_BODY="$(python3 - "$ROUTE_ID" <<'PY'
+import json, sys
+print(json.dumps({
+    "model": sys.argv[1],
+    "stream": False,
+    "messages": [{"role": "user", "content": "Reply briefly with: mimo-chat-ok"}]
+}))
+PY
+)"
+public_api_call "/v1/chat/completions" "$CHAT_BODY" "$TMP_DIR/public-chat.json" "$TMP_DIR/public-chat.headers"
+assert_python "$TMP_DIR/public-chat.json" "bool((x.get('choices') or [{}])[0].get('message',{}).get('content'))" "chat/completions returned no assistant content"
+assert_direct_execution "chat/completions buffered"
+
+step "Compatibility surface: /v1/responses buffered"
+RESPONSES_BODY="$(python3 - "$ROUTE_ID" <<'PY'
+import json, sys
+print(json.dumps({"model": sys.argv[1], "stream": False, "input": "Reply briefly with: mimo-responses-ok"}))
+PY
+)"
+public_api_call "/v1/responses" "$RESPONSES_BODY" "$TMP_DIR/public-responses.json" "$TMP_DIR/public-responses.headers"
+assert_python "$TMP_DIR/public-responses.json" "x.get('object') == 'response' and bool(x.get('output'))" "responses returned no output"
+assert_direct_execution "responses buffered"
+
+step "Compatibility surface: /v1/messages buffered"
+MESSAGES_BODY="$(python3 - "$ROUTE_ID" <<'PY'
+import json, sys
+print(json.dumps({
+    "model": sys.argv[1],
+    "stream": False,
+    "max_tokens": 128,
+    "messages": [{"role": "user", "content": "Reply briefly with: mimo-messages-ok"}]
+}))
+PY
+)"
+public_api_call "/v1/messages" "$MESSAGES_BODY" "$TMP_DIR/public-messages.json" "$TMP_DIR/public-messages.headers"
+assert_python "$TMP_DIR/public-messages.json" "x.get('type') == 'message' and bool(x.get('content'))" "messages returned no content"
+assert_direct_execution "messages buffered"
+
+if [[ "$SKIP_STREAM" -eq 0 ]]; then
+  step "Compatibility surface: /v1/chat/completions streaming"
+  CHAT_STREAM_BODY="$(python3 - "$ROUTE_ID" <<'PY'
+import json, sys
+print(json.dumps({
+    "model": sys.argv[1],
+    "stream": True,
+    "messages": [{"role": "user", "content": "Reply briefly with: mimo-chat-stream-ok"}]
+}))
+PY
+)"
+  public_api_call "/v1/chat/completions" "$CHAT_STREAM_BODY" "$TMP_DIR/public-chat.sse" "$TMP_DIR/public-chat-stream.headers"
+  grep -Fq 'data: [DONE]' "$TMP_DIR/public-chat.sse" || { echo "ACCEPTANCE FAILED: chat/completions stream has no [DONE]" >&2; exit 1; }
+  grep -Fq '"content"' "$TMP_DIR/public-chat.sse" || { echo "ACCEPTANCE FAILED: chat/completions stream has no content delta" >&2; exit 1; }
+  assert_direct_execution "chat/completions streaming"
+
+  step "Compatibility surface: /v1/responses streaming"
+  RESPONSES_STREAM_BODY="$(python3 - "$ROUTE_ID" <<'PY'
+import json, sys
+print(json.dumps({"model": sys.argv[1], "stream": True, "input": "Reply briefly with: mimo-responses-stream-ok"}))
+PY
+)"
+  public_api_call "/v1/responses" "$RESPONSES_STREAM_BODY" "$TMP_DIR/public-responses.sse" "$TMP_DIR/public-responses-stream.headers"
+  grep -Fq '"type":"response.output_text.delta"' "$TMP_DIR/public-responses.sse" || { echo "ACCEPTANCE FAILED: responses stream has no text delta" >&2; exit 1; }
+  grep -Fq '"type":"response.completed"' "$TMP_DIR/public-responses.sse" || { echo "ACCEPTANCE FAILED: responses stream has no completion event" >&2; exit 1; }
+  assert_direct_execution "responses streaming"
+
+  step "Compatibility surface: /v1/messages streaming"
+  MESSAGES_STREAM_BODY="$(python3 - "$ROUTE_ID" <<'PY'
+import json, sys
+print(json.dumps({
+    "model": sys.argv[1],
+    "stream": True,
+    "max_tokens": 128,
+    "messages": [{"role": "user", "content": "Reply briefly with: mimo-messages-stream-ok"}]
+}))
+PY
+)"
+  public_api_call "/v1/messages" "$MESSAGES_STREAM_BODY" "$TMP_DIR/public-messages.sse" "$TMP_DIR/public-messages-stream.headers"
+  grep -Fq '"type":"content_block_delta"' "$TMP_DIR/public-messages.sse" || { echo "ACCEPTANCE FAILED: messages stream has no content delta" >&2; exit 1; }
+  grep -Fq '"type":"message_stop"' "$TMP_DIR/public-messages.sse" || { echo "ACCEPTANCE FAILED: messages stream has no message_stop event" >&2; exit 1; }
+  assert_direct_execution "messages streaming"
+fi
 
 step "Scenario 1/4: fresh native conversation"
 create_thread "MiMo browserless acceptance A"
