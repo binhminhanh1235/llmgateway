@@ -78,6 +78,17 @@ function Invoke-GatewayJson {
     return $response.Content | ConvertFrom-Json
 }
 
+function Invoke-PublicApi {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$Body
+    )
+    $response = Invoke-Gateway -Method POST -Path $Path -Body $Body
+    $routeHeader = [string]$response.Headers["x-llmgateway-route"]
+    Assert-True ($routeHeader -eq $script:ResolvedRouteId) "$Path routed through '$routeHeader' instead of '$script:ResolvedRouteId'"
+    return $response
+}
+
 function Get-Runtime {
     return Invoke-GatewayJson -Method GET -Path "/_llmgateway/browser-accounts/$AccountId/runtime"
 }
@@ -201,6 +212,82 @@ try {
     Assert-True ([int]$runtime.model_catalog.count -ge 1) "MiMo model refresh discovered no selectable Studio models"
     Assert-True (-not [bool]$runtime.model_catalog.refresh_required) "MiMo model catalog still requires refresh"
     Assert-True (-not [string]::IsNullOrWhiteSpace([string]$runtime.model_catalog.discovered_at)) "MiMo model catalog has no discovered_at timestamp"
+
+
+    Write-Step "Compatibility surface: /v1/chat/completions buffered"
+    $chatBuffered = Invoke-PublicApi -Path "/v1/chat/completions" -Body @{
+        model = $script:ResolvedRouteId
+        stream = $false
+        messages = @(@{ role = "user"; content = "Reply briefly with: mimo-chat-ok" })
+    }
+    $chatBufferedJson = $chatBuffered.Content | ConvertFrom-Json
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$chatBufferedJson.choices[0].message.content)) "chat/completions returned no assistant content"
+    $runtime = Assert-BrowserClosed "chat/completions buffered"
+    Assert-DirectExecution $runtime "chat/completions buffered"
+
+    Write-Step "Compatibility surface: /v1/responses buffered"
+    $responsesBuffered = Invoke-PublicApi -Path "/v1/responses" -Body @{
+        model = $script:ResolvedRouteId
+        stream = $false
+        input = "Reply briefly with: mimo-responses-ok"
+    }
+    $responsesBufferedJson = $responsesBuffered.Content | ConvertFrom-Json
+    Assert-True ([string]$responsesBufferedJson.object -eq "response") "responses returned an unexpected object"
+    Assert-True ($null -ne $responsesBufferedJson.output -and $responsesBufferedJson.output.Count -gt 0) "responses returned no output"
+    $runtime = Assert-BrowserClosed "responses buffered"
+    Assert-DirectExecution $runtime "responses buffered"
+
+    Write-Step "Compatibility surface: /v1/messages buffered"
+    $messagesBuffered = Invoke-PublicApi -Path "/v1/messages" -Body @{
+        model = $script:ResolvedRouteId
+        stream = $false
+        max_tokens = 128
+        messages = @(@{ role = "user"; content = "Reply briefly with: mimo-messages-ok" })
+    }
+    $messagesBufferedJson = $messagesBuffered.Content | ConvertFrom-Json
+    Assert-True ([string]$messagesBufferedJson.type -eq "message") "messages returned an unexpected response type"
+    Assert-True ($null -ne $messagesBufferedJson.content -and $messagesBufferedJson.content.Count -gt 0) "messages returned no content"
+    $runtime = Assert-BrowserClosed "messages buffered"
+    Assert-DirectExecution $runtime "messages buffered"
+
+    if (-not $SkipStream) {
+        Write-Step "Compatibility surface: /v1/chat/completions streaming"
+        $chatStream = Invoke-PublicApi -Path "/v1/chat/completions" -Body @{
+            model = $script:ResolvedRouteId
+            stream = $true
+            messages = @(@{ role = "user"; content = "Reply briefly with: mimo-chat-stream-ok" })
+        }
+        $chatSse = [string]$chatStream.Content
+        Assert-True ($chatSse.Contains("data: [DONE]")) "chat/completions stream has no [DONE]"
+        Assert-True ($chatSse -match '"content"') "chat/completions stream has no content delta"
+        $runtime = Assert-BrowserClosed "chat/completions streaming"
+        Assert-DirectExecution $runtime "chat/completions streaming"
+
+        Write-Step "Compatibility surface: /v1/responses streaming"
+        $responsesStream = Invoke-PublicApi -Path "/v1/responses" -Body @{
+            model = $script:ResolvedRouteId
+            stream = $true
+            input = "Reply briefly with: mimo-responses-stream-ok"
+        }
+        $responsesSse = [string]$responsesStream.Content
+        Assert-True ($responsesSse -match '"type"\s*:\s*"response\.output_text\.delta"') "responses stream has no text delta"
+        Assert-True ($responsesSse -match '"type"\s*:\s*"response\.completed"') "responses stream has no completion event"
+        $runtime = Assert-BrowserClosed "responses streaming"
+        Assert-DirectExecution $runtime "responses streaming"
+
+        Write-Step "Compatibility surface: /v1/messages streaming"
+        $messagesStream = Invoke-PublicApi -Path "/v1/messages" -Body @{
+            model = $script:ResolvedRouteId
+            stream = $true
+            max_tokens = 128
+            messages = @(@{ role = "user"; content = "Reply briefly with: mimo-messages-stream-ok" })
+        }
+        $messagesSse = [string]$messagesStream.Content
+        Assert-True ($messagesSse -match '"type"\s*:\s*"content_block_delta"') "messages stream has no content delta"
+        Assert-True ($messagesSse -match '"type"\s*:\s*"message_stop"') "messages stream has no message_stop event"
+        $runtime = Assert-BrowserClosed "messages streaming"
+        Assert-DirectExecution $runtime "messages streaming"
+    }
 
     Write-Step "Scenario 1/4: fresh native conversation with Chromium closed"
     $threadA = New-TestThread "MiMo browserless acceptance A $(Get-Date -Format s)"
