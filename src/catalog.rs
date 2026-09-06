@@ -136,6 +136,7 @@ impl ModelCatalog {
                 context_window INTEGER,
                 capabilities_json TEXT NOT NULL DEFAULT '[]',
                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(provider_id, external_id)
@@ -143,6 +144,18 @@ impl ModelCatalog {
         )
         .execute(&self.pool)
         .await?;
+
+        let model_columns = sqlx::query("PRAGMA table_info(models)")
+            .fetch_all(&self.pool)
+            .await?;
+        let has_model_enabled = model_columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "enabled");
+        if !has_model_enabled {
+            sqlx::query("ALTER TABLE models ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+                .execute(&self.pool)
+                .await?;
+        }
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS account_models (
@@ -425,7 +438,7 @@ impl ModelCatalog {
         let rows = sqlx::query(
             "SELECT
                 m.canonical_id, m.provider_id, m.external_id, m.display_name, m.owned_by,
-                m.context_window, m.capabilities_json,
+                m.context_window, m.capabilities_json, m.enabled AS model_enabled,
                 am.account_id, am.availability, am.enabled, am.configured, am.discovered,
                 am.last_seen_at, am.last_verified_at, am.last_error
              FROM models m
@@ -450,7 +463,7 @@ impl ModelCatalog {
                 capabilities,
                 accounts: Vec::new(),
                 routes: self.routes_for_model(&canonical_id),
-                enabled: false,
+                enabled: row.get::<i64, _>("model_enabled") != 0,
                 fallback_eligible: false,
             });
 
@@ -470,14 +483,14 @@ impl ModelCatalog {
         }
         let config = self.config.snapshot();
         for model in models.values_mut() {
-            model.enabled = model.accounts.iter().any(|binding| binding.enabled);
-            model.fallback_eligible = model.accounts.iter().any(|binding| {
-                binding.enabled
-                    && matches!(binding.availability.as_str(), "available" | "unknown")
-                    && config.account(&binding.account_id).is_some_and(|account| {
-                        account.enabled && account.provider == model.provider
-                    })
-            });
+            model.fallback_eligible = model.enabled
+                && model.accounts.iter().any(|binding| {
+                    binding.enabled
+                        && matches!(binding.availability.as_str(), "available" | "unknown")
+                        && config.account(&binding.account_id).is_some_and(|account| {
+                            account.enabled && account.provider == model.provider
+                        })
+                });
         }
 
         Ok(models.into_values().collect())
