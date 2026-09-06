@@ -224,6 +224,15 @@
   border-color: var(--muted);
 }
 
+.browser-danger-action {
+  color: var(--danger);
+}
+
+.browser-danger-action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+}
+
 .browser-control-error {
   background: color-mix(in srgb, var(--warning) 5%, var(--panel));
 }
