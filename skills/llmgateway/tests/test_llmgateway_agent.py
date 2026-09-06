@@ -30,7 +30,7 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "method": self.command,
                 "path": self.path,
-                "headers": dict(self.headers.items()),
+                "headers": {key.lower(): value for key, value in self.headers.items()},
                 "body": body,
             }
         )
@@ -74,7 +74,7 @@ class AgentHelperTests(unittest.TestCase):
         self.client().models()
         request = Handler.requests[-1]
         self.assertEqual(request["path"], "/v1/models")
-        self.assertEqual(request["headers"]["Authorization"], "Bearer client-secret")
+        self.assertEqual(request["headers"]["authorization"], "Bearer client-secret")
 
     def test_messages_uses_anthropic_headers(self):
         self.client().messages("llmgateway-coding", "hello", 321)
