@@ -259,21 +259,18 @@ async fn call_tool(
         "llmgateway_diagnostics" => {
             client.resolve(true, &route_payload(&arguments)).await
         }
-        "llmgateway_responses" => {
-            execution_payload(&arguments, "responses")
-                .and_then_async(|body| async move { client.responses(&body).await })
-                .await
-        }
-        "llmgateway_chat" => {
-            execution_payload(&arguments, "chat")
-                .and_then_async(|body| async move { client.chat(&body).await })
-                .await
-        }
-        "llmgateway_messages" => {
-            execution_payload(&arguments, "messages")
-                .and_then_async(|body| async move { client.messages(&body).await })
-                .await
-        }
+        "llmgateway_responses" => match execution_payload(&arguments, "responses") {
+            Ok(body) => client.responses(&body).await,
+            Err(error) => Err(error),
+        },
+        "llmgateway_chat" => match execution_payload(&arguments, "chat") {
+            Ok(body) => client.chat(&body).await,
+            Err(error) => Err(error),
+        },
+        "llmgateway_messages" => match execution_payload(&arguments, "messages") {
+            Ok(body) => client.messages(&body).await,
+            Err(error) => Err(error),
+        },
         _ => {
             return complete(
                 json!({
@@ -389,26 +386,6 @@ fn invalid_local(message: &str) -> LocalClientError {
         status: 400,
         path: "mcp tool arguments".into(),
         body: message.into(),
-    }
-}
-
-trait ResultAsyncExt<T> {
-    async fn and_then_async<F, Fut>(self, f: F) -> Result<Value, LocalClientError>
-    where
-        F: FnOnce(T) -> Fut,
-        Fut: std::future::Future<Output = Result<Value, LocalClientError>>;
-}
-
-impl<T> ResultAsyncExt<T> for Result<T, LocalClientError> {
-    async fn and_then_async<F, Fut>(self, f: F) -> Result<Value, LocalClientError>
-    where
-        F: FnOnce(T) -> Fut,
-        Fut: std::future::Future<Output = Result<Value, LocalClientError>>,
-    {
-        match self {
-            Ok(value) => f(value).await,
-            Err(error) => Err(error),
-        }
     }
 }
 
