@@ -65,7 +65,7 @@ pub async fn set_model_enabled(
     }
 
     let result = sqlx::query(
-        "UPDATE account_models SET enabled = ? WHERE canonical_model_id = ?",
+        "UPDATE models SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE canonical_id = ?",
     )
     .bind(if enabled { 1_i64 } else { 0_i64 })
     .bind(model_id)
