@@ -118,3 +118,15 @@ Before reporting success:
 - any fallback claim is supported by route/execution evidence;
 - no secret value is present in logs/output;
 - no destructive state was changed unless explicitly authorized.
+
+## Runtime installation rule
+
+Do not install or run llmgateway Agent/MCP through `uv`, Python, bun, npm, or a separately packaged `mcp-server`.
+
+Use the native executable:
+
+- `llmgateway agent ...`
+- `llmgateway mcp --stdio`
+- or the already-running gateway MCP HTTP endpoint at `POST /mcp`.
+
+Python/Node files elsewhere in the repository are development/test tooling and are not part of the production Agent/MCP runtime.
