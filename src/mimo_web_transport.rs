@@ -43,7 +43,6 @@ struct MimoCredentials {
 #[derive(Clone, Debug)]
 struct MimoModelSelection {
     external_id: String,
-    display_name: String,
     enable_thinking: bool,
 }
 
@@ -422,7 +421,6 @@ impl MimoWebHttpAdapter {
             .unwrap_or_else(|| model.external_id.to_ascii_lowercase().contains("pro"));
         Ok(MimoModelSelection {
             external_id: model.external_id.clone(),
-            display_name: model.display_name.clone(),
             enable_thinking,
         })
     }
