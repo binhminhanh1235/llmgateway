@@ -1,5 +1,5 @@
 (() => {
-  const state = { groups: [], models: [], editingId: null, tiers: [], loaded: false, status: "all" };
+  const state = { groups: [], models: [], editingId: null, tiers: [], loaded: false, status: "enabled" };
   const $ = (id) => document.getElementById(id);
   const e = {
     content: $("groupsContent"),
@@ -231,30 +231,27 @@
   }
 
   function availableModelsHtml(tierIndex, assigned) {
-    if (!state.models.length) {
-      return '<div class="group-no-routes">No catalog models are currently available.</div>';
+    const selectable = state.models.filter((model) => model.fallback_eligible === true);
+    if (!selectable.length) {
+      return '<div class="group-no-routes">No enabled models are currently available for fallback.</div>';
     }
 
-    return state.models.map((model) => {
+    return selectable.map((model) => {
       const selectedHere = state.tiers[tierIndex].models.includes(model.id);
       const assignedTier = assigned.get(model.id);
       const assignedElsewhere = assignedTier !== undefined && assignedTier !== tierIndex;
-      const inactive = model.fallback_eligible !== true;
-      const locked = assignedElsewhere || (inactive && !selectedHere);
       const capabilities = (model.capabilities || []).slice(0, 5).join(" · ");
       const accounts = (model.active_accounts || []).join(", ");
       const detail = model.provider + " · " + model.external_id +
         (accounts ? " · " + accounts : "") +
-        (inactive ? " · ignored in fallback" : "") +
         (capabilities ? " · " + capabilities : "");
 
       return '<label class="group-route-choice group-model-choice' +
-        (assignedElsewhere ? " assigned" : "") +
-        (inactive ? " inactive" : "") + '">' +
+        (assignedElsewhere ? " assigned" : "") + '">' +
         '<input type="checkbox" data-model-tier="' + tierIndex +
         '" data-model-id="' + ui().escapeAttr(model.id) + '"' +
         (selectedHere ? " checked" : "") +
-        (locked ? " disabled" : "") +
+        (assignedElsewhere ? " disabled" : "") +
         '><span><strong>' + ui().escapeHtml(model.display_name) +
         "</strong><small>" + ui().escapeHtml(detail) + "</small></span></label>";
     }).join("");
@@ -275,7 +272,7 @@
         '<div class="group-order-section"><div class="group-order-heading"><strong>Fallback order</strong>' +
         '<span>Models are tried top to bottom. Use ↑ ↓ to reorder.</span></div>' +
         '<div class="group-order-list">' + selectedOrderHtml(tier, tierIndex) + "</div></div>" +
-        '<div class="group-active-model-note">Available models · inactive existing members are preserved but ignored by fallback.</div>' +
+        '<div class="group-active-model-note">Available models · only currently enabled fallback models are selectable. Existing inactive members stay preserved in the order above.</div>' +
         '<div class="group-route-list">' + availableModelsHtml(tierIndex, assigned) + "</div></section>";
     }).join("");
 
