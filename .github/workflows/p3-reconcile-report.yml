@@ -27,13 +27,29 @@ jobs:
           git merge --no-ff --no-commit origin/main
           merge_rc=$?
           echo "merge_rc=$merge_rc"
-          echo "=== STATUS ==="
-          git status --short
           echo "=== UNMERGED FILES ==="
           git diff --name-only --diff-filter=U
-          echo "=== CONFLICT MARKERS ==="
-          for f in $(git diff --name-only --diff-filter=U); do
-            echo "----- $f -----"
-            grep -n -C 12 -E '^(<<<<<<<|=======|>>>>>>>)' "$f" || true
-          done
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          files=subprocess.check_output(["git","diff","--name-only","--diff-filter=U"], text=True).splitlines()
+          for f in files:
+              print(f"===== {f} =====")
+              lines=Path(f).read_text().splitlines()
+              i=0
+              block=0
+              while i < len(lines):
+                  if lines[i].startswith("<<<<<<<"):
+                      block += 1
+                      start=max(0,i-18)
+                      j=i
+                      while j < len(lines) and not lines[j].startswith(">>>>>>>"):
+                          j += 1
+                      end=min(len(lines),j+19)
+                      print(f"--- conflict {block}, lines {i+1}-{j+1} ---")
+                      for n in range(start,end):
+                          print(f"{n+1:5}: {lines[n]}")
+                      i=j
+                  i += 1
+          PY
           exit 0
