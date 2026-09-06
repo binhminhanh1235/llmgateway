@@ -69,6 +69,8 @@ pub struct CatalogModelView {
     pub capabilities: Vec<String>,
     pub accounts: Vec<AccountModelView>,
     pub routes: Vec<String>,
+    pub enabled: bool,
+    pub fallback_eligible: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -444,6 +446,8 @@ impl ModelCatalog {
                 capabilities,
                 accounts: Vec::new(),
                 routes: self.routes_for_model(&canonical_id),
+                enabled: false,
+                fallback_eligible: false,
             });
 
             let account_id: Option<String> = row.try_get("account_id")?;
@@ -460,6 +464,18 @@ impl ModelCatalog {
                 });
             }
         }
+        let config = self.config.snapshot();
+        for model in models.values_mut() {
+            model.enabled = model.accounts.iter().any(|binding| binding.enabled);
+            model.fallback_eligible = model.accounts.iter().any(|binding| {
+                binding.enabled
+                    && matches!(binding.availability.as_str(), "available" | "unknown")
+                    && config.account(&binding.account_id).is_some_and(|account| {
+                        account.enabled && account.provider == model.provider
+                    })
+            });
+        }
+
         Ok(models.into_values().collect())
     }
 
@@ -468,11 +484,7 @@ impl ModelCatalog {
             .models()
             .await?
             .into_iter()
-            .filter(|model| {
-                model.accounts.iter().any(|account| {
-                    account.enabled && matches!(account.availability.as_str(), "available" | "unknown")
-                })
-            })
+            .filter(|model| model.fallback_eligible)
             .collect())
     }
 
