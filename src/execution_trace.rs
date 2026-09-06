@@ -33,6 +33,13 @@ pub struct ExecutionAttempt {
     pub status_code: Option<i64>,
     pub outcome: String,
     pub retryable: bool,
+    pub failure_class: Option<String>,
+    pub execution_phase: String,
+    pub replay_safety: String,
+    pub committed: bool,
+    pub selected_transport: Option<String>,
+    pub recovery_reason: Option<String>,
+    pub logical_candidate: Option<String>,
     pub duration_ms: i64,
     pub error: Option<String>,
     pub created_at: String,
@@ -58,6 +65,9 @@ pub struct ExecutionStreamTrace {
     pub byte_count: i64,
     pub outcome: String,
     pub partial_response: bool,
+    pub execution_phase: String,
+    pub replay_safety: String,
+    pub committed: bool,
     pub error: Option<String>,
     pub updated_at: String,
 }
@@ -89,6 +99,13 @@ pub struct AttemptRecord<'a> {
     pub retryable: bool,
     pub duration_ms: u128,
     pub error: Option<&'a str>,
+    pub failure_class: Option<&'a str>,
+    pub execution_phase: &'a str,
+    pub replay_safety: &'a str,
+    pub committed: bool,
+    pub selected_transport: Option<&'a str>,
+    pub recovery_reason: Option<&'a str>,
+    pub logical_candidate: Option<&'a str>,
 }
 
 impl ExecutionTraceStore {
@@ -132,6 +149,13 @@ impl ExecutionTraceStore {
                 status_code INTEGER,
                 outcome TEXT NOT NULL,
                 retryable INTEGER NOT NULL DEFAULT 0,
+                failure_class TEXT,
+                execution_phase TEXT NOT NULL DEFAULT 'pre_submit',
+                replay_safety TEXT NOT NULL DEFAULT 'safe',
+                committed INTEGER NOT NULL DEFAULT 0,
+                selected_transport TEXT,
+                recovery_reason TEXT,
+                logical_candidate TEXT,
                 duration_ms INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
                 created_at TEXT NOT NULL,
@@ -167,6 +191,9 @@ impl ExecutionTraceStore {
                 byte_count INTEGER NOT NULL DEFAULT 0,
                 outcome TEXT NOT NULL DEFAULT 'streaming',
                 partial_response INTEGER NOT NULL DEFAULT 0,
+                execution_phase TEXT NOT NULL DEFAULT 'submitted',
+                replay_safety TEXT NOT NULL DEFAULT 'probably_safe',
+                committed INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(request_id) REFERENCES execution_requests(request_id) ON DELETE CASCADE
@@ -174,6 +201,69 @@ impl ExecutionTraceStore {
         )
         .execute(&self.pool)
         .await?;
+
+        self.ensure_column("execution_attempts", "failure_class", "TEXT").await?;
+        self.ensure_column(
+            "execution_attempts",
+            "execution_phase",
+            "TEXT NOT NULL DEFAULT 'pre_submit'",
+        )
+        .await?;
+        self.ensure_column(
+            "execution_attempts",
+            "replay_safety",
+            "TEXT NOT NULL DEFAULT 'safe'",
+        )
+        .await?;
+        self.ensure_column(
+            "execution_attempts",
+            "committed",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.ensure_column("execution_attempts", "selected_transport", "TEXT")
+            .await?;
+        self.ensure_column("execution_attempts", "recovery_reason", "TEXT")
+            .await?;
+        self.ensure_column("execution_attempts", "logical_candidate", "TEXT")
+            .await?;
+        self.ensure_column(
+            "execution_streams",
+            "execution_phase",
+            "TEXT NOT NULL DEFAULT 'submitted'",
+        )
+        .await?;
+        self.ensure_column(
+            "execution_streams",
+            "replay_safety",
+            "TEXT NOT NULL DEFAULT 'probably_safe'",
+        )
+        .await?;
+        self.ensure_column(
+            "execution_streams",
+            "committed",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn ensure_column(
+        &self,
+        table: &str,
+        column: &str,
+        declaration: &str,
+    ) -> Result<(), ExecutionTraceError> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let rows = sqlx::query(&pragma).fetch_all(&self.pool).await?;
+        if rows
+            .iter()
+            .any(|row| row.get::<String, _>("name") == column)
+        {
+            return Ok(());
+        }
+        let statement = format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}");
+        sqlx::query(&statement).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -204,8 +294,9 @@ impl ExecutionTraceStore {
         sqlx::query(
             "INSERT INTO execution_attempts
              (request_id, attempt_index, route_id, account_id, model, status_code,
-              outcome, retryable, duration_ms, error, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              outcome, retryable, failure_class, execution_phase, replay_safety, committed,
+              selected_transport, recovery_reason, logical_candidate, duration_ms, error, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(record.request_id)
         .bind(record.attempt_index as i64)
@@ -215,6 +306,13 @@ impl ExecutionTraceStore {
         .bind(record.status_code.map(i64::from))
         .bind(record.outcome)
         .bind(if record.retryable { 1_i64 } else { 0_i64 })
+        .bind(record.failure_class)
+        .bind(record.execution_phase)
+        .bind(record.replay_safety)
+        .bind(if record.committed { 1_i64 } else { 0_i64 })
+        .bind(record.selected_transport)
+        .bind(record.recovery_reason)
+        .bind(record.logical_candidate)
         .bind(record.duration_ms.min(i64::MAX as u128) as i64)
         .bind(record.error.map(truncate_error))
         .bind(now_string())
@@ -253,14 +351,17 @@ impl ExecutionTraceStore {
         let now = now_string();
         sqlx::query(
             "INSERT INTO execution_streams
-             (request_id, outcome, partial_response, updated_at)
-             VALUES (?, 'streaming', 0, ?)
+             (request_id, outcome, partial_response, execution_phase, replay_safety, committed, updated_at)
+             VALUES (?, 'streaming', 0, 'submitted', 'probably_safe', 0, ?)
              ON CONFLICT(request_id) DO UPDATE SET
                 first_byte_ms = NULL,
                 chunk_count = 0,
                 byte_count = 0,
                 outcome = 'streaming',
                 partial_response = 0,
+                execution_phase = 'submitted',
+                replay_safety = 'probably_safe',
+                committed = 0,
                 error = NULL,
                 updated_at = excluded.updated_at",
         )
@@ -289,20 +390,26 @@ impl ExecutionTraceStore {
         byte_count: u64,
         outcome: &str,
         partial_response: bool,
+        execution_phase: &str,
+        replay_safety: &str,
+        committed: bool,
         error: Option<&str>,
     ) -> Result<(), ExecutionTraceError> {
         let now = now_string();
         sqlx::query(
             "INSERT INTO execution_streams
              (request_id, first_byte_ms, chunk_count, byte_count, outcome,
-              partial_response, error, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              partial_response, execution_phase, replay_safety, committed, error, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(request_id) DO UPDATE SET
                 first_byte_ms = excluded.first_byte_ms,
                 chunk_count = excluded.chunk_count,
                 byte_count = excluded.byte_count,
                 outcome = excluded.outcome,
                 partial_response = excluded.partial_response,
+                execution_phase = excluded.execution_phase,
+                replay_safety = excluded.replay_safety,
+                committed = excluded.committed,
                 error = excluded.error,
                 updated_at = excluded.updated_at",
         )
@@ -312,6 +419,9 @@ impl ExecutionTraceStore {
         .bind(byte_count.min(i64::MAX as u64) as i64)
         .bind(outcome)
         .bind(if partial_response { 1_i64 } else { 0_i64 })
+        .bind(execution_phase)
+        .bind(replay_safety)
+        .bind(if committed { 1_i64 } else { 0_i64 })
         .bind(error.map(truncate_error))
         .bind(&now)
         .execute(&self.pool)
@@ -341,7 +451,9 @@ impl ExecutionTraceStore {
         let summary = self.summary(request_id).await?;
         let rows = sqlx::query(
             "SELECT attempt_index, route_id, account_id, model, status_code, outcome,
-                    retryable, duration_ms, error, created_at
+                    retryable, failure_class, execution_phase, replay_safety, committed,
+                    selected_transport, recovery_reason, logical_candidate,
+                    duration_ms, error, created_at
              FROM execution_attempts WHERE request_id = ? ORDER BY attempt_index",
         )
         .bind(request_id)
@@ -357,6 +469,13 @@ impl ExecutionTraceStore {
                 status_code: row.get("status_code"),
                 outcome: row.get("outcome"),
                 retryable: row.get::<i64, _>("retryable") != 0,
+                failure_class: row.get("failure_class"),
+                execution_phase: row.get("execution_phase"),
+                replay_safety: row.get("replay_safety"),
+                committed: row.get::<i64, _>("committed") != 0,
+                selected_transport: row.get("selected_transport"),
+                recovery_reason: row.get("recovery_reason"),
+                logical_candidate: row.get("logical_candidate"),
                 duration_ms: row.get("duration_ms"),
                 error: row.get("error"),
                 created_at: row.get("created_at"),
@@ -364,7 +483,8 @@ impl ExecutionTraceStore {
             .collect();
         let stream = sqlx::query(
             "SELECT first_byte_ms, chunk_count, byte_count, outcome,
-                    partial_response, error, updated_at
+                    partial_response, execution_phase, replay_safety, committed,
+                    error, updated_at
              FROM execution_streams WHERE request_id = ?",
         )
         .bind(request_id)
@@ -376,6 +496,9 @@ impl ExecutionTraceStore {
             byte_count: row.get("byte_count"),
             outcome: row.get("outcome"),
             partial_response: row.get::<i64, _>("partial_response") != 0,
+            execution_phase: row.get("execution_phase"),
+            replay_safety: row.get("replay_safety"),
+            committed: row.get::<i64, _>("committed") != 0,
             error: row.get("error"),
             updated_at: row.get("updated_at"),
         });

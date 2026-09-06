@@ -29,6 +29,7 @@ mod deepseek_pow;
 mod deepseek_web_transport;
 mod embedding_retrieval;
 mod embedding_runtime;
+mod execution;
 mod execution_trace;
 mod execution_trace_api;
 mod gateway;

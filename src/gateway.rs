@@ -3,6 +3,10 @@ use crate::{
     browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AccountConfig, AppConfig, ClientPolicyConfig, ProviderConfig, RouteConfig},
+    execution::{
+        ExecutionBudget, ExecutionBudgetTracker, ExecutionFailure, ExecutionPhase, FailureClass,
+        FailureScope, ReplaySafety, StreamCommitBarrier,
+    },
     execution_trace::{AttemptRecord, ExecutionTraceError, ExecutionTraceStore},
     live_config::LiveConfig,
     quota_usage::{QuotaUsageStore, UsageEvent},
@@ -51,10 +55,14 @@ struct ExecutionStreamGuard {
     chunk_count: u64,
     byte_count: u64,
     finished: bool,
+    barrier: StreamCommitBarrier,
 }
 
 impl ExecutionStreamGuard {
     fn observe(&mut self, bytes: usize) {
+        if bytes > 0 {
+            self.barrier.commit_client_visible();
+        }
         if self.first_byte_ms.is_none() {
             self.first_byte_ms = Some(self.started_at.elapsed().as_millis());
         }
@@ -68,6 +76,9 @@ impl ExecutionStreamGuard {
         }
         self.finished = true;
         let partial = outcome != "completed" && self.chunk_count > 0;
+        let committed = self.barrier.committed();
+        let replay_safety = self.barrier.replay_safety();
+        self.barrier.finish();
         if let Err(trace_error) = self
             .store
             .finish_stream(
@@ -78,6 +89,9 @@ impl ExecutionStreamGuard {
                 self.byte_count,
                 outcome,
                 partial,
+                self.barrier.phase().as_str(),
+                replay_safety.as_str(),
+                committed,
                 error,
             )
             .await
@@ -85,6 +99,7 @@ impl ExecutionStreamGuard {
             warn!(%trace_error, request_id = %self.request_id, "failed to finish execution stream trace");
         }
     }
+}
 }
 
 impl Drop for ExecutionStreamGuard {
@@ -98,6 +113,10 @@ impl Drop for ExecutionStreamGuard {
         let first_byte_ms = self.first_byte_ms;
         let chunk_count = self.chunk_count;
         let byte_count = self.byte_count;
+        let committed = self.barrier.committed();
+        let replay_safety = self.barrier.replay_safety();
+        self.barrier.cancel();
+        let execution_phase = self.barrier.phase();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let error = "downstream stream dropped before completion";
@@ -110,12 +129,16 @@ impl Drop for ExecutionStreamGuard {
                         byte_count,
                         "cancelled",
                         chunk_count > 0,
+                        execution_phase.as_str(),
+                        replay_safety.as_str(),
+                        committed,
                         Some(error),
                     )
                     .await;
             });
         }
     }
+}
 }
 
 fn observe_terminal_sse_completion(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
@@ -483,6 +506,9 @@ impl Gateway {
         let upstream_body = sanitized_upstream_body(body);
         let estimated_input_tokens = QuotaUsageStore::estimate_input_tokens(&upstream_body);
         let mut last_error: Option<GatewayError> = None;
+        let mut recovery_reason: Option<String> = None;
+        let mut budget_tracker =
+            ExecutionBudgetTracker::new(ExecutionBudget::for_candidate_count(routes.len()));
 
         for (attempt_index, route) in routes.into_iter().enumerate() {
             let account = match config.account(&route.account) {
@@ -506,7 +532,16 @@ impl Gateway {
                     return Err(self.finish_execution_error(&request_id, error).await);
                 }
             };
+            if !budget_tracker.try_begin_attempt() {
+                last_error = Some(GatewayError::Transport(
+                    "execution recovery budget exhausted".into(),
+                ));
+                break;
+            }
 
+            let selected_transport = selected_transport_label(provider);
+            let logical_candidate =
+                format!("{}/{}/{}", account.provider, account.id, route.model);
             let attempt_started = Instant::now();
             match self
                 .send_route_chat(provider, account, &route, &upstream_body, thread_id)
@@ -527,6 +562,21 @@ impl Gateway {
                         retryable: false,
                         duration_ms,
                         error: None,
+                        failure_class: None,
+                        execution_phase: if is_stream {
+                            ExecutionPhase::Submitted.as_str()
+                        } else {
+                            ExecutionPhase::Terminal.as_str()
+                        },
+                        replay_safety: if is_stream {
+                            ReplaySafety::ProbablySafe.as_str()
+                        } else {
+                            ReplaySafety::Unsafe.as_str()
+                        },
+                        committed: !is_stream,
+                        selected_transport: Some(selected_transport),
+                        recovery_reason: recovery_reason.as_deref(),
+                        logical_candidate: Some(&logical_candidate),
                     })
                     .await;
                     let usage_event_id = self
@@ -585,10 +635,20 @@ impl Gateway {
                         }
                     }
                     let body_text = response.text().await.unwrap_or_default();
-                    let retryable = is_retryable_status(status);
-                    let cooldown = cooldown_for(status);
-                    let adaptive_failure =
-                        status == StatusCode::REQUEST_TIMEOUT || status.is_server_error();
+                    let failure = normalized_status_failure(
+                        status,
+                        &body_text,
+                        &account.provider,
+                        &account.id,
+                        &route.model,
+                        selected_transport,
+                        BrowserProviderRegistry::is_browser_kind(&provider.kind),
+                    );
+                    let retryable = failure.allows_silent_fallback(false);
+                    let cooldown = failure
+                        .suggested_cooldown_secs
+                        .unwrap_or_else(|| cooldown_for(status));
+                    let adaptive_failure = failure_is_adaptive(&failure);
                     self.router
                         .mark_failure(
                             &route.id,
@@ -617,6 +677,13 @@ impl Gateway {
                         retryable,
                         duration_ms,
                         error: Some(&body_text),
+                        failure_class: Some(failure.class.as_str()),
+                        execution_phase: failure.phase.as_str(),
+                        replay_safety: failure.replay_safety.as_str(),
+                        committed: false,
+                        selected_transport: Some(selected_transport),
+                        recovery_reason: recovery_reason.as_deref(),
+                        logical_candidate: Some(&logical_candidate),
                     })
                     .await;
                     self.record_usage(
@@ -668,15 +735,23 @@ impl Gateway {
                     if !retryable {
                         return Err(self.finish_execution_error(&request_id, error).await);
                     }
+                    recovery_reason = Some(failure.class.as_str().to_string());
                     last_error = Some(error);
                 }
                 Err(error) => {
                     let duration_ms = attempt_started.elapsed().as_millis();
                     let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
                     let error_text = error.to_string();
-                    let non_retryable_post_submit = !is_retryable_attempt_error(&error);
+                    let failure = normalized_gateway_failure(
+                        &error,
+                        &account.provider,
+                        &account.id,
+                        &route.model,
+                        selected_transport,
+                    );
+                    let retryable = failure.allows_silent_fallback(false);
                     if let Some((route_cooldown_secs, adaptive_failure)) =
-                        route_failure_policy(&error)
+                        route_failure_policy_for_failure(&failure)
                     {
                         self.router
                             .mark_failure(
@@ -688,17 +763,7 @@ impl Gateway {
                             )
                             .await;
                     }
-                    let outcome = match &error {
-                        GatewayError::BrowserSessionUnavailable(_) => "browser_session_unavailable",
-                        GatewayError::BrowserTransport(_) => "browser_transport_error",
-                        GatewayError::BrowserAdapterIncompatible(_) => {
-                            "browser_adapter_incompatible"
-                        }
-                        GatewayError::ModelBindingConflict(_) => "model_binding_conflict",
-                        GatewayError::BrowserModelUnavailable(_) => "browser_model_unavailable",
-                        GatewayError::BrowserModelRecipeStale(_) => "model_recipe_stale",
-                        _ => "transport_error",
-                    };
+                    let outcome = failure_outcome(&error, &failure);
                     self.record_execution_attempt(AttemptRecord {
                         request_id: &request_id,
                         attempt_index,
@@ -707,9 +772,16 @@ impl Gateway {
                         model: &route.model,
                         status_code: None,
                         outcome,
-                        retryable: !non_retryable_post_submit,
+                        retryable,
                         duration_ms,
                         error: Some(&error_text),
+                        failure_class: Some(failure.class.as_str()),
+                        execution_phase: failure.phase.as_str(),
+                        replay_safety: failure.replay_safety.as_str(),
+                        committed: false,
+                        selected_transport: Some(selected_transport),
+                        recovery_reason: recovery_reason.as_deref(),
+                        logical_candidate: Some(&logical_candidate),
                     })
                     .await;
                     self.record_usage(
@@ -721,9 +793,10 @@ impl Gateway {
                         Some(&error_text),
                     )
                     .await;
-                    if non_retryable_post_submit {
+                    if !retryable {
                         return Err(self.finish_execution_error(&request_id, error).await);
                     }
+                    recovery_reason = Some(failure.class.as_str().to_string());
                     last_error = Some(error);
                 }
             }
@@ -761,6 +834,7 @@ impl Gateway {
                 chunk_count: 0,
                 byte_count: 0,
                 finished: false,
+                barrier: StreamCommitBarrier::new(),
             };
 
             let mut sse_buffer = Vec::<u8>::new();
@@ -1092,30 +1166,351 @@ fn is_model_binding_conflict(error: &GatewayError) -> bool {
             error,
             GatewayError::BrowserTransport(msg)
                 if msg.contains("native conversation is already bound to model")
+                    || msg.contains("model_binding_conflict")
         )
 }
 
-fn route_failure_policy(error: &GatewayError) -> Option<(i64, bool)> {
-    if is_model_binding_conflict(error) {
-        return None;
+fn selected_transport_label(provider: &ProviderConfig) -> &'static str {
+    if BrowserProviderRegistry::is_browser_kind(&provider.kind) {
+        "browser_runtime"
+    } else {
+        "direct_http"
     }
-
-    let adaptive_failure = matches!(
-        error,
-        GatewayError::Transport(_) | GatewayError::BrowserTransport(_)
-    );
-    let route_cooldown_secs = match error {
-        GatewayError::BrowserAdapterIncompatible(_)
-        | GatewayError::BrowserModelUnavailable(_)
-        | GatewayError::BrowserModelRecipeStale(_) => 0,
-        GatewayError::BrowserSessionUnavailable(_) => 2,
-        _ => 10,
-    };
-    Some((route_cooldown_secs, adaptive_failure))
 }
 
+fn normalized_status_failure(
+    status: StatusCode,
+    body: &str,
+    provider: &str,
+    account_id: &str,
+    model: &str,
+    transport: &str,
+    browser_provider: bool,
+) -> ExecutionFailure {
+    let lower = body.to_ascii_lowercase();
+    let failure = if lower.contains("aliyun_waf_aa") || lower.contains("upstream_waf_rejected") {
+        ExecutionFailure::new(
+            FailureClass::WafRejected,
+            true,
+            ReplaySafety::Safe,
+            ExecutionPhase::Submitted,
+            FailureScope::Transport,
+            "upstream rejected the selected transport",
+        )
+    } else {
+        match status.as_u16() {
+            401 | 403 => ExecutionFailure::new(
+                FailureClass::AuthExpired,
+                true,
+                ReplaySafety::Safe,
+                ExecutionPhase::Submitted,
+                FailureScope::Account,
+                "provider authentication is not ready",
+            ),
+            408 => ExecutionFailure::new(
+                FailureClass::NetworkTransient,
+                true,
+                ReplaySafety::ProbablySafe,
+                ExecutionPhase::Submitted,
+                FailureScope::Request,
+                "upstream request timed out",
+            ),
+            409 => ExecutionFailure::new(
+                FailureClass::SessionStateDesync,
+                true,
+                ReplaySafety::ProbablySafe,
+                ExecutionPhase::Submitted,
+                FailureScope::Conversation,
+                "provider session state rejected the request",
+            ),
+            429 => ExecutionFailure::new(
+                FailureClass::RateLimited,
+                true,
+                ReplaySafety::Safe,
+                ExecutionPhase::Submitted,
+                FailureScope::Account,
+                "provider rate limit reached",
+            ),
+            503 => ExecutionFailure::new(
+                FailureClass::UpstreamOverloaded,
+                true,
+                ReplaySafety::ProbablySafe,
+                ExecutionPhase::Submitted,
+                FailureScope::Provider,
+                "provider is temporarily overloaded",
+            ),
+            500..=599 => ExecutionFailure::new(
+                FailureClass::Upstream5xx,
+                true,
+                ReplaySafety::ProbablySafe,
+                ExecutionPhase::Submitted,
+                FailureScope::Provider,
+                "provider returned a transient server error",
+            ),
+            _ => ExecutionFailure::new(
+                FailureClass::Unknown,
+                false,
+                ReplaySafety::ProbablySafe,
+                ExecutionPhase::Submitted,
+                FailureScope::Request,
+                "upstream rejected the request",
+            ),
+        }
+    };
+
+    let mut failure = failure
+        .with_context(provider, account_id, model, transport)
+        .with_cooldown(cooldown_for(status));
+    if browser_provider && matches!(status.as_u16(), 401 | 403) {
+        failure = failure.requiring_human_action();
+    }
+    failure
+}
+
+fn normalized_gateway_failure(
+    error: &GatewayError,
+    provider: &str,
+    account_id: &str,
+    model: &str,
+    transport: &str,
+) -> ExecutionFailure {
+    if is_model_binding_conflict(error) {
+        return ExecutionFailure::new(
+            FailureClass::SessionStateDesync,
+            false,
+            ReplaySafety::Unsafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Conversation,
+            "provider-native conversation is bound to incompatible model state",
+        )
+        .with_context(provider, account_id, model, transport);
+    }
+
+    let failure = match error {
+        GatewayError::NoRoute(_) => ExecutionFailure::new(
+            FailureClass::ModelUnavailable,
+            false,
+            ReplaySafety::Safe,
+            ExecutionPhase::PreSubmit,
+            FailureScope::Model,
+            "no eligible logical route is available",
+        ),
+        GatewayError::MissingCredential(_) => ExecutionFailure::new(
+            FailureClass::AuthIncomplete,
+            false,
+            ReplaySafety::Safe,
+            ExecutionPhase::PreSubmit,
+            FailureScope::Account,
+            "required credential is missing",
+        ),
+        GatewayError::InvalidConfig(_) | GatewayError::ClientPolicyDenied(_) => {
+            ExecutionFailure::new(
+                FailureClass::Unknown,
+                false,
+                ReplaySafety::Safe,
+                ExecutionPhase::PreSubmit,
+                FailureScope::Request,
+                "request cannot be executed with the current configuration",
+            )
+        }
+        GatewayError::Transport(_) => ExecutionFailure::new(
+            FailureClass::NetworkTransient,
+            true,
+            ReplaySafety::ProbablySafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Transport,
+            "transport failed before client-visible commit",
+        ),
+        GatewayError::BrowserSessionUnavailable(_) => ExecutionFailure::new(
+            FailureClass::SessionBusy,
+            true,
+            ReplaySafety::Safe,
+            ExecutionPhase::PreSubmit,
+            FailureScope::Session,
+            "browser session is not ready",
+        )
+        .with_cooldown(2),
+        GatewayError::BrowserTransport(message) => {
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("aliyun_waf_aa") || lower.contains("upstream_waf_rejected") {
+                ExecutionFailure::new(
+                    FailureClass::WafRejected,
+                    true,
+                    ReplaySafety::Safe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Transport,
+                    "upstream rejected the selected browser-backed transport",
+                )
+            } else if lower.contains("websocket protocol error")
+                || lower.contains("connection reset without closing handshake")
+                || lower.contains("cdp") && lower.contains("disconnect")
+            {
+                ExecutionFailure::new(
+                    FailureClass::CdpDisconnected,
+                    true,
+                    ReplaySafety::ProbablySafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Session,
+                    "browser control channel disconnected",
+                )
+            } else if lower.contains("target")
+                && (lower.contains("closed") || lower.contains("lost"))
+            {
+                ExecutionFailure::new(
+                    FailureClass::PageTargetLost,
+                    true,
+                    ReplaySafety::ProbablySafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Session,
+                    "browser page target was lost",
+                )
+            } else if lower.contains("browser")
+                && (lower.contains("crash") || lower.contains("exited"))
+            {
+                ExecutionFailure::new(
+                    FailureClass::BrowserCrashed,
+                    true,
+                    ReplaySafety::ProbablySafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Session,
+                    "browser runtime exited unexpectedly",
+                )
+            } else if lower.contains("empty stream") || lower.contains("empty output") {
+                ExecutionFailure::new(
+                    FailureClass::StreamEmpty,
+                    true,
+                    ReplaySafety::ProbablySafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Conversation,
+                    "provider stream ended without client-visible output",
+                )
+            } else if lower.contains("stream")
+                && (lower.contains("drop") || lower.contains("ended"))
+            {
+                ExecutionFailure::new(
+                    FailureClass::StreamDropped,
+                    true,
+                    ReplaySafety::ProbablySafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Conversation,
+                    "provider stream ended unexpectedly",
+                )
+            } else {
+                ExecutionFailure::new(
+                    FailureClass::NetworkTransient,
+                    true,
+                    ReplaySafety::ProbablySafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Transport,
+                    "browser-backed transport failed before client-visible commit",
+                )
+            }
+        }
+        GatewayError::BrowserAdapterIncompatible(_) => ExecutionFailure::new(
+            FailureClass::ModelUnavailable,
+            true,
+            ReplaySafety::Safe,
+            ExecutionPhase::PreSubmit,
+            FailureScope::Model,
+            "browser adapter is not compatible with the selected model/page",
+        )
+        .with_cooldown(0),
+        GatewayError::ModelBindingConflict(_) => unreachable!("handled above"),
+        GatewayError::BrowserModelUnavailable(_) => ExecutionFailure::new(
+            FailureClass::ModelUnavailable,
+            true,
+            ReplaySafety::Safe,
+            ExecutionPhase::PreSubmit,
+            FailureScope::Model,
+            "selected browser model is unavailable",
+        )
+        .with_cooldown(0),
+        GatewayError::BrowserModelRecipeStale(_) => ExecutionFailure::new(
+            FailureClass::ModelRecipeStale,
+            false,
+            ReplaySafety::Safe,
+            ExecutionPhase::PreSubmit,
+            FailureScope::Model,
+            "selected browser model recipe is stale",
+        )
+        .with_cooldown(0),
+        GatewayError::Upstream { status, body } => {
+            return normalized_status_failure(
+                *status,
+                body,
+                provider,
+                account_id,
+                model,
+                transport,
+                false,
+            )
+        }
+        GatewayError::Execution { source, .. } => {
+            return normalized_gateway_failure(source, provider, account_id, model, transport)
+        }
+    };
+    failure.with_context(provider, account_id, model, transport)
+}
+
+fn failure_is_adaptive(failure: &ExecutionFailure) -> bool {
+    matches!(
+        failure.class,
+        FailureClass::NetworkTransient
+            | FailureClass::CdpDisconnected
+            | FailureClass::PageTargetLost
+            | FailureClass::BrowserCrashed
+            | FailureClass::StreamDropped
+            | FailureClass::StreamEmpty
+            | FailureClass::UpstreamOverloaded
+            | FailureClass::Upstream5xx
+    )
+}
+
+fn route_failure_policy_for_failure(failure: &ExecutionFailure) -> Option<(i64, bool)> {
+    if failure.class == FailureClass::SessionStateDesync && !failure.retryable {
+        return None;
+    }
+    let route_cooldown_secs = failure.suggested_cooldown_secs.unwrap_or(match failure.class {
+        FailureClass::ModelUnavailable | FailureClass::ModelRecipeStale => 0,
+        FailureClass::SessionBusy => 2,
+        _ => 10,
+    });
+    Some((route_cooldown_secs, failure_is_adaptive(failure)))
+}
+
+fn failure_outcome<'a>(error: &GatewayError, failure: &ExecutionFailure) -> &'a str {
+    match failure.class {
+        FailureClass::RateLimited => "rate_limited",
+        FailureClass::AuthExpired
+        | FailureClass::AuthIncomplete
+        | FailureClass::HumanActionRequired => "authentication_error",
+        FailureClass::SessionBusy => "browser_session_unavailable",
+        FailureClass::ModelRecipeStale => "model_recipe_stale",
+        FailureClass::SessionStateDesync if is_model_binding_conflict(error) => {
+            "model_binding_conflict"
+        }
+        FailureClass::ModelUnavailable => match error {
+            GatewayError::BrowserAdapterIncompatible(_) => "browser_adapter_incompatible",
+            GatewayError::BrowserModelUnavailable(_) => "browser_model_unavailable",
+            _ => "transport_error",
+        },
+        _ => match error {
+            GatewayError::BrowserTransport(_) => "browser_transport_error",
+            _ => "transport_error",
+        },
+    }
+}
+
+#[cfg(test)]
 fn is_retryable_attempt_error(error: &GatewayError) -> bool {
-    !matches!(error, GatewayError::BrowserModelRecipeStale(_)) && !is_model_binding_conflict(error)
+    normalized_gateway_failure(error, "provider", "account", "model", "transport")
+        .allows_silent_fallback(false)
+}
+
+#[cfg(test)]
+fn route_failure_policy(error: &GatewayError) -> Option<(i64, bool)> {
+    let failure = normalized_gateway_failure(error, "provider", "account", "model", "transport");
+    route_failure_policy_for_failure(&failure)
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
