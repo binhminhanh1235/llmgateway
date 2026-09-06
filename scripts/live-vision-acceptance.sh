@@ -8,6 +8,9 @@ MODEL_ID=""
 IMAGE_PATH=""
 KEEP_THREAD=0
 KEEP_FILE=0
+AUTO_LAUNCH=1
+READY_TIMEOUT_SECONDS="${LLMGATEWAY_VISION_READY_TIMEOUT_SECONDS:-120}"
+RUNTIME_BASELINE=""
 
 usage() {
   cat <<'EOF'
@@ -21,6 +24,8 @@ Options:
   --image <path>      PNG/JPEG/WebP/GIF to upload; otherwise generate a valid 1x1 PNG
   --keep-thread       Keep the generated acceptance thread
   --keep-file         Keep the uploaded artifact after acceptance
+  --no-auto-launch    Do not open the isolated Chromium profile when CDP is unavailable
+  --ready-timeout <s> Seconds to wait for an authenticated/ready browser session (default: 120)
 EOF
 }
 
@@ -33,6 +38,8 @@ while [[ $# -gt 0 ]]; do
     --image) IMAGE_PATH="${2:-}"; shift 2 ;;
     --keep-thread) KEEP_THREAD=1; shift ;;
     --keep-file) KEEP_FILE=1; shift ;;
+    --no-auto-launch) AUTO_LAUNCH=0; shift ;;
+    --ready-timeout) READY_TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -42,6 +49,10 @@ done
 [[ -n "$API_KEY" ]] || { echo "--api-key is required or set LLMGATEWAY_API_KEY" >&2; exit 2; }
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 2; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 2; }
+[[ "$READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "--ready-timeout must be a positive integer" >&2
+  exit 2
+}
 
 BASE_URL="${BASE_URL%/}"
 TMP_DIR="$(mktemp -d)"
@@ -104,6 +115,99 @@ runtime() {
   api_json GET "/_llmgateway/browser-accounts/$ACCOUNT_ID/runtime" "$1"
 }
 
+driver_status() {
+  api_json GET "/_llmgateway/browser-sessions/$SESSION_ID/driver/status" "$1"
+}
+
+driver_launch() {
+  api_json POST "/_llmgateway/browser-sessions/$SESSION_ID/driver/launch" "$1"
+}
+
+driver_verify() {
+  api_json POST "/_llmgateway/browser-sessions/$SESSION_ID/driver/verify" "$1"
+}
+
+json_value() {
+  local file="$1" expr="$2"
+  python3 - "$file" "$expr" <<'PY'
+import json,sys
+path,expr=sys.argv[1:3]
+with open(path,encoding="utf-8") as f:
+    x=json.load(f)
+safe={"bool":bool,"int":int,"str":str,"len":len,"any":any,"all":all}
+value=eval(expr,{"__builtins__":safe},{"x":x})
+if isinstance(value,bool):
+    print("true" if value else "false")
+elif value is None:
+    print("")
+else:
+    print(value)
+PY
+}
+
+ensure_browser_ready() {
+  local initial_runtime="$1"
+  local current_runtime="$TMP_DIR/runtime-ready.json"
+  local status_file="$TMP_DIR/driver-status.json"
+  local verify_file="$TMP_DIR/driver-verify.json"
+  local browser_running direct_ready
+
+  cp "$initial_runtime" "$current_runtime"
+  browser_running="$(json_value "$current_runtime" "bool(x.get('browser_running'))")"
+  direct_ready="$(json_value "$current_runtime" "bool(x.get('direct_ready'))")"
+
+  # A direct-ready account with Chromium closed is intentional. Image execution
+  # should open a temporary CDP fallback and restore the browser-closed posture.
+  if [[ "$direct_ready" == "true" && "$browser_running" != "true" ]]; then
+    step "Direct auth is ready with Chromium closed; vision will exercise temporary CDP fallback"
+    RUNTIME_BASELINE="$current_runtime"
+    return
+  fi
+
+  if [[ "$browser_running" != "true" ]]; then
+    if [[ "$AUTO_LAUNCH" -ne 1 ]]; then
+      echo "VISION ACCEPTANCE FAILED: Chromium is not running and --no-auto-launch was requested" >&2
+      exit 1
+    fi
+    step "Opening isolated Chromium session '$SESSION_ID'"
+    driver_launch "$TMP_DIR/driver-launch.json"
+  else
+    step "Chromium is already running; checking authenticated provider page"
+  fi
+
+  local max_polls=$((READY_TIMEOUT_SECONDS * 2))
+  local poll=0
+  while (( poll < max_polls )); do
+    poll=$((poll + 1))
+    driver_status "$status_file"
+    local running ready_match
+    running="$(json_value "$status_file" "bool(x.get('running'))")"
+    ready_match="$(json_value "$status_file" "str(x.get('ready_match') or '')")"
+
+    if [[ "$running" == "true" && -n "$ready_match" ]]; then
+      driver_verify "$verify_file"
+      sleep 0.25
+    fi
+
+    runtime "$current_runtime"
+    if [[ "$(json_value "$current_runtime" "bool(x.get('direct_ready')) or (bool(x.get('browser_running')) and bool(x.get('session',{}).get('routable')) and x.get('adapter',{}).get('status') == 'ready')")" == "true" ]]; then
+      RUNTIME_BASELINE="$current_runtime"
+      local effective
+      effective="$(json_value "$current_runtime" "str(x.get('effective_transport') or '')")"
+      step "Browser account is ready for vision execution (effective transport: $effective)"
+      return
+    fi
+
+    sleep 0.5
+  done
+
+  runtime "$current_runtime"
+  echo "VISION ACCEPTANCE FAILED: browser account did not become authenticated/ready within ${READY_TIMEOUT_SECONDS}s" >&2
+  echo "Complete the normal provider login in the opened isolated Chromium window, then rerun the acceptance." >&2
+  python3 -m json.tool "$current_runtime" >&2 || cat "$current_runtime" >&2
+  exit 1
+}
+
 if [[ -z "$IMAGE_PATH" ]]; then
   IMAGE_PATH="$TMP_DIR/vision-1x1.png"
   python3 - "$IMAGE_PATH" <<'PY'
@@ -125,6 +229,10 @@ json_assert "$TMP_DIR/runtime-before.json" "bool(x.get('session',{}).get('enable
 
 PROVIDER_KIND="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["provider_kind"])' "$TMP_DIR/runtime-before.json")"
 SESSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("session_id",""))' "$TMP_DIR/runtime-before.json")"
+[[ -n "$SESSION_ID" ]] || { echo "VISION ACCEPTANCE FAILED: browser account has no session id" >&2; exit 1; }
+
+ensure_browser_ready "$TMP_DIR/runtime-before.json"
+[[ -n "$RUNTIME_BASELINE" ]] || { echo "VISION ACCEPTANCE FAILED: runtime readiness baseline was not established" >&2; exit 1; }
 
 step "Resolving a vision-capable selectable model for account '$ACCOUNT_ID'"
 api_json GET "/v1/models" "$TMP_DIR/models.json"
@@ -304,7 +412,7 @@ fi
 step "Checking post-vision transport posture"
 sleep 0.7
 runtime "$TMP_DIR/runtime-after.json"
-python3 - "$TMP_DIR/runtime-before.json" "$TMP_DIR/runtime-after.json" <<'PY'
+python3 - "$RUNTIME_BASELINE" "$TMP_DIR/runtime-after.json" <<'PY'
 import json,sys
 before=json.load(open(sys.argv[1],encoding="utf-8"))
 after=json.load(open(sys.argv[2],encoding="utf-8"))
