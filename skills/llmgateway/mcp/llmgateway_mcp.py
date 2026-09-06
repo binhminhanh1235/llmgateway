@@ -77,6 +77,9 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "model": {"type": "string", "default": "llmgateway-auto"},
                 "prompt": {"type": "string"},
+                "task": {"type": "string"},
+                "capabilities": {"type": "array", "items": {"type": "string"}},
+                "min_context_window": {"type": "integer", "minimum": 1},
             },
             "additionalProperties": False,
         },
@@ -90,6 +93,9 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "model": {"type": "string", "default": "llmgateway-auto"},
                 "prompt": {"type": "string"},
+                "task": {"type": "string"},
+                "capabilities": {"type": "array", "items": {"type": "string"}},
+                "min_context_window": {"type": "integer", "minimum": 1},
             },
             "additionalProperties": False,
         },
@@ -103,6 +109,9 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "model": {"type": "string", "default": "llmgateway-coding"},
                 "prompt": {"type": "string"},
+                "task": {"type": "string"},
+                "capabilities": {"type": "array", "items": {"type": "string"}},
+                "min_context_window": {"type": "integer", "minimum": 1},
                 "max_tokens": {"type": "integer", "minimum": 1, "default": 1024},
             },
             "additionalProperties": False,
@@ -160,11 +169,17 @@ def call_tool(name: str, arguments: dict[str, Any]) -> Any:
         return client.responses(
             arguments.get("model") or "llmgateway-auto",
             required_string(arguments, "prompt"),
+            task=arguments.get("task"),
+            capabilities=arguments.get("capabilities") or [],
+            min_context_window=arguments.get("min_context_window"),
         )
     if name == "llmgateway_chat":
         return client.chat(
             arguments.get("model") or "llmgateway-auto",
             required_string(arguments, "prompt"),
+            task=arguments.get("task"),
+            capabilities=arguments.get("capabilities") or [],
+            min_context_window=arguments.get("min_context_window"),
         )
     if name == "llmgateway_messages":
         max_tokens = arguments.get("max_tokens", 1024)
@@ -174,6 +189,9 @@ def call_tool(name: str, arguments: dict[str, Any]) -> Any:
             arguments.get("model") or "llmgateway-coding",
             required_string(arguments, "prompt"),
             max_tokens,
+            task=arguments.get("task"),
+            capabilities=arguments.get("capabilities") or [],
+            min_context_window=arguments.get("min_context_window"),
         )
     raise KeyError(name)
 
