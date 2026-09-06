@@ -298,7 +298,7 @@ pub async fn image_edits(
         );
     }
 
-    let stored_input = match state
+    if let Err(error) = state
         .artifacts
         .store_bytes(
             access.client_id(),
@@ -309,16 +309,14 @@ pub async fn image_edits(
             &input.bytes,
         )
         .await
+    .await
     {
-        Ok(record) => record,
-        Err(error) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "artifact_error",
-                &error.to_string(),
-            )
-        }
-    };
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "artifact_error",
+            &error.to_string(),
+        );
+    }
 
     let config = state.gateway.config_snapshot();
     let requested_model = input
@@ -386,10 +384,6 @@ pub async fn image_edits(
                     Ok(images) => images,
                     Err(response) => return response,
                 };
-                let _ = state
-                    .artifacts
-                    .sync_references("image_edit", &stored_input.id, &images.iter().map(|image| image.file_id.clone()).collect::<Vec<_>>())
-                    .await;
                 return image_api_response(MediaGeneration { route_id, images });
             }
             Ok(response) => {
