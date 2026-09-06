@@ -394,19 +394,19 @@ The skill reuses the existing Router, model groups, client policies, readiness, 
 
 ### P1 - Agent Control API
 
-**Status: implemented on `feat/agent-native-runtime`, verification pending**
+**Status: DONE / VERIFIED on `feat/agent-native-runtime`, not merged to `main`**
 
 Adds client-scoped capability summary, dry-run resolve and normalized diagnostics on top of the existing Router.
 
 ### P2 - MCP server
 
-**Status: implemented on `feat/agent-native-runtime`, verification pending**
+**Status: DONE / VERIFIED on `feat/agent-native-runtime`, not merged to `main`**
 
 Adds a dependency-free stdio MCP bridge with READ + EXECUTE tools only, including capability resolve/diagnostics and compatibility inference.
 
 ### P3 - Capability-based Agent Routing
 
-**Status: implemented on `feat/agent-native-runtime`, verification pending**
+**Status: DONE / VERIFIED on `feat/agent-native-runtime`, not merged to `main`**
 
 Adds hard capability/context requirements inside the existing Router, preserves client/model-group/policy boundaries, and carries the same constraints through Chat, Responses, Anthropic Messages and MCP execution.
 
