@@ -90,6 +90,27 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
         has_image = any(contains_image(message.get("content")) for message in messages)
+
+        def contains_native_file(value):
+            if isinstance(value, list):
+                return any(contains_native_file(item) for item in value)
+            if isinstance(value, dict):
+                if str(value.get("type", "")) in {"input_file", "file", "document"}:
+                    return str(value.get("file_data", "")).startswith("data:")
+                return any(contains_native_file(child) for child in value.values())
+            return False
+
+        def contains_extracted_file(value):
+            if isinstance(value, str):
+                return "[Attached file:" in value
+            if isinstance(value, list):
+                return any(contains_extracted_file(item) for item in value)
+            if isinstance(value, dict):
+                return any(contains_extracted_file(child) for child in value.values())
+            return False
+
+        has_native_file = any(contains_native_file(message.get("content")) for message in messages)
+        has_extracted_file = any(contains_extracted_file(message.get("content")) for message in messages)
         user_text = "\n".join(
             str(message.get("content", ""))
             for message in messages
@@ -114,6 +135,10 @@ class Handler(BaseHTTPRequestHandler):
             })
         elif has_image:
             text = f"fake vision reply messages={len(messages)} image=yes"
+        elif has_native_file:
+            text = f"fake file reply messages={len(messages)} native_file=yes"
+        elif has_extracted_file:
+            text = f"fake file reply messages={len(messages)} extracted_file=yes"
         else:
             text = f"fake reply messages={len(messages)}"
             if "retrieved earlier transcript excerpts" in system_text.lower():
