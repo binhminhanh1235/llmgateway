@@ -162,6 +162,25 @@ impl ModelCapabilities {
         capabilities
     }
 
+    pub fn multimodal_execution() -> Self {
+        let mut capabilities = Self::attachment_execution();
+        if !capabilities.input_modalities.contains(&Modality::Audio) {
+            capabilities.input_modalities.push(Modality::Audio);
+        }
+        if !capabilities.output_modalities.contains(&Modality::Image) {
+            capabilities.output_modalities.push(Modality::Image);
+        }
+        capabilities.audio_transcription = true;
+        capabilities.image_generation = true;
+        capabilities.image_editing = true;
+        capabilities
+            .supported_mime_types
+            .extend(["audio/wav".into(), "audio/mpeg".into(), "audio/webm".into(), "audio/ogg".into(), "audio/mp4".into()]);
+        capabilities.supported_mime_types.sort();
+        capabilities.supported_mime_types.dedup();
+        capabilities
+    }
+
     pub fn file_input_mime_types() -> Vec<String> {
         vec![
             "application/pdf".into(),
@@ -384,6 +403,19 @@ mod tests {
         );
         assert!(structured.streaming);
         assert!(structured.image_generation);
+    }
+
+    #[test]
+    fn full_multimodal_capabilities_include_media_execution() {
+        let capabilities = ModelCapabilities::multimodal_execution();
+        assert!(capabilities.input_modalities.contains(&Modality::Audio));
+        assert!(capabilities.output_modalities.contains(&Modality::Image));
+        assert!(capabilities.audio_transcription);
+        assert!(capabilities.image_generation);
+        assert!(capabilities.image_editing);
+        assert!(capabilities
+            .supported_mime_types
+            .contains(&"audio/webm".to_string()));
     }
 
     #[test]
