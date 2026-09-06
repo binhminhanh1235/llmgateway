@@ -8,14 +8,14 @@ use crate::{
 use axum::{
     body::Body,
     extract::{Multipart, State},
-    http::{header::AUTHORIZATION, HeaderMap, HeaderValue, Response, StatusCode},
+    http::{HeaderMap, HeaderValue, Response, StatusCode},
     Json,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use reqwest::multipart::{Form, Part};
 use serde_json::{json, Value};
-use std::{env, sync::Arc, time::Instant};
+use std::{env, time::Instant};
 use uuid::Uuid;
 
 const DEFAULT_IMAGE_COUNT: usize = 1;
