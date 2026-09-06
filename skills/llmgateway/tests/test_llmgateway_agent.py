@@ -84,6 +84,30 @@ class AgentHelperTests(unittest.TestCase):
         self.assertEqual(request["headers"]["anthropic-version"], "2023-06-01")
         self.assertEqual(request["body"]["max_tokens"], 321)
 
+    def test_agent_resolve_uses_execution_key_and_requirements(self):
+        self.client().agent_resolve(
+            model="llmgateway-auto",
+            task="coding",
+            capabilities=["coding", "reasoning"],
+            min_context_window=32000,
+            prompt="debug Rust",
+        )
+        request = Handler.requests[-1]
+        self.assertEqual(request["path"], "/_llmgateway/agent/resolve")
+        self.assertEqual(request["headers"]["authorization"], "Bearer client-secret")
+        self.assertEqual(
+            request["body"]["requirements"]["capabilities"],
+            ["coding", "reasoning"],
+        )
+        self.assertEqual(
+            request["body"]["requirements"]["min_context_window"],
+            32000,
+        )
+        self.assertEqual(
+            request["body"]["body"]["messages"][0]["content"],
+            "debug Rust",
+        )
+
     def test_explain_uses_admin_key_and_task_body(self):
         self.client().explain(
             "llmgateway-auto", client_id="codex", prompt="debug Rust"
