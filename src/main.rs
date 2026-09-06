@@ -201,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     browser_session_runtime::install(browser_sessions.clone())
         .map_err(|_| "browser session store was already initialized")?;
     chromium_driver_runtime::install(chromium_driver.clone())
-        .map_err(|_| "Chromium driver was already initialized")?;
+        .map_err(|_| "browser driver was already initialized")?;
 
     let browser_providers = Arc::new(BrowserProviderRegistry::new(browser_provider_config)?);
     let browser_provider_bindings = browser_providers.binding_count();
@@ -222,7 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ready = startup_browser_reconcile.ready,
             recovered = startup_browser_reconcile.recovered,
             attention = startup_browser_reconcile.attention,
-            "Chromium browser driver enabled and startup reconciliation completed"
+            "browser CDP driver enabled and startup reconciliation completed"
         );
 
         let reconcile_driver = chromium_driver.clone();
