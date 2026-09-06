@@ -142,6 +142,36 @@ jobs:
                   raise SystemExit("MiMo module missing from main side")
               return ours + "mod mimo_web_transport;\n"
           resolve("src/main.rs", main_resolver)
+
+          # main added a model-visibility API test after P3 introduced ArtifactStore
+          # into AppState. Wire the P3 field into that new test rather than weakening
+          # AppState or the test.
+          api_path = Path("src/api.rs")
+          api_text = api_path.read_text()
+          state_block = """        let state = AppState {
+            gateway,
+            catalog,
+            conversations,
+            gateway_api_key,
+            client_policies,
+        };
+"""
+          if api_text.count(state_block) != 1:
+              raise SystemExit(f"expected exactly one new-main AppState test initializer, found {api_text.count(state_block)}")
+          artifact_setup = """        let artifacts =
+            Arc::new(ArtifactStore::connect(config.clone()).await.unwrap());
+
+"""
+          api_text = api_text.replace(state_block, artifact_setup + """        let state = AppState {
+            gateway,
+            catalog,
+            conversations,
+            artifacts,
+            gateway_api_key,
+            client_policies,
+        };
+""")
+          api_path.write_text(api_text)
           PY
 
           git add src/api.rs src/browser_account_setup.rs src/browser_provider.rs src/config.rs             src/conversation_api.rs src/execution_trace.rs src/main.rs
