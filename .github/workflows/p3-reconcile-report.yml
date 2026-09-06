@@ -178,7 +178,11 @@ jobs:
           git diff --check
           RUSTFLAGS="-D warnings" cargo check --all-targets
 
-          rm .github/workflows/p3-reconcile-report.yml
+          # The Actions token cannot update workflow files. Keep both workflow
+          # files identical to the feature parent for this merge commit; they are
+          # reconciled separately through the GitHub connector after the merge lands.
+          git restore --source=HEAD --staged --worktree .github/workflows/ci.yml .github/workflows/p3-reconcile-report.yml
+          rm -f Cargo.lock
           git add -A
           git status --short
           git commit -m "chore(multimodal): reconcile current main for P3 verification"
