@@ -413,6 +413,49 @@ node scripts/test-status-sync-ui.mjs
 bash scripts/smoke-model-groups.sh
 ```
 
+## 17.1 Dùng AI Agent Skill
+
+Agent-Native P0 đã có trên `main`.
+
+Bundle:
+
+```text
+skills/llmgateway/
+├── SKILL.md
+├── references/
+├── scripts/llmgateway_agent.py
+└── tests/test_llmgateway_agent.py
+```
+
+Thiết lập env:
+
+```bash
+export LLMGATEWAY_CLIENT_API_KEY="client-key"
+export LLMGATEWAY_API_KEY="admin-key"
+export LLMGATEWAY_BASE_URL="http://127.0.0.1:7331"
+```
+
+Smoke nhanh:
+
+```bash
+python3 skills/llmgateway/scripts/llmgateway_agent.py health
+python3 skills/llmgateway/scripts/llmgateway_agent.py models
+python3 skills/llmgateway/scripts/llmgateway_agent.py responses llmgateway-auto "hello"
+python3 skills/llmgateway/scripts/llmgateway_agent.py explain llmgateway-auto --prompt "coding task"
+```
+
+Test helper/bundle:
+
+```bash
+python3 -m unittest skills/llmgateway/tests/test_llmgateway_agent.py
+```
+
+Helper chỉ expose READ + EXECUTE. Enable/disable/delete và các mutation quản trị vẫn phải đi qua UI/admin API với đúng authorization.
+
+Nếu dùng Agent Skills-compatible client, copy/import toàn bộ folder `skills/llmgateway`, không chỉ riêng `SKILL.md`.
+
+Xem thêm: [agent-native-gateway.md](agent-native-gateway.md).
+
 ## 18. Basic Rust quality gate
 
 ```bash
@@ -441,6 +484,7 @@ node --check adapters/deepseek-web.js
 node --check adapters/mimo-web.js
 
 node scripts/test-browser-adapter-fixtures.mjs
+python3 -m unittest skills/llmgateway/tests/test_llmgateway_agent.py
 ```
 
 ## 20. Shell syntax checks
