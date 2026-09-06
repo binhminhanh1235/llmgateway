@@ -32,14 +32,20 @@ Use concise Conventional Commit-style subjects consistent with history: `test: p
 Pull requests should explain the behavioral change, configuration or migration impact, and tests run. Link the related issue when available. Include screenshots for visible UI changes and redact API keys, cookies, browser profiles, and local `.env` values. Do not commit generated `data/` state or personal configuration.
 
 
-## Agent Skill Guidelines
+## Agent Skill & Single-Executable Guidelines
 
 The portable llmgateway Agent Skill lives in `skills/llmgateway/`. Keep `SKILL.md` concise and use `references/` for progressive disclosure. Runtime behavior documented by the skill must match the current API/config contracts; do not embed a second model-ranking or routing engine in agent instructions.
 
-The helper CLI in `skills/llmgateway/scripts/llmgateway_agent.py` is intentionally READ + EXECUTE only. Do not add destructive or state-mutating commands there without an explicit design/security review. Test helper changes with:
+Production/runtime follows a **single-executable invariant**:
 
-```bash
-python3 -m unittest skills/llmgateway/tests/test_llmgateway_agent.py
-```
+- `llmgateway` starts the normal HTTP/UI/API server;
+- `llmgateway agent ...` is the native READ + EXECUTE Agent CLI;
+- `llmgateway mcp --stdio` is the native stdio MCP frontend;
+- the normal server exposes native MCP at `POST /mcp`;
+- do not introduce Python, Node.js, pip, npm, or a separately installed bridge as a runtime dependency.
 
-When adding future multimodal, MCP, or capability-routing guidance, feature-detect against shipped code and keep credentials, browser auth material, CAPTCHA/2FA, and provider anti-abuse boundaries out of agent control.
+Python/Node/shell files under `scripts/` may remain as developer/CI fixtures, test doubles, stress tools, or acceptance runners, but the production binary must never spawn or require them.
+
+The native Agent/MCP surfaces must not expose destructive or state-mutating commands without explicit design/security review. Keep credentials, browser auth material, CAPTCHA/2FA/passkeys, and provider anti-abuse boundaries out of agent control.
+
+When browser launch behavior changes, preserve browser config compatibility. User-facing UI should say **browser runtime** and discover installed CDP-compatible browsers; Google Chrome is the preferred auto-selection, while compatible Edge/Brave/Chromium installs may be selected explicitly.

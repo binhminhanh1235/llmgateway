@@ -106,13 +106,13 @@ pub async fn explain_routes(
     json_response(StatusCode::OK, json!(trace), None)
 }
 
-fn push_reason(values: &mut Vec<String>, reason: &str) {
+pub(crate) fn push_reason(values: &mut Vec<String>, reason: &str) {
     if !values.iter().any(|value| value == reason) {
         values.push(reason.to_string());
     }
 }
 
-fn rerank_after_client_policy(trace: &mut crate::routing::RouteDecisionTrace) {
+pub(crate) fn rerank_after_client_policy(trace: &mut crate::routing::RouteDecisionTrace) {
     let mut indices = trace
         .candidates
         .iter()

@@ -176,7 +176,7 @@ fn unavailable() -> Response<Body> {
     json_error(
         StatusCode::SERVICE_UNAVAILABLE,
         "chromium_driver_error",
-        "Chromium driver is unavailable",
+        "Browser driver is unavailable",
     )
 }
 

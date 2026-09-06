@@ -366,31 +366,44 @@ Các tracking issue đang mở gồm:
 
 Không ghi các capability này là shipped trên main cho tới khi merge và verification hoàn tất.
 
-## 16. Agent-Native P0
+## 16. Agent-Native runtime
 
-Agent-Native P0 đã **DONE / VERIFIED / SHIPPED trên `main`**.
+### P0 trên main
+
+P0 Portable Agent Skill đã **DONE / VERIFIED / SHIPPED trên `main`** qua issue #90 / PR #91.
+
+Main baseline trước PR #93 vẫn có Python stdlib helper từ P0. Đây là trạng thái lịch sử của main, không phải kiến trúc đích sau PR #93.
+
+### P1-P3 / PR #93
 
 Tracking:
 
-- issue #90: closed completed;
-- PR #91: merged;
-- merge commit: `777c7cf3fa8b9d25a4d49ea46c2e5822e88548d3`;
-- exact-head PR CI #1760 / run `34030566592`: PASS.
+- issue #92;
+- PR #93;
+- branch `feat/agent-native-runtime`;
+- baseline main `f85e54b8741a8a184bdc84b142c8b770adee29c0`.
 
-Main hiện có:
+Implementation hiện có trên feature branch:
 
-- portable `skills/llmgateway/SKILL.md`;
-- API/routing/diagnostics/operations reference playbooks;
-- helper CLI Python stdlib-only;
-- helper chỉ READ + EXECUTE;
-- normal execution ưu tiên scoped client key;
-- admin diagnostics dùng global admin key;
-- client-visible model discovery;
-- logical model/group-first selection;
-- explicit READ / EXECUTE / OPERATE / ADMIN boundary;
-- deterministic offline helper/bundle tests trong CI.
+- Agent Control API;
+- capability/context hard requirements trong Router;
+- native `llmgateway agent ...` CLI;
+- native MCP HTTP tại `POST /mcp`;
+- native MCP stdio tại `llmgateway mcp --stdio`;
+- Python Agent/MCP production bridge đã bị xóa;
+- single-executable invariant đã được codify trong `AGENTS.md`;
+- browser runtime discovery/selection trên Accounts WebUI;
+- Auto browser priority: Chrome → Edge → Brave → Chromium;
+- browser selection persist + hot reload, không cần restart gateway.
 
-P1 Agent Control API, P2 MCP server và P3 capability-based Agent Routing vẫn là **planned**, chưa được mô tả là shipped.
+Implementation P1-P3 trước redesign từng PASS tại `e05f32b25f24b9886bd45e7876f544afa86cd83b` / push CI #1798 / run `34032721869`.
+
+Sau đó P2 được đổi từ Python bridge sang native Rust và browser selector được bổ sung. Vì tree đã thay đổi, evidence #1798 **không còn là final evidence**.
+
+Current status: **IMPLEMENTED / FINAL RE-VERIFICATION IN PROGRESS / NOT MERGED TO MAIN**.
+
+Chỉ chuyển lại thành DONE / VERIFIED khi final exact-head CI pass Linux, Windows, native Agent/MCP smoke, full existing regression suite và Docker.
+
 
 ## 17. Open work đáng chú ý
 
@@ -400,6 +413,7 @@ Tại thời điểm audit repository còn các tracking/PR mở liên quan tớ
 - ChatGPT model picker/Sentinel recovery
 - Xiaomi MiMo tracking
 - multimodal initiative
+- Agent-Native P1-P3 branch / issue #92
 
 Trạng thái issue/PR là tracking signal, không luôn đồng nghĩa code chưa tồn tại. Một số thay đổi có thể đã cherry-pick/merge theo commit khác trong khi PR cũ vẫn còn mở.
 

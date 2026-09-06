@@ -979,6 +979,7 @@ fn sanitized_upstream_body(body: &Value) -> Value {
     let mut sanitized = body.clone();
     if let Some(object) = sanitized.as_object_mut() {
         object.remove("llmgateway_task");
+        object.remove("llmgateway_requirements");
         object.remove("llmgateway_execution_preference");
         object.remove("llmgateway_api_fallback");
     }
@@ -1136,7 +1137,10 @@ fn cooldown_for(status: StatusCode) -> i64 {
 
 #[cfg(test)]
 mod client_policy_tests {
-    use super::{normalize_execution_policy, transport_permissions_subset};
+    use super::{
+        normalize_execution_policy, sanitized_upstream_body, transport_permissions_subset,
+    };
+    use serde_json::json;
 
     #[test]
     fn request_transport_permissions_can_narrow_but_not_broaden_client_policy() {
@@ -1170,6 +1174,27 @@ mod client_policy_tests {
             "api-only",
             true,
         ));
+    }
+
+    #[test]
+    fn gateway_only_agent_requirements_are_not_forwarded_upstream() {
+        let body = json!({
+            "model": "llmgateway-auto",
+            "llmgateway_task": "coding",
+            "llmgateway_requirements": {
+                "capabilities": ["coding"],
+                "min_context_window": 32000
+            },
+            "llmgateway_execution_preference": "browser-only",
+            "llmgateway_api_fallback": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let sanitized = sanitized_upstream_body(&body);
+        assert!(sanitized.get("llmgateway_task").is_none());
+        assert!(sanitized.get("llmgateway_requirements").is_none());
+        assert!(sanitized.get("llmgateway_execution_preference").is_none());
+        assert!(sanitized.get("llmgateway_api_fallback").is_none());
+        assert_eq!(sanitized["messages"][0]["content"], "hello");
     }
 
     #[test]

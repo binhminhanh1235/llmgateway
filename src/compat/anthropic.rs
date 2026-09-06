@@ -33,6 +33,25 @@ pub fn to_openai_request(body: &Value) -> Result<(String, Value), String> {
     copy_if_present(body, &mut out, "top_p", "top_p");
     copy_if_present(body, &mut out, "max_tokens", "max_tokens");
     copy_if_present(body, &mut out, "stream", "stream");
+    copy_if_present(body, &mut out, "llmgateway_task", "llmgateway_task");
+    copy_if_present(
+        body,
+        &mut out,
+        "llmgateway_requirements",
+        "llmgateway_requirements",
+    );
+    copy_if_present(
+        body,
+        &mut out,
+        "llmgateway_execution_preference",
+        "llmgateway_execution_preference",
+    );
+    copy_if_present(
+        body,
+        &mut out,
+        "llmgateway_api_fallback",
+        "llmgateway_api_fallback",
+    );
     if let Some(stop) = body.get("stop_sequences") {
         out.insert("stop".into(), stop.clone());
     }

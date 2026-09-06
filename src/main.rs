@@ -1,6 +1,8 @@
 mod account_intelligence_api;
 mod admin;
 mod admin_api;
+mod agent_cli;
+mod agent_control_api;
 mod api;
 mod browser_account_setup;
 mod browser_auth;
@@ -8,6 +10,7 @@ mod browser_auth_runtime;
 mod browser_provider;
 mod browser_provider_runtime;
 mod browser_runtime_api;
+mod browser_runtime_settings;
 mod browser_session;
 mod browser_session_api;
 mod browser_session_runtime;
@@ -34,6 +37,8 @@ mod execution_trace_api;
 mod gateway;
 mod gemini_web_transport;
 mod live_config;
+mod local_client;
+mod mcp;
 mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
@@ -54,6 +59,7 @@ mod usage_api;
 
 use account_intelligence_api::account_intelligence;
 use admin_api::{set_account, set_account_model, set_model};
+use agent_control_api::{agent_capabilities, agent_diagnostics, agent_resolve};
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
     anthropic_messages, health, models, openai_chat, openai_responses, AppState,
@@ -71,6 +77,7 @@ use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
 use browser_runtime_api::{
     browser_account_runtime_diagnostics, browser_thread_affinity_diagnostics,
 };
+use browser_runtime_settings::{browser_runtime_settings, set_browser_runtime_selection};
 use browser_session::{BrowserConfig, BrowserSessionStore};
 use browser_session_api::{
     begin_browser_login, complete_browser_login, get_browser_session, list_browser_sessions,
@@ -95,6 +102,7 @@ use execution_trace::ExecutionTraceStore;
 use execution_trace_api::{get_execution, list_executions};
 use gateway::Gateway;
 use live_config::LiveConfig;
+use mcp::mcp_http;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
@@ -119,6 +127,34 @@ use usage_api::{get_account_usage, get_usage, reset_account_quota};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
+
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if let Some(command) = args.first().map(String::as_str) {
+        match command {
+            "agent" => {
+                return agent_cli::run(&args[1..]).await;
+            }
+            "mcp" if args.get(1).map(String::as_str) == Some("--stdio") => {
+                return mcp::serve_stdio().await;
+            }
+            "mcp"
+                if args
+                    .get(1)
+                    .is_some_and(|arg| matches!(arg.as_str(), "-h" | "--help" | "help")) =>
+            {
+                println!("llmgateway mcp --stdio\n\nHTTP MCP is served at POST /mcp by the normal llmgateway server.");
+                return Ok(());
+            }
+            "-h" | "--help" | "help" => {
+                println!(
+                    "llmgateway\n\n  llmgateway                 Start the gateway server\n  llmgateway agent ...       Native Agent CLI\n  llmgateway mcp --stdio     Native MCP stdio server\n\nThe normal server also exposes MCP at POST /mcp."
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -167,7 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     browser_session_runtime::install(browser_sessions.clone())
         .map_err(|_| "browser session store was already initialized")?;
     chromium_driver_runtime::install(chromium_driver.clone())
-        .map_err(|_| "Chromium driver was already initialized")?;
+        .map_err(|_| "browser driver was already initialized")?;
 
     let browser_providers = Arc::new(BrowserProviderRegistry::new(browser_provider_config)?);
     let browser_provider_bindings = browser_providers.binding_count();
@@ -188,7 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ready = startup_browser_reconcile.ready,
             recovered = startup_browser_reconcile.recovered,
             attention = startup_browser_reconcile.attention,
-            "Chromium browser driver enabled and startup reconciliation completed"
+            "browser CDP driver enabled and startup reconciliation completed"
         );
 
         let reconcile_driver = chromium_driver.clone();
@@ -350,6 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui/model-groups.js", get(model_groups_js))
         .route("/ui/trace-console.css", get(trace_console_css))
         .route("/ui/trace-console.js", get(trace_console_js))
+        .route("/mcp", post(mcp_http))
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/responses", post(openai_responses))
         .route("/v1/messages", post(anthropic_messages))
@@ -397,6 +434,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(account_intelligence),
         )
         .route("/_llmgateway/clients", get(list_client_policies))
+        .route("/_llmgateway/agent/capabilities", get(agent_capabilities))
+        .route("/_llmgateway/agent/resolve", post(agent_resolve))
+        .route("/_llmgateway/agent/diagnostics", post(agent_diagnostics))
         .route("/_llmgateway/routes/explain", post(explain_routes))
         .route(
             "/_llmgateway/model-groups",
@@ -446,6 +486,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/_llmgateway/browser-account-setup/{account_id}",
             axum::routing::patch(set_browser_account_enabled),
+        )
+        .route(
+            "/_llmgateway/browser-runtime/settings",
+            get(browser_runtime_settings).patch(set_browser_runtime_selection),
         )
         .route(
             "/_llmgateway/browser-accounts/{account_id}/runtime",

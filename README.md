@@ -18,7 +18,7 @@ Nhánh `main` hiện đã có:
 - SQLite conversation history, Structured Memory IR, compaction, semantic/hybrid retrieval
 - multi-provider, multi-account routing và failover
 - route affinity, task-aware routing, adaptive scoring, quota/cooldown
-- browser account lifecycle và Chromium/CDP runtime
+- browser account lifecycle và selectable browser/CDP runtime
 - browser streaming/cancellation
 - provider-native conversation affinity cho các adapter đã hỗ trợ
 - per-client API key, allowlist và request/token budget
@@ -83,34 +83,38 @@ llmgateway là nơi sở hữu conversation state chuẩn. Provider chỉ là ex
 
 ## Yêu cầu môi trường
 
-Tối thiểu:
+### Người dùng release
 
-- **Rust stable** và Cargo
-- Git
-- curl
-- một trình duyệt Chromium-compatible nếu dùng browser account:
-  - Google Chrome
-  - Chromium
-  - Microsoft Edge có thể dùng nếu cấu hình executable phù hợp
+Runtime production tuân theo invariant **một executable**:
 
-Khuyến nghị cho test/dev đầy đủ:
-
-- Node.js 20+ để chạy fixture/UI checks
-- Python 3 để chạy fake provider/stress tools
-- Bash trên macOS/Linux hoặc Git Bash/WSL trên Windows
-- Docker nếu muốn test image/container
-
-Kiểm tra:
-
-```bash
-rustc --version
-cargo --version
-git --version
-curl --version
-node --version
-python3 --version
-docker --version
+```text
+llmgateway          macOS/Linux
+llmgateway.exe      Windows
 ```
+
+Không cần cài Python, pip, Node.js, npm hay một MCP server riêng.
+
+Nếu dùng browser account, cần một browser CDP-compatible đã cài trên máy. llmgateway tự phát hiện và cho chọn ngay trong **WebUI → Accounts → Browser runtime**:
+
+1. Google Chrome, ưu tiên mặc định ở chế độ Auto;
+2. Microsoft Edge;
+3. Brave;
+4. Chromium.
+
+Browser chỉ được dùng làm engine đăng nhập/CDP. Profile của từng account vẫn được llmgateway tách riêng.
+
+### Build từ source / developer
+
+Chỉ khi build hoặc chạy full CI từ source mới cần thêm:
+
+- Rust stable + Cargo;
+- Git và curl;
+- Node.js cho UI/adapter syntax fixtures;
+- Python 3 cho fake provider, stress và acceptance tooling trong `scripts/`;
+- Bash/PowerShell;
+- Docker nếu test image/container.
+
+Python/Node trong repository là **dev/test tooling**, không phải runtime dependency và production binary không spawn chúng.
 
 ---
 
@@ -473,112 +477,115 @@ Xem: [docs/client-policies.md](docs/client-policies.md).
 
 ## AI Agent Skill ✅
 
-Agent-Native P0 đã **shipped trên `main`** qua PR #91.
+Agent-Native P0 đã ship trên `main` qua PR #91. PR #93 đang nâng runtime lên kiến trúc **single executable** và P1-P3, chưa merge vào `main`.
 
-Bundle portable nằm tại:
+Skill portable chỉ còn instruction/reference:
 
 ```text
 skills/llmgateway/
 ├── SKILL.md
-├── references/
-│   ├── api.md
-│   ├── diagnostics.md
-│   ├── operations.md
-│   └── routing.md
-├── scripts/llmgateway_agent.py
-└── tests/test_llmgateway_agent.py
+└── references/
+    ├── api.md
+    ├── diagnostics.md
+    ├── mcp.md
+    ├── operations.md
+    └── routing.md
 ```
 
-Mục tiêu là để Codex/ChatGPT/Claude-style agent dùng llmgateway như **model runtime**, còn Router của llmgateway tiếp tục là nơi duy nhất quyết định readiness, policy, quota, tier, health và fallback.
+Không còn Python Agent helper hoặc Python MCP bridge trong bundle. Capability thật nằm trong binary Rust.
 
-### Quick start cho agent
+### Native Agent CLI
 
-Gateway phải đang chạy trước:
+Gateway chạy bình thường:
 
 ```bash
-cargo run --release
+llmgateway
 ```
 
-Thiết lập credential. Với normal inference nên dùng scoped client key; admin key chỉ cần cho diagnostics quản trị:
+Ở terminal khác:
 
 ```bash
 export LLMGATEWAY_CLIENT_API_KEY="client-key"
 export LLMGATEWAY_API_KEY="admin-key"
 export LLMGATEWAY_BASE_URL="http://127.0.0.1:7331"
+
+llmgateway agent health
+llmgateway agent models
+llmgateway agent capabilities
+
+llmgateway agent resolve \
+  --model llmgateway-auto \
+  --capability coding \
+  --capability reasoning \
+  --min-context-window 32000 \
+  --prompt "implement retry"
+
+llmgateway agent chat \
+  llmgateway-auto "implement retry" \
+  --capability coding \
+  --min-context-window 32000
 ```
 
-Kiểm tra health và model mà client thực sự được phép dùng:
+Agent phải giữ cùng capability requirements từ resolve tới execute để route không drift.
 
-```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py health
-python3 skills/llmgateway/scripts/llmgateway_agent.py models
-```
+### Native MCP
 
-Gọi Responses hoặc Chat:
-
-```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py responses \
-  llmgateway-auto "Giải thích kiến trúc hiện tại"
-
-python3 skills/llmgateway/scripts/llmgateway_agent.py chat \
-  llmgateway-coding "Review đoạn code này"
-```
-
-Anthropic Messages:
-
-```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py messages \
-  llmgateway-coding "Giải thích Java CAS" --max-tokens 1024
-```
-
-Khi cần hiểu vì sao route được hoặc không được chọn:
-
-```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py explain \
-  llmgateway-auto --prompt "debug Rust"
-```
-
-### Quy tắc chọn model
+MCP HTTP chạy **cùng process** với gateway:
 
 ```text
-GET /v1/models
-      |
-      v
-ưu tiên logical model / model group
-      |
-      v
-llmgateway Router
-      |
-      +-- client policy
-      +-- readiness
-      +-- ordered fallback tiers
-      +-- quota / cooldown
-      +-- task fit / health / fairness
-      |
-      v
-physical provider route
+POST http://127.0.0.1:7331/mcp
 ```
 
-Agent không nên hard-code provider/model chỉ vì route đó từng chạy được ở một phiên trước. Nếu client policy không expose model qua `/v1/models`, agent không được cố bypass bằng physical route ID.
+Nếu MCP host chỉ hỗ trợ stdio, nó spawn **cùng executable**:
+
+```bash
+llmgateway mcp --stdio
+```
+
+Không cần Python hay package MCP riêng.
+
+Tool surface mặc định chỉ READ + EXECUTE:
+
+- `llmgateway_health`
+- `llmgateway_capabilities`
+- `llmgateway_models`
+- `llmgateway_resolve`
+- `llmgateway_diagnostics`
+- `llmgateway_responses`
+- `llmgateway_chat`
+- `llmgateway_messages`
+
+Không expose delete/enable/disable/credential/browser mutation tool qua MCP.
+
+### Capability routing
+
+P1-P3 trên PR #93 thêm Agent Control API và hard routing requirements:
+
+```json
+{
+  "llmgateway_requirements": {
+    "capabilities": ["coding", "reasoning"],
+    "min_context_window": 32000
+  }
+}
+```
+
+Constraints chạy ngay trong Router hiện có, sau client policy/model-group boundary và trước final selection. Chúng chỉ có thể **thu hẹp** eligibility, không thể mở rộng quyền của client.
 
 ### Permission boundary
 
-| Mức | Ví dụ | Mặc định của helper |
+| Mức | Ví dụ | Native Agent/MCP mặc định |
 |---|---|---|
-| READ | health, models, accounts, groups, route explain, execution trace | Có |
-| EXECUTE | Responses, Chat Completions, Anthropic Messages | Có |
-| OPERATE | enable/disable, refresh models, restart browser runtime | Không |
-| ADMIN | delete account, thay credential/policy, destructive config | Không |
+| READ | health, models, capabilities, route diagnostics | Có |
+| EXECUTE | Responses, Chat, Anthropic Messages | Có |
+| OPERATE | enable/disable, refresh models, restart browser | Không |
+| ADMIN | delete account, credential/policy/destructive config | Không |
 
-Helper CLI cố ý chỉ expose **READ + EXECUTE**. Các mutation quản trị phải dùng API/UI tương ứng và cần đúng mức phê duyệt của người dùng.
+Import/copy toàn bộ folder `skills/llmgateway` cho client hỗ trợ Agent Skills. Skill không chứa executable riêng và không tạo routing engine thứ hai.
 
-### Dùng với Agent Skills-compatible client
+Chi tiết: [docs/agent-native-gateway.md](docs/agent-native-gateway.md) và [docs/mcp-server.md](docs/mcp-server.md).
 
-Import/copy **toàn bộ folder `skills/llmgateway`**, không chỉ riêng `SKILL.md`, vì skill dùng progressive disclosure qua `references/` và helper trong `scripts/`.
-
-Skill không tự quản credential, không lấy raw cookie/token, không bypass CAPTCHA/2FA/passkey và không tạo một routing engine thứ hai.
-
-Chi tiết: [docs/agent-native-gateway.md](docs/agent-native-gateway.md).
+Hermes Agent: [docs/hermes-agent-mcp.md](docs/hermes-agent-mcp.md). **Không dùng `uv`, Python, bun hoặc npm cho Agent/MCP runtime.**
 
 ---
 
@@ -626,7 +633,7 @@ Build:
 docker build -t llmgateway:local .
 ```
 
-Chạy container cần mount config/data và truyền env phù hợp. Với browser/CDP local, chạy native thường đơn giản hơn container vì Chromium profile và GUI login cần lifecycle riêng.
+Chạy container cần mount config/data và truyền env phù hợp. Với browser/CDP local, chạy native thường đơn giản hơn container vì browser profile và GUI login cần lifecycle riêng.
 
 ---
 

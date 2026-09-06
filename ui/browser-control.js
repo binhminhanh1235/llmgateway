@@ -14,6 +14,7 @@
   let sessions = [];
   let driverState = new Map();
   let accountState = new Map();
+  let browserRuntime = null;
   let refreshTimer = null;
   let loginPollTimer = null;
   let providerPresets = [];
@@ -55,12 +56,14 @@
     if (!apiKey() || loading || (!force && !isAccountsViewActive())) return;
     loading = true;
     try {
-      const [summary, accounts] = await Promise.all([
+      const [summary, accounts, runtime] = await Promise.all([
         request("/_llmgateway/browser-sessions"),
         request("/_llmgateway/accounts"),
+        request("/_llmgateway/browser-runtime/settings"),
       ]);
       sessions = summary?.sessions || [];
       accountState = new Map((accounts?.data || []).map((account) => [account.id, account]));
+      browserRuntime = runtime || null;
       const states = await Promise.all(sessions.map(async (session) => [session.id, await loadDriverStatus(session.id)]));
       driverState = new Map(states);
       render(summary);
@@ -90,10 +93,11 @@
         <div>
           <div class="browser-eyebrow">Browser accounts</div>
           <div class="browser-control-title">Sign in once. Keep the session local.</div>
-          <div class="browser-control-subtitle">Chromium uses an isolated profile per account. Cookies stay inside that profile and are never returned by llmgateway.</div>
+          <div class="browser-control-subtitle">Choose an installed compatible browser. llmgateway launches it with an isolated profile per account; cookies stay inside that profile.</div>
         </div>
         <div class="browser-security-chip" title="Browser DevTools is loopback-only and page URLs are sanitized before they reach this UI">Local session</div>
       </div>
+      ${browserRuntimeHtml()}
       ${sessions.length
         ? `<div class="browser-session-grid">${sessions.map((session) => browserSessionHtml(session, driverState.get(session.id))).join("")}</div>`
         : browserEmptyHtml(summary)}
@@ -104,6 +108,56 @@
     if (usage) accountsContent.insertBefore(panel, usage);
     else if (grid) accountsContent.insertBefore(panel, grid);
     else accountsContent.prepend(panel);
+  }
+
+  function browserRuntimeHtml() {
+    const detected = Array.isArray(browserRuntime?.browsers) ? browserRuntime.browsers : [];
+    const mode = browserRuntime?.selection_mode || "auto";
+    const selectedId = mode === "explicit" ? browserRuntime?.selected_browser_id : "auto";
+    const effective = browserRuntime?.effective_executable || "";
+    const options = [
+      `<option value="auto" ${selectedId === "auto" ? "selected" : ""}>Auto · Google Chrome preferred</option>`,
+      ...detected.map((browser) => `
+        <option value="${escapeAttr(browser.id)}" ${selectedId === browser.id ? "selected" : ""}>
+          ${escapeHtml(browser.label)}${browser.recommended ? " · Recommended" : ""}
+        </option>`)
+    ].join("");
+
+    return `
+      <div class="browser-runtime-settings">
+        <div class="browser-runtime-copy">
+          <strong>Browser runtime</strong>
+          <span>${detected.length
+            ? `${detected.length} compatible browser${detected.length === 1 ? "" : "s"} detected on this machine.`
+            : "No compatible browser detected. Install Google Chrome, Edge, Brave, or Chromium."}</span>
+          ${effective ? `<code title="${escapeAttr(effective)}">${escapeHtml(shorten(effective, 86))}</code>` : ""}
+        </div>
+        <label class="browser-runtime-picker">
+          <span>Use browser</span>
+          <select data-browser-runtime-select ${detected.length ? "" : "disabled"}>${options}</select>
+        </label>
+      </div>`;
+  }
+
+  async function selectBrowserRuntime(browserId, select) {
+    select.disabled = true;
+    try {
+      browserRuntime = await request("/_llmgateway/browser-runtime/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ browser_id: browserId }),
+      });
+      const selected = browserRuntime?.browsers?.find((browser) => browser.selected);
+      browserToast(browserId === "auto"
+        ? `Browser runtime set to auto · ${selected?.label || "best compatible browser"}`
+        : `Browser runtime set to ${selected?.label || browserId}. Applies on next browser launch.`);
+      await loadBrowserSessions(true);
+    } catch (error) {
+      browserToast(`Browser selection failed: ${cleanError(error)}`, true);
+      await loadBrowserSessions(true);
+    } finally {
+      select.disabled = false;
+    }
   }
 
   function browserEmptyHtml(summary) {
@@ -143,7 +197,7 @@
         <div class="browser-session-detail">${escapeHtml(detail)}</div>
         <div class="browser-session-facts">
           <span>${running ? "Browser running" : "Browser stopped"}</span>
-          <span>${driverReady ? "Authenticated page detected" : driverAvailable ? "Waiting for authenticated page" : "Chromium driver unavailable"}</span>
+          <span>${driverReady ? "Authenticated page detected" : driverAvailable ? "Waiting for authenticated page" : "Browser driver unavailable"}</span>
         </div>
         ${session.last_error ? `<div class="browser-session-error" title="${escapeAttr(session.last_error)}">${escapeHtml(shorten(session.last_error, 320))}</div>` : ""}
         ${driver?.error && !driverAvailable ? `<div class="browser-driver-note">${escapeHtml(shorten(driver.error, 150))}</div>` : ""}
@@ -173,12 +227,12 @@
   }
 
   function sessionDetail(session, driver, accountEnabled = true) {
-    if (!accountEnabled) return "Routing is disabled for this account. The isolated Chromium profile is preserved.";
+    if (!accountEnabled) return "Routing is disabled for this account. The isolated browser profile is preserved.";
     if (!session.enabled) return "This browser session is disabled in configuration.";
     if (session.status === "starting" || session.status === "login_required") {
       return driver?.status?.running
-        ? "Finish the normal login flow in the Chromium window. This page will detect completion automatically."
-        : "Start the isolated Chromium profile and finish the normal provider login.";
+        ? "Finish the normal login flow in the browser window. This page will detect completion automatically."
+        : "Start the isolated browser profile and finish the normal provider login.";
     }
     if (session.status === "ready") {
       return session.last_verified_at
@@ -189,7 +243,7 @@
     if (session.status === "stopped") return "The browser was stopped intentionally. The isolated profile is preserved for the next launch.";
     if (session.status === "failed") return "Browser launch or recovery failed. Review the diagnostic below, reset the session, then try again.";
     if (session.status === "requires_attention") return "The session needs attention. Reset it, then start a normal browser login again.";
-    return "Start a dedicated Chromium profile and sign in normally. CAPTCHA and 2FA stay interactive.";
+    return "Start a dedicated browser profile and sign in normally. CAPTCHA and 2FA stay interactive.";
   }
 
   function lifecycleView(status) {
@@ -312,7 +366,7 @@
       <div class="browser-wizard-success-copy">
         <div class="browser-wizard-eyebrow">Configuration created</div>
         <h3>${escapeHtml(result?.account_id || "Browser account")} is ready</h3>
-        <p>llmgateway created one linked browser session, provider account, route, and isolated Chromium profile configuration.</p>
+        <p>llmgateway created one linked browser session, provider account, route, and isolated browser profile configuration.</p>
       </div>
       <div class="browser-wizard-summary">
         <div><span>Provider</span><strong>${escapeHtml(result?.provider || selectedProvider)}</strong></div>
@@ -349,7 +403,7 @@
     setBusy(button, "Opening…");
     try {
       await request(`/_llmgateway/browser-sessions/${encodeURIComponent(sessionId)}/driver/launch`, { method: "POST" });
-      browserToast(`Chromium opened for ${sessionId}. Finish login in the browser.`);
+      browserToast(`Browser opened for ${sessionId}. Finish login in the browser.`);
       await loadBrowserSessions(true);
       startLoginPolling();
     } catch (error) {
@@ -612,6 +666,11 @@
     clearTimeout(browserToast.timer);
     browserToast.timer = setTimeout(() => node.classList.remove("visible"), 3600);
   }
+
+  document.addEventListener("change", (event) => {
+    const select = event.target.closest?.("[data-browser-runtime-select]");
+    if (select) selectBrowserRuntime(select.value, select);
+  });
 
   document.addEventListener("click", (event) => {
     if (event.target.closest?.("#addBrowserAccountButton") || event.target.closest?.("[data-open-browser-wizard]")) {

@@ -1,77 +1,93 @@
 # Agent-Native llmgateway
 
-Tracking: issue #90.  
-Shipped: PR #91.  
-Main merge commit: `777c7cf3fa8b9d25a4d49ea46c2e5822e88548d3`.
+Tracking lịch sử: issue #90 / PR #91.  
+Runtime P1-P3: issue #92 / PR #93.  
+Baseline main khi P1-P3 bắt đầu: `f85e54b8741a8a184bdc84b142c8b770adee29c0`.
 
-## 1. Trạng thái
+## 1. Kiến trúc
 
-P0 - Portable Agent Skill đã **DONE / VERIFIED / SHIPPED trên `main`**.
+Nguyên tắc trung tâm:
 
-P0 cung cấp:
-
-- `skills/llmgateway/SKILL.md`;
-- progressive-disclosure references cho API, routing, diagnostics và operations;
-- helper CLI Python stdlib-only;
-- model discovery theo client policy;
-- logical model/model-group first;
-- READ / EXECUTE / OPERATE / ADMIN permission boundary;
-- deterministic offline tests được nối vào CI.
-
-Exact-head PR CI #1760 đã pass Linux, Windows, Rust checks/tests, smoke suites và Docker build trước khi merge.
-
-## 2. Mục tiêu kiến trúc
-
-Agent nói **intent**. llmgateway quyết định **eligible route**.
+> Agent mô tả intent và capability requirements. llmgateway là nơi duy nhất quyết định route.
 
 ```text
-Agent intent
-    |
-    v
-llmgateway Agent Skill
-    |
-    +-- discover client-visible models
-    +-- choose logical model/group
-    +-- call compatible API
-    +-- inspect diagnostics when needed
-    |
-    v
-llmgateway Router
-    |
-    +-- client policy
-    +-- readiness
-    +-- ordered fallback tiers
-    +-- quota/cooldown
-    +-- task-aware routing
-    +-- adaptive health
-    +-- browser/API policy
-    +-- fairness/recovery
-    |
-    v
+Agent / MCP host
+      |
+      +-- llmgateway agent ...
+      +-- POST /mcp
+      +-- llmgateway mcp --stdio
+      +-- OpenAI / Anthropic compatibility API
+      |
+      v
+Agent Control / compatibility frontend
+      |
+      v
+same llmgateway Router
+      |
+      +-- ClientPolicy
+      +-- Model Catalog / Model Groups
+      +-- readiness
+      +-- ordered fallback tiers
+      +-- quota / cooldown
+      +-- execution preference
+      +-- task-aware fit
+      +-- adaptive health
+      +-- fairness / recovery
+      |
+      v
 provider route
 ```
 
-Skill phải mỏng. Nếu skill tự chứa bảng "provider X tốt hơn provider Y" hoặc tự implement fallback, hệ thống sẽ có hai routing engines và sớm bị drift.
+Không có routing engine thứ hai trong Skill, CLI hoặc MCP.
 
-## 3. Bundle layout
+## 2. Single-executable invariant
+
+Production/runtime chỉ có một application executable:
+
+```text
+llmgateway          macOS/Linux
+llmgateway.exe      Windows
+```
+
+Cùng binary cung cấp:
+
+```bash
+llmgateway
+llmgateway agent ...
+llmgateway mcp --stdio
+```
+
+Normal server cũng expose:
+
+```text
+POST /mcp
+GET  /_llmgateway/agent/capabilities
+POST /_llmgateway/agent/resolve
+POST /_llmgateway/agent/diagnostics
+```
+
+Runtime không yêu cầu Python, pip, Node.js, npm hay MCP bridge riêng.
+
+Python/Node/shell trong `scripts/` chỉ là source-repository tooling cho fake provider, fixtures, stress, smoke và live acceptance.
+
+## 3. Agent Skill bundle
+
+Sau single-binary migration, Skill chỉ còn instruction/reference:
 
 ```text
 skills/llmgateway/
 ├── SKILL.md
-├── references/
-│   ├── api.md
-│   ├── diagnostics.md
-│   ├── operations.md
-│   └── routing.md
-├── scripts/
-│   └── llmgateway_agent.py
-└── tests/
-    └── test_llmgateway_agent.py
+└── references/
+    ├── api.md
+    ├── diagnostics.md
+    ├── mcp.md
+    ├── operations.md
+    └── routing.md
 ```
 
-`SKILL.md` giữ workflow ngắn. Nội dung chi tiết được tách sang `references/` để agent chỉ đọc khi cần.
+Không có Python helper hoặc MCP implementation trong Skill bundle. Runtime behavior nằm trong Rust executable.
 
-## 4. Kết nối
+## 4. Credentials
 
 Base URL mặc định:
 
@@ -79,227 +95,285 @@ Base URL mặc định:
 http://127.0.0.1:7331
 ```
 
-Có thể override bằng:
-
-```bash
-export LLMGATEWAY_BASE_URL="http://127.0.0.1:7331"
-```
-
-Normal inference nên dùng scoped client key:
+Execution nên dùng scoped client key:
 
 ```bash
 export LLMGATEWAY_CLIENT_API_KEY="client-key"
 ```
 
-Admin diagnostics dùng:
+Admin diagnostics có thể dùng:
 
 ```bash
 export LLMGATEWAY_API_KEY="admin-key"
 ```
 
-Không log hoặc trả credential value cho agent output.
+Không log hoặc expose raw credential value cho agent.
 
-## 5. Workflow chuẩn
+## 5. Native Agent CLI
 
-### Bước 1 - Health
-
-```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py health
-```
-
-Nếu gateway không reachable, dừng ở lỗi process/network. Không đổ lỗi provider trước khi gateway sống.
-
-### Bước 2 - Discover model
+Gateway phải chạy trước khi CLI gọi local API:
 
 ```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py models
+llmgateway
 ```
 
-Kết quả `/v1/models` là model/group mà credential hiện tại thực sự được phép request.
-
-### Bước 3 - Chọn logical model/group
-
-Nếu user không yêu cầu exact provider/model, ưu tiên `llmgateway-*` logical model/group phù hợp rồi để Router xử lý eligibility và fallback.
-
-Không bypass client policy bằng physical route ID.
-
-### Bước 4 - Execute
-
-Responses:
+Health và discovery:
 
 ```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py responses \
-  llmgateway-auto "Tóm tắt task"
+llmgateway agent health
+llmgateway agent models
+llmgateway agent capabilities
 ```
 
-Chat Completions:
+Resolve requirements:
 
 ```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py chat \
-  llmgateway-coding "Review code"
+llmgateway agent resolve \
+  --model llmgateway-auto \
+  --task coding \
+  --capability coding \
+  --capability reasoning \
+  --min-context-window 32000 \
+  --prompt "implement retry"
 ```
 
-Anthropic Messages:
+Execute với cùng requirements:
 
 ```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py messages \
-  llmgateway-coding "Debug lỗi" --max-tokens 1024
+llmgateway agent responses llmgateway-auto "implement retry" \
+  --task coding \
+  --capability coding \
+  --capability reasoning \
+  --min-context-window 32000
+
+llmgateway agent chat llmgateway-auto "review code" \
+  --capability coding
+
+llmgateway agent messages llmgateway-coding "debug" \
+  --max-tokens 1024 \
+  --capability coding
 ```
 
-### Bước 5 - Diagnose khi cần
+Client-scoped diagnostics:
 
 ```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py explain \
-  llmgateway-auto --prompt "debug Rust"
-
-python3 skills/llmgateway/scripts/llmgateway_agent.py accounts
-python3 skills/llmgateway/scripts/llmgateway_agent.py groups
-python3 skills/llmgateway/scripts/llmgateway_agent.py executions
+llmgateway agent diagnostics \
+  --model llmgateway-auto \
+  --capability coding
 ```
 
-Các admin diagnostics cần `LLMGATEWAY_API_KEY`.
+Non-mutating admin diagnostics vẫn có các command như `accounts`, `groups`, `clients`, `executions`, `explain`.
 
-## 6. Permission model
+## 6. P1 - Agent Control API
+
+P1 cung cấp:
+
+```text
+GET  /_llmgateway/agent/capabilities
+POST /_llmgateway/agent/resolve
+POST /_llmgateway/agent/diagnostics
+```
+
+Các endpoint dùng normal execution credential, vì vậy client policy của caller vẫn là hard boundary.
+
+### Capability summary
+
+`capabilities` tổng hợp:
+
+- logical/virtual models;
+- physical models;
+- advertised capabilities;
+- context window metadata;
+- eligible route count;
+- available account count.
+
+### Resolve
+
+Ví dụ:
+
+```json
+{
+  "model": "llmgateway-auto",
+  "task": "coding",
+  "requirements": {
+    "capabilities": ["coding", "reasoning"],
+    "min_context_window": 32000
+  }
+}
+```
+
+`resolve` là dry-run Router, không gọi provider inference.
+
+### Diagnostics
+
+`diagnostics` dùng cùng evidence nhưng normalize blocking reasons và recommended action cho agent.
+
+## 7. P2 - Native MCP
+
+MCP không còn là Python bridge.
+
+### HTTP
+
+Normal server:
+
+```bash
+llmgateway
+```
+
+MCP endpoint:
+
+```text
+POST http://127.0.0.1:7331/mcp
+```
+
+Modern MCP path target protocol `2026-07-28` và dùng stateless request semantics.
+
+### STDIO
+
+Host chỉ hỗ trợ stdio:
+
+```bash
+llmgateway mcp --stdio
+```
+
+Đây vẫn là cùng Rust binary.
+
+Tool surface:
+
+- `llmgateway_health`;
+- `llmgateway_capabilities`;
+- `llmgateway_models`;
+- `llmgateway_resolve`;
+- `llmgateway_diagnostics`;
+- `llmgateway_responses`;
+- `llmgateway_chat`;
+- `llmgateway_messages`.
+
+Không expose OPERATE/ADMIN mutation tools.
+
+## 8. P3 - Capability-based routing
+
+Gateway-only extension:
+
+```json
+{
+  "llmgateway_requirements": {
+    "capabilities": ["coding"],
+    "min_context_window": 32000
+  }
+}
+```
+
+Semantics:
+
+- capability names normalize lowercase;
+- underscore normalize thành hyphen;
+- required capabilities là hard constraints;
+- known context window nhỏ hơn minimum bị loại;
+- unknown context metadata cũng bị loại khi minimum là hard requirement;
+- client model/route policy không thể bị requirements mở rộng;
+- model-group tiers và fallback order vẫn authoritative;
+- readiness/quota/health/task fit/fairness vẫn chạy trong Router;
+- Chat, Responses, Anthropic Messages, Agent CLI và MCP đều giữ cùng requirements;
+- gateway-only fields bị strip trước upstream provider request.
+
+Resolve và execution phải mang cùng requirements để tránh route drift.
+
+## 9. Browser runtime
+
+Agent/MCP không được tự chọn raw browser executable hoặc thao tác credential.
+
+Browser executable là operator setting từ WebUI/API.
+
+Accounts WebUI phát hiện browser CDP-compatible trên máy theo priority Auto:
+
+1. Google Chrome;
+2. Microsoft Edge;
+3. Brave;
+4. Chromium.
+
+User có thể chọn browser cụ thể. Lựa chọn được persist và hot-reload cho lần browser launch tiếp theo, không cần restart gateway.
+
+Browser auth vẫn user-owned:
+
+- CAPTCHA/2FA/passkey interactive;
+- cookies/local storage không expose qua Agent/MCP;
+- browserless là transport optimization sau login hợp lệ, không phải auth bypass.
+
+## 10. Permission boundary
 
 ### READ
 
-Cho phép inspection không mutation:
-
 - health;
-- model discovery;
-- accounts/groups/clients;
-- route explain;
-- execution trace;
-- browser/runtime diagnostics.
+- models/capabilities;
+- route resolve/diagnostics;
+- account/group/client inspection;
+- execution trace.
 
 ### EXECUTE
 
-Cho phép inference qua compatibility APIs. Hoạt động này có thể tiêu quota/budget.
+- inference qua Responses/Chat/Messages.
 
 ### OPERATE
 
-Bao gồm:
-
-- enable/disable account/model/group;
-- refresh model discovery;
-- restart/stop browser runtime;
-- đổi browserless transport preference;
-- reset quota state.
-
-Chỉ thực hiện khi user rõ ràng yêu cầu state change.
+- enable/disable;
+- refresh models;
+- browser launch/restart/stop;
+- browser runtime selection;
+- quota reset.
 
 ### ADMIN
 
-Bao gồm:
-
-- delete account;
-- xóa group;
-- đổi secret/credential;
-- mở rộng client authorization policy;
+- delete;
+- credential/policy change;
 - destructive config/data mutation.
 
-Các hành động này cần explicit approval cho đúng action.
+Native Agent/MCP mặc định chỉ expose READ + EXECUTE và non-mutating diagnostics.
 
-Helper bundled cố ý không expose OPERATE/ADMIN command.
+## 11. Verification
 
-## 7. Diagnostic decision tree
-
-Khi request lỗi:
-
-1. kiểm tra gateway health;
-2. gọi `/v1/models` bằng đúng execution credential;
-3. route explain cho logical model;
-4. kiểm tra account/model/group state;
-5. xem execution trace;
-6. nếu browser-backed, kiểm tra runtime/session/adapter/auth;
-7. retry chỉ khi failure được classify là retryable.
-
-Phân biệt rõ:
-
-- gateway unavailable;
-- client policy exclusion;
-- account/model disabled;
-- provider model discovery drift;
-- auth expired;
-- page/adapter drift;
-- CDP/browser transport failure;
-- browserless/direct transport failure;
-- quota/rate limit;
-- provider-native model binding conflict.
-
-Deletion không phải diagnostic step.
-
-## 8. Browser/provider safety
-
-- browser auth thuộc user;
-- CAPTCHA/2FA/passkey luôn interactive;
-- không export cookies, local-storage token hoặc refresh token;
-- browserless là transport optimization sau authenticated session, không phải auth bypass;
-- không retry vô hạn khi provider quota/challenge đang chặn.
-
-## 9. Multimodal
-
-Agent Skill chỉ feature-detect capability có trên **current main**.
-
-Không được suy luận rằng file/vision/voice/image-generation API đã ship chỉ vì provider hoặc branch khác hỗ trợ. Multimodal initiative vẫn phải theo source of truth riêng cho tới khi merge vào `main`.
-
-## 10. Test
-
-Chạy riêng skill tests:
+Dedicated runtime smoke:
 
 ```bash
-python3 -m unittest skills/llmgateway/tests/test_llmgateway_agent.py
+bash scripts/smoke-agent-control.sh
+bash scripts/smoke-native-agent-mcp.sh
 ```
 
-Tests hiện kiểm tra:
+`smoke-native-agent-mcp.sh` kiểm tra:
 
-- execution auth header;
-- Anthropic auth/version headers;
-- admin route-explain request;
-- helper không có destructive command;
-- skill metadata và reference bundle tồn tại.
+- native `llmgateway agent`;
+- native MCP HTTP;
+- native MCP stdio;
+- semantic resolve;
+- execution through same requirements;
+- browser discovery;
+- Google Chrome auto-detection priority;
+- browser selection persistence/hot reload.
 
-Full CI vẫn chạy cùng Rust, UI/adapter checks, smoke suites, Windows và Docker.
+Rust gates:
 
-## 11. Cách import skill
+```bash
+RUSTFLAGS="-D warnings" cargo check --all-targets
+cargo clippy --all-targets
+cargo test --all-targets
+```
 
-Với client hỗ trợ Agent Skills, import/copy **cả folder `skills/llmgateway`** vào skill directory/workspace của client.
+P1-P3 + single-executable migration chỉ được gọi DONE / VERIFIED khi exact-head CI trên final tree xanh Linux, Windows, existing smoke suite và Docker.
 
-Không copy riêng `SKILL.md`, vì các links tương đối tới `references/` và helper scripts là một phần của bundle contract.
+## 12. Current branch state
 
-Nếu client không hỗ trợ Agent Skills native, vẫn có thể dùng helper CLI trực tiếp hoặc gọi compatibility APIs của llmgateway.
+PR #93 đang mở và **chưa merge vào main**.
 
-## 12. Future slices
-
-### P1 - Agent Control API
-
-Planned.
-
-Chỉ thêm compact agent-facing status/capability views khi admin API hiện tại quá verbose. Reuse Router và state stores hiện có.
-
-Candidate:
-
-- capability summary;
-- normalized diagnostic snapshot;
-- safe probe endpoint.
-
-### P2 - MCP server
-
-Planned.
-
-Expose selected llmgateway operations thành narrow MCP tools, tách read/execute/mutation permission.
-
-### P3 - Capability-based Agent Routing
-
-Planned.
-
-Cho phép agent biểu đạt requirement như coding, reasoning, vision hoặc context mà không phụ thuộc provider brand. Implementation phải mở rộng Model Catalog/Router hiện tại, không bypass model groups/client policies.
+Implementation P1-P3 cũ đã từng xanh tại `e05f32b25f24b9886bd45e7876f544afa86cd83b` / CI #1798. Sau đó kiến trúc P2 được nâng thành native single-binary và browser runtime selector được thêm theo yêu cầu mới, vì vậy evidence cũ không được dùng làm final gate cho tree hiện tại.
 
 ## 13. Non-goals
 
-- automated credential extraction;
-- CAPTCHA/2FA bypass;
-- unrestricted autonomous admin;
-- provider-specific model ranking hard-coded trong skill;
-- routing engine thứ hai ở agent layer;
-- tuyên bố unmerged capability là shipped.
+- credential extraction;
+- CAPTCHA/2FA/passkey bypass;
+- autonomous unrestricted admin;
+- provider ranking hard-coded trong Skill;
+- second routing engine;
+- Python/Node runtime dependency;
+- separate MCP application;
+- browser credential exposure;
+- gọi feature branch là shipped trước merge/post-merge verification.

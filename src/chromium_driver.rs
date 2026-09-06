@@ -30,6 +30,15 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const MAX_CHROMIUM_STDERR_BYTES: usize = 8 * 1024;
 
+#[derive(Clone, Debug, Serialize)]
+pub struct CompatibleBrowser {
+    pub id: String,
+    pub label: String,
+    pub product: String,
+    pub executable: String,
+    pub recommended: bool,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ChromiumConfig {
     #[serde(default)]
@@ -87,24 +96,24 @@ pub enum ChromiumDriverError {
     #[error("browser session error: {0}")]
     BrowserSession(#[from] BrowserSessionError),
     #[error(
-        "chromium executable was not found; set chromium.executable or install Chrome/Chromium"
+        "compatible browser executable was not found; install Google Chrome or select a detected browser in WebUI"
     )]
     ExecutableNotFound,
     #[error("chromium process for session '{0}' is already running")]
     AlreadyRunning(String),
-    #[error("failed to launch Chromium: {0}")]
+    #[error("failed to launch browser: {0}")]
     Launch(#[source] std::io::Error),
-    #[error("failed to reserve a loopback Chromium DevTools port: {0}")]
+    #[error("failed to reserve a loopback browser DevTools port: {0}")]
     DevToolsPortReservation(#[source] std::io::Error),
-    #[error("Chromium exited before DevTools became reachable: {0}")]
+    #[error("Browser exited before DevTools became reachable: {0}")]
     EarlyExit(String),
-    #[error("Chromium did not expose DevTools before the startup timeout: {0}")]
+    #[error("Browser did not expose DevTools before the startup timeout: {0}")]
     StartupTimeout(String),
     #[error("invalid DevToolsActivePort file: {0}")]
     InvalidDevToolsPort(String),
-    #[error("failed to query Chromium DevTools: {0}")]
+    #[error("failed to query browser DevTools: {0}")]
     DevToolsTransport(#[source] reqwest::Error),
-    #[error("invalid Chromium DevTools response: {0}")]
+    #[error("invalid browser DevTools response: {0}")]
     DevToolsResponse(String),
     #[error("chromium driver config TOML error: {0}")]
     Toml(#[from] toml::de::Error),
@@ -1463,7 +1472,7 @@ fn diagnostic_stderr(stderr: &str) -> String {
     }
 }
 
-fn resolve_executable(configured: Option<&str>) -> Result<String, ChromiumDriverError> {
+pub(crate) fn resolve_executable(configured: Option<&str>) -> Result<String, ChromiumDriverError> {
     if let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) {
         if let Some(path) = find_executable(configured) {
             return Ok(path.display().to_string());
@@ -1471,51 +1480,131 @@ fn resolve_executable(configured: Option<&str>) -> Result<String, ChromiumDriver
         return Err(ChromiumDriverError::ExecutableNotFound);
     }
 
-    #[cfg(target_os = "macos")]
-    let candidates = vec![
+    discover_compatible_browsers()
+        .into_iter()
+        .next()
+        .map(|browser| browser.executable)
+        .ok_or(ChromiumDriverError::ExecutableNotFound)
+}
+
+pub(crate) fn discover_compatible_browsers() -> Vec<CompatibleBrowser> {
+    let mut browsers = Vec::new();
+
+    push_browser(
+        &mut browsers,
         "google-chrome",
-        "google-chrome-stable",
+        "Google Chrome",
+        "chrome",
+        true,
+        &[
+            "google-chrome",
+            "google-chrome-stable",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ],
+        &["Google/Chrome/Application/chrome.exe"],
+    );
+    push_browser(
+        &mut browsers,
+        "microsoft-edge",
+        "Microsoft Edge",
+        "edge",
+        false,
+        &[
+            "microsoft-edge",
+            "microsoft-edge-stable",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ],
+        &["Microsoft/Edge/Application/msedge.exe"],
+    );
+    push_browser(
+        &mut browsers,
+        "brave",
+        "Brave",
+        "brave",
+        false,
+        &[
+            "brave-browser",
+            "brave-browser-stable",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ],
+        &["BraveSoftware/Brave-Browser/Application/brave.exe"],
+    );
+    push_browser(
+        &mut browsers,
         "chromium",
-        "chromium-browser",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    ];
-    #[cfg(not(target_os = "macos"))]
-    let candidates = vec![
-        "google-chrome",
-        "google-chrome-stable",
+        "Chromium",
         "chromium",
-        "chromium-browser",
-    ];
-    for candidate in candidates {
-        if let Some(path) = find_executable(candidate) {
-            return Ok(path.display().to_string());
-        }
-    }
+        false,
+        &[
+            "chromium",
+            "chromium-browser",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ],
+        &["Chromium/Application/chrome.exe"],
+    );
+
+    browsers
+}
+
+fn push_browser(
+    browsers: &mut Vec<CompatibleBrowser>,
+    id: &str,
+    label: &str,
+    product: &str,
+    recommended: bool,
+    candidates: &[&str],
+    windows_suffixes: &[&str],
+) {
+    let path_candidate = candidates
+        .iter()
+        .find_map(|candidate| find_executable(candidate));
 
     #[cfg(target_os = "windows")]
-    {
-        for root in [
+    let executable = path_candidate.or_else(|| {
+        [
             env::var_os("PROGRAMFILES"),
             env::var_os("PROGRAMFILES(X86)"),
             env::var_os("LOCALAPPDATA"),
         ]
         .into_iter()
         .flatten()
-        {
-            for suffix in [
-                "Google/Chrome/Application/chrome.exe",
-                "Chromium/Application/chrome.exe",
-            ] {
-                let path = PathBuf::from(&root).join(suffix);
-                if path.is_file() {
-                    return Ok(path.display().to_string());
-                }
-            }
-        }
-    }
+        .flat_map(|root| {
+            windows_suffixes
+                .iter()
+                .map(move |suffix| PathBuf::from(&root).join(suffix))
+        })
+        .find(|path| path.is_file())
+    });
 
-    Err(ChromiumDriverError::ExecutableNotFound)
+    #[cfg(not(target_os = "windows"))]
+    let executable = {
+        let _ = windows_suffixes;
+        path_candidate
+    };
+
+    let Some(path) = executable else {
+        return;
+    };
+    let rendered = path.display().to_string();
+    if browsers
+        .iter()
+        .any(|browser| same_executable(&browser.executable, &rendered))
+    {
+        return;
+    }
+    browsers.push(CompatibleBrowser {
+        id: id.to_string(),
+        label: label.to_string(),
+        product: product.to_string(),
+        executable: rendered,
+        recommended,
+    });
+}
+
+pub(crate) fn same_executable(left: &str, right: &str) -> bool {
+    let left_path = fs::canonicalize(left).unwrap_or_else(|_| PathBuf::from(left));
+    let right_path = fs::canonicalize(right).unwrap_or_else(|_| PathBuf::from(right));
+    left_path == right_path
 }
 
 fn find_executable(candidate: &str) -> Option<PathBuf> {
@@ -1591,10 +1680,20 @@ fn default_reconcile_interval_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_debugger_port, reserve_debugger_port, sanitize_url, validate_chromium_config,
-        write_debugger_port, ChromiumConfig, ChromiumSessionConfig,
+        discover_compatible_browsers, read_debugger_port, reserve_debugger_port, sanitize_url,
+        validate_chromium_config, write_debugger_port, ChromiumConfig, ChromiumSessionConfig,
     };
     use std::{collections::BTreeMap, fs};
+
+    #[test]
+    fn compatible_browser_discovery_has_stable_unique_ids() {
+        let browsers = discover_compatible_browsers();
+        let mut ids = std::collections::BTreeSet::new();
+        for browser in browsers {
+            assert!(ids.insert(browser.id.clone()), "duplicate browser id");
+            assert!(!browser.executable.trim().is_empty());
+        }
+    }
 
     #[test]
     fn chromium_driver_is_opt_in_disabled() {

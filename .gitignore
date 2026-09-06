@@ -1,6 +1,5 @@
 /target
 .env
-config/llmgateway.toml
 config/*.bak
 data/
 *.app

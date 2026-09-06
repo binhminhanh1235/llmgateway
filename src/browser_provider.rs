@@ -28,7 +28,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    sync::RwLock,
+    sync::{OwnedSemaphorePermit, RwLock, Semaphore},
     time::{sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -179,6 +179,10 @@ pub struct BrowserAccountBinding {
     pub first_byte_timeout_ms: Option<u64>,
     #[serde(default)]
     pub idle_stream_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_prompt_chars: Option<usize>,
+    #[serde(default)]
+    pub max_concurrency: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -368,6 +372,7 @@ pub struct BrowserProviderRegistry {
     last_transport: Arc<RwLock<BTreeMap<String, BrowserTransportExecution>>>,
     discovered_models: Arc<StdRwLock<BTreeMap<String, BTreeSet<String>>>>,
     model_catalog_refresh_required: Arc<StdRwLock<BTreeSet<String>>>,
+    account_semaphores: Arc<RwLock<BTreeMap<String, Arc<Semaphore>>>>,
 }
 
 impl BrowserProviderConfig {
@@ -466,6 +471,14 @@ impl BrowserProviderConfig {
                     "browser binding '{account}' idle_stream_timeout_ms must be between 500 and 120000"
                 )));
             }
+            if binding
+                .max_concurrency
+                .is_some_and(|value| value == 0 || value > 100)
+            {
+                return Err(BrowserProviderError::InvalidConfig(format!(
+                    "browser binding '{account}' max_concurrency must be between 1 and 100"
+                )));
+            }
         }
         Ok(envelope.browser)
     }
@@ -509,6 +522,7 @@ impl BrowserProviderRegistry {
             last_transport: Arc::new(RwLock::new(BTreeMap::new())),
             discovered_models: Arc::new(StdRwLock::new(BTreeMap::new())),
             model_catalog_refresh_required: Arc::new(StdRwLock::new(BTreeSet::new())),
+            account_semaphores: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
@@ -1360,6 +1374,10 @@ impl BrowserProviderRegistry {
             });
         }
 
+        let permit = self
+            .acquire_account_permit(&account.id, binding.max_concurrency)
+            .await?;
+
         let adapter_request = BrowserAdapterRequest {
             provider: provider.clone(),
             account: account.clone(),
@@ -1433,8 +1451,8 @@ impl BrowserProviderRegistry {
             browser_adapter.execute_chat(adapter_request).await
         };
 
-        match &result {
-            Ok(_) => {
+        match result {
+            Ok(response) => {
                 self.record_transport_execution(
                     &account.id,
                     &route.model,
@@ -1443,50 +1461,80 @@ impl BrowserProviderRegistry {
                 )
                 .await;
                 self.invalidate_diagnostics(&account.id).await;
+                wrap_response_with_permit(response, permit)
             }
-            Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
-                let status = if code == "login_required" {
-                    let _ = self
-                        .mark_login_required(
-                            &account.id,
-                            &format!("browserless adapter login required: {message}"),
-                        )
+            Err(error) => {
+                drop(permit);
+                match &error {
+                    BrowserProviderError::AdapterIncompatible { code, message, .. } => {
+                        let status = if code == "login_required" {
+                            let _ = self
+                                .mark_login_required(
+                                    &account.id,
+                                    &format!("browserless adapter login required: {message}"),
+                                )
+                                .await;
+                            "login_required"
+                        } else if code == "browser_challenge_required" {
+                            "browser_fallback_required"
+                        } else {
+                            "adapter_incompatible"
+                        };
+                        self.cache_diagnostics(BrowserAdapterDiagnostics {
+                            account_id: account.id.clone(),
+                            provider_kind: provider.kind.clone(),
+                            adapter_id: Some(used_adapter.adapter_id().to_string()),
+                            adapter_version: None,
+                            contract_version: None,
+                            expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+                            status: status.into(),
+                            message: format!("{code}: {message}"),
+                            page_signature: None,
+                            target_url_prefix: effective_target_url_prefix(
+                                &provider.kind,
+                                &binding,
+                            ),
+                            configured_models: binding.models.clone(),
+                        })
                         .await;
-                    "login_required"
-                } else if code == "browser_challenge_required" {
-                    "browser_fallback_required"
-                } else {
-                    "adapter_incompatible"
-                };
-                self.cache_diagnostics(BrowserAdapterDiagnostics {
-                    account_id: account.id.clone(),
-                    provider_kind: provider.kind.clone(),
-                    adapter_id: Some(used_adapter.adapter_id().to_string()),
-                    adapter_version: None,
-                    contract_version: None,
-                    expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
-                    status: status.into(),
-                    message: format!("{code}: {message}"),
-                    page_signature: None,
-                    target_url_prefix: effective_target_url_prefix(&provider.kind, &binding),
-                    configured_models: binding.models.clone(),
-                })
-                .await;
+                    }
+                    BrowserProviderError::SessionUnavailable { .. }
+                    | BrowserProviderError::Transport(_)
+                        if used_adapter.is_cdp() =>
+                    {
+                        let error_text = error.to_string();
+                        let _ = self.mark_degraded(&account.id, &error_text).await;
+                    }
+                    _ => {}
+                }
+                Err(error)
             }
-            Err(BrowserProviderError::SessionUnavailable { .. })
-            | Err(BrowserProviderError::Transport(_))
-                if used_adapter.is_cdp() =>
-            {
-                let error_text = result
-                    .as_ref()
-                    .err()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "browser CDP runtime unavailable".into());
-                let _ = self.mark_degraded(&account.id, &error_text).await;
-            }
-            _ => {}
         }
-        result
+    }
+
+    async fn acquire_account_permit(
+        &self,
+        account_id: &str,
+        max_concurrency: Option<usize>,
+    ) -> Result<OwnedSemaphorePermit, BrowserProviderError> {
+        let concurrency = max_concurrency.unwrap_or(2).max(1);
+        let semaphore = {
+            let read = self.account_semaphores.read().await;
+            if let Some(sem) = read.get(account_id).cloned() {
+                sem
+            } else {
+                drop(read);
+                let mut write = self.account_semaphores.write().await;
+                write
+                    .entry(account_id.to_string())
+                    .or_insert_with(|| Arc::new(Semaphore::new(concurrency)))
+                    .clone()
+            }
+        };
+        semaphore
+            .acquire_owned()
+            .await
+            .map_err(|_| BrowserProviderError::Transport("account semaphore closed".into()))
     }
 }
 
@@ -1532,6 +1580,33 @@ fn wrap_response_with_browser_stop(
     let guard = BrowserFallbackStopGuard::new(session_id);
     let stream = async_stream::stream! {
         let _guard = guard;
+        let mut body = response.bytes_stream();
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => yield Ok::<Bytes, std::io::Error>(bytes),
+                Err(error) => {
+                    yield Err(std::io::Error::other(error.to_string()));
+                    break;
+                }
+            }
+        }
+    };
+    let mut wrapped = HttpResponse::builder()
+        .status(status)
+        .body(reqwest::Body::wrap_stream(stream))
+        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+    *wrapped.headers_mut() = headers;
+    Ok(reqwest::Response::from(wrapped))
+}
+
+fn wrap_response_with_permit(
+    response: reqwest::Response,
+    permit: OwnedSemaphorePermit,
+) -> Result<reqwest::Response, BrowserProviderError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let stream = async_stream::stream! {
+        let _permit = permit;
         let mut body = response.bytes_stream();
         while let Some(chunk) = body.next().await {
             match chunk {
@@ -4341,6 +4416,8 @@ mod tests {
             response_timeout_ms: Some(1_000),
             first_byte_timeout_ms: Some(1_000),
             idle_stream_timeout_ms: Some(1_000),
+            max_prompt_chars: None,
+            max_concurrency: None,
         }
     }
 
@@ -4522,6 +4599,8 @@ mod browser_transport_policy_tests {
             response_timeout_ms: None,
             first_byte_timeout_ms: None,
             idle_stream_timeout_ms: None,
+            max_prompt_chars: None,
+            max_concurrency: None,
         }
     }
 
@@ -4640,6 +4719,8 @@ mod browser_transport_policy_tests {
                 response_timeout_ms: None,
                 first_byte_timeout_ms: None,
                 idle_stream_timeout_ms: None,
+                max_prompt_chars: None,
+                max_concurrency: None,
             },
         );
         let registry = BrowserProviderRegistry::new(initial).unwrap();
