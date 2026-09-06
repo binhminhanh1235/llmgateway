@@ -38,7 +38,9 @@ The security boundary stays unchanged:
 - CAPTCHA/2FA and normal authentication are completed interactively by the user;
 - browser integrations must respect provider terms, anti-abuse controls and quota limits.
 
-## Current baseline: v0.32
+## Current baseline: v0.32 package + post-v0.32 main
+
+The crate version is still `0.32.0`, but the current `main` branch has accumulated additional shipped capabilities after the original v0.32 milestone. Treat code on `main` as the source of truth until the next release/version bump.
 
 Already implemented:
 
@@ -103,7 +105,46 @@ Already implemented:
 - persisted per-thread/provider/account native conversation URLs with sync cursors;
 - delta replay for provider-missed turns across browser-account failover.
 
-The remaining browser work is now mostly **usage/cost intelligence, broader provider-native conversation support, and production hardening**, rather than browser execution plumbing.
+Post-v0.32 capabilities already present on current `main` also include:
+
+- managed ChatGPT Web in addition to Gemini/Qwen;
+- managed DeepSeek Web and Xiaomi MiMo Studio Web adapters;
+- direct/browserless web transport framework with per-account UI control where supported;
+- authenticated browserless live-acceptance runners, including Qwen and MiMo coverage plus Gemini model-selection acceptance;
+- ordered model groups with hard priority tiers;
+- Model Groups UI for explicit user-controlled fallback order;
+- synchronized enable/disable state across accounts, account models, catalog models and group fallback eligibility;
+- public model discovery filtered to enabled/viable models and groups;
+- account-level enable/disable of all related models;
+- browser/API account deletion lifecycle with config validation and UI/model-picker refresh;
+- startup model refresh behavior that preserves user toggles and reconciles provider model changes;
+- first-class adapter/fixture coverage for ChatGPT, Gemini, Qwen, DeepSeek and MiMo.
+
+The remaining browser work is now mostly **usage/cost intelligence, broader provider-native conversation support, live provider hardening, release/version reconciliation, and production distribution**, rather than basic browser execution plumbing.
+
+---
+
+## Active initiative - Multimodal Gateway (not on main yet)
+
+Multimodal work is intentionally tracked outside the shipped main baseline until final acceptance and merge.
+
+Working branch:
+
+`feat/multimodal-gateway`
+
+Current initiative scope includes:
+
+- ArtifactStore and Files API;
+- general file attachments;
+- image/vision input;
+- voice input and safe voice commands;
+- image generation/editing;
+- capability-aware multimodal routing and UX;
+- live media/file/vision acceptance.
+
+Tracking issues include #69 and P3-P6/final acceptance issues #73-#77.
+
+**Do not describe these capabilities as shipped on `main` until the branch is merged and the final live-acceptance gate is verified.**
 
 ---
 
