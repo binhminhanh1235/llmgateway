@@ -13,6 +13,7 @@
     catalog: [],
     accounts: [],
     pendingImages: [],
+    pendingFiles: [],
     sending: false,
     currentView: "chat",
   };
@@ -27,6 +28,7 @@
     saveKeyButton: el("saveKeyButton"), authError: el("authError"), statusDot: el("statusDot"),
     statusText: el("statusText"), changeKeyButton: el("changeKeyButton"), routeNotice: el("routeNotice"),
     imageFileInput: el("imageFileInput"), attachImageButton: el("attachImageButton"),
+    documentFileInput: el("documentFileInput"), attachFileButton: el("attachFileButton"),
     attachmentPreview: el("attachmentPreview"), composerDropZone: el("composerDropZone"), composerHelp: el("composerHelp"),
     accountsContent: el("accountsContent"), modelsContent: el("modelsContent"),
     refreshAccountsButton: el("refreshAccountsButton"), modelCatalogSearch: el("modelCatalogSearch"), toast: el("toast"),
@@ -284,62 +286,133 @@
   function scrollMessages() { requestAnimationFrame(() => { elements.messages.scrollTop = elements.messages.scrollHeight; }); }
   function autoGrowComposer() { const input = elements.composerInput; input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; }
 
-  function selectedModelSupportsImages() {
+  function selectedModelInputModalities() {
     const modelId = activeThread()?.model || "llmgateway-auto";
     const model = state.models.find((candidate) => candidate.id === modelId);
     const inputs = model?.llmgateway?.multimodal_capabilities?.input_modalities;
-    return Array.isArray(inputs) && inputs.includes("image");
+    return Array.isArray(inputs) ? inputs : [];
+  }
+
+  function selectedModelSupportsImages() {
+    return selectedModelInputModalities().includes("image");
+  }
+
+  function selectedModelSupportsFiles() {
+    return selectedModelInputModalities().includes("file");
+  }
+
+  function isNativeDocument(file) {
+    const mime = String(file?.type || "").toLowerCase();
+    const name = String(file?.name || "").toLowerCase();
+    return mime === "application/pdf"
+      || mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      || name.endsWith(".pdf")
+      || name.endsWith(".docx");
+  }
+
+  function isSupportedDocument(file) {
+    const mime = String(file?.type || "").toLowerCase();
+    const name = String(file?.name || "").toLowerCase();
+    return [
+      "application/pdf",
+      "text/plain",
+      "text/markdown",
+      "text/csv",
+      "application/json",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ].includes(mime)
+      || [".pdf", ".txt", ".md", ".markdown", ".docx", ".csv", ".json"].some((extension) => name.endsWith(extension));
   }
 
   function syncComposerCapabilities() {
     const supportsImages = selectedModelSupportsImages();
-    const busyImages = state.pendingImages.some((item) => item.uploading);
-    const failedImages = state.pendingImages.some((item) => item.error);
+    const supportsFiles = selectedModelSupportsFiles();
+    const allPending = [...state.pendingImages, ...state.pendingFiles];
+    const busy = allPending.some((item) => item.uploading);
+    const failed = allPending.some((item) => item.error);
+    const blockedNativeFiles = state.pendingFiles.some((item) => isNativeDocument(item.file) && !supportsFiles);
     if (elements.attachImageButton) {
       elements.attachImageButton.disabled = state.sending || !supportsImages;
       elements.attachImageButton.title = supportsImages
         ? "Attach image"
         : "The selected model has no verified image-input route";
     }
+    if (elements.attachFileButton) {
+      elements.attachFileButton.disabled = state.sending;
+      elements.attachFileButton.title = supportsFiles
+        ? "Attach PDF, DOCX, TXT, Markdown, CSV, or JSON"
+        : "Attach TXT/Markdown/CSV/JSON; PDF/DOCX require a file-capable model";
+    }
     if (elements.composerHelp) {
-      elements.composerHelp.textContent = supportsImages
-        ? "Enter to send · Shift+Enter for a new line · Paste or drop images"
-        : "Enter to send · Shift+Enter for a new line · Image input unavailable for this model";
+      if (supportsImages && supportsFiles) {
+        elements.composerHelp.textContent = "Enter to send · Shift+Enter for a new line · Paste images or drop attachments";
+      } else if (supportsImages) {
+        elements.composerHelp.textContent = "Images + text documents available · PDF/DOCX require a file-capable model";
+      } else if (supportsFiles) {
+        elements.composerHelp.textContent = "Documents available · Image input unavailable for this model";
+      } else {
+        elements.composerHelp.textContent = "Text documents use safe extraction · Image/PDF/DOCX unavailable for this model";
+      }
     }
     if (elements.sendButton && !state.sending) {
-      elements.sendButton.disabled = busyImages || failedImages || (state.pendingImages.length > 0 && !supportsImages);
+      elements.sendButton.disabled = busy
+        || failed
+        || blockedNativeFiles
+        || (state.pendingImages.length > 0 && !supportsImages);
     }
     renderAttachmentPreview();
   }
 
   function renderAttachmentPreview() {
     if (!elements.attachmentPreview) return;
-    if (!state.pendingImages.length) {
+    const pending = [
+      ...state.pendingImages.map((item) => ({ ...item, attachmentKind: "image" })),
+      ...state.pendingFiles.map((item) => ({ ...item, attachmentKind: "file" })),
+    ];
+    if (!pending.length) {
       elements.attachmentPreview.innerHTML = "";
       elements.attachmentPreview.classList.add("hidden");
       return;
     }
     elements.attachmentPreview.classList.remove("hidden");
-    elements.attachmentPreview.innerHTML = state.pendingImages.map((item) => {
-      const stateText = item.error ? item.error : (item.uploading ? "Uploading…" : "Ready");
-      const tone = item.error ? " error" : "";
-      return `<div class="attachment-chip" data-pending-image="${escapeAttr(item.localId)}">
-        <img src="${escapeAttr(item.previewUrl)}" alt="" />
+    elements.attachmentPreview.innerHTML = pending.map((item) => {
+      const nativeBlocked = item.attachmentKind === "file"
+        && isNativeDocument(item.file)
+        && !selectedModelSupportsFiles();
+      const stateText = item.error
+        ? item.error
+        : item.uploading
+          ? "Uploading…"
+          : nativeBlocked
+            ? "Choose a file-capable model"
+            : item.attachmentKind === "file" && !isNativeDocument(item.file)
+              ? "Ready · text extraction fallback"
+              : "Ready";
+      const tone = item.error || nativeBlocked ? " error" : "";
+      const visual = item.attachmentKind === "image"
+        ? `<img src="${escapeAttr(item.previewUrl)}" alt="" />`
+        : `<div class="attachment-file-icon" aria-hidden="true">▤</div>`;
+      const removeAttr = item.attachmentKind === "image" ? "data-remove-image" : "data-remove-file";
+      return `<div class="attachment-chip" data-pending-attachment="${escapeAttr(item.localId)}">
+        ${visual}
         <div class="attachment-copy">
           <div class="attachment-name">${escapeHtml(item.file.name)}</div>
           <div class="attachment-state${tone}">${escapeHtml(stateText)}</div>
         </div>
-        <button type="button" class="attachment-remove" data-remove-image="${escapeAttr(item.localId)}" title="Remove image">×</button>
+        <button type="button" class="attachment-remove" ${removeAttr}="${escapeAttr(item.localId)}" title="Remove attachment">×</button>
       </div>`;
     }).join("");
     elements.attachmentPreview.querySelectorAll("[data-remove-image]").forEach((button) => {
       button.addEventListener("click", () => removePendingImage(button.dataset.removeImage));
     });
+    elements.attachmentPreview.querySelectorAll("[data-remove-file]").forEach((button) => {
+      button.addEventListener("click", () => removePendingFile(button.dataset.removeFile));
+    });
   }
 
-  async function uploadPendingImage(item) {
+  async function uploadPendingAttachment(item, purpose) {
     const form = new FormData();
-    form.append("purpose", "vision");
+    form.append("purpose", purpose);
     form.append("file", item.file, item.file.name);
     try {
       const response = await apiFetch("/v1/files", { method: "POST", body: form });
@@ -355,6 +428,10 @@
     syncComposerCapabilities();
   }
 
+  async function uploadPendingImage(item) {
+    return uploadPendingAttachment(item, "vision");
+  }
+
   function addPendingImages(files) {
     if (!selectedModelSupportsImages()) {
       toast("Choose a model with image input before attaching an image.");
@@ -362,7 +439,7 @@
     }
     const images = [...files].filter((file) => String(file.type || "").startsWith("image/"));
     if (!images.length) return;
-    const available = Math.max(0, 8 - state.pendingImages.length);
+    const available = Math.max(0, 8 - state.pendingImages.length - state.pendingFiles.length);
     for (const file of images.slice(0, available)) {
       const item = {
         localId: uid(),
@@ -375,7 +452,30 @@
       state.pendingImages.push(item);
       void uploadPendingImage(item);
     }
-    if (images.length > available) toast("Up to 8 images can be attached at once.");
+    if (images.length > available) toast("Up to 8 attachments can be queued at once.");
+    syncComposerCapabilities();
+  }
+
+  function addPendingFiles(files) {
+    const documents = [...files].filter((file) => isSupportedDocument(file) && !String(file.type || "").startsWith("image/"));
+    if (!documents.length) return;
+    const native = documents.filter(isNativeDocument);
+    if (native.length && !selectedModelSupportsFiles()) {
+      toast("PDF/DOCX need a model with file input. Text documents can still use extraction fallback.");
+    }
+    const available = Math.max(0, 8 - state.pendingImages.length - state.pendingFiles.length);
+    for (const file of documents.slice(0, available)) {
+      const item = {
+        localId: uid(),
+        file,
+        fileId: null,
+        uploading: true,
+        error: "",
+      };
+      state.pendingFiles.push(item);
+      void uploadPendingAttachment(item, "assistants");
+    }
+    if (documents.length > available) toast("Up to 8 attachments can be queued at once.");
     syncComposerCapabilities();
   }
 
@@ -390,9 +490,20 @@
     syncComposerCapabilities();
   }
 
-  function clearPendingImagesAfterSend() {
+  async function removePendingFile(localId) {
+    const index = state.pendingFiles.findIndex((item) => item.localId === localId);
+    if (index < 0) return;
+    const [item] = state.pendingFiles.splice(index, 1);
+    if (item.fileId) {
+      try { await apiFetch(`/v1/files/${encodeURIComponent(item.fileId)}`, { method: "DELETE" }); } catch (_) {}
+    }
+    syncComposerCapabilities();
+  }
+
+  function clearPendingAttachmentsAfterSend() {
     for (const item of state.pendingImages) URL.revokeObjectURL(item.previewUrl);
     state.pendingImages = [];
+    state.pendingFiles = [];
     syncComposerCapabilities();
   }
 
@@ -418,15 +529,20 @@
   async function sendMessage() {
     if (state.sending) return;
     const content = elements.composerInput.value.trim();
-    const attached = state.pendingImages.slice();
+    const attachedImages = state.pendingImages.slice();
+    const attachedFiles = state.pendingFiles.slice();
+    const attached = [...attachedImages, ...attachedFiles];
     if (!content && !attached.length) return;
     if (!state.apiKey) return openAuthModal();
-    if (attached.some((item) => item.uploading)) return toast("Image upload is still in progress.");
-    if (attached.some((item) => item.error || !item.fileId)) return toast("Remove or retry failed image uploads before sending.");
-    if (attached.length && !selectedModelSupportsImages()) return toast("The selected model does not support image input.");
+    if (attached.some((item) => item.uploading)) return toast("Attachment upload is still in progress.");
+    if (attached.some((item) => item.error || !item.fileId)) return toast("Remove or retry failed attachment uploads before sending.");
+    if (attachedImages.length && !selectedModelSupportsImages()) return toast("The selected model does not support image input.");
+    if (attachedFiles.some((item) => isNativeDocument(item.file)) && !selectedModelSupportsFiles()) {
+      return toast("The selected model does not support native PDF/DOCX input.");
+    }
 
     let thread = ensureThread();
-    const titleSource = content || attached[0]?.file?.name || "Image";
+    const titleSource = content || attached[0]?.file?.name || "Attachment";
     try { thread = await materializeDraft(thread, titleSource); }
     catch (error) { return toast(error.message || String(error)); }
 
@@ -437,7 +553,8 @@
 
     const requestContent = [];
     if (content) requestContent.push({ type: "input_text", text: content });
-    for (const item of attached) requestContent.push({ type: "input_image", file_id: item.fileId });
+    for (const item of attachedImages) requestContent.push({ type: "input_image", file_id: item.fileId });
+    for (const item of attachedFiles) requestContent.push({ type: "input_file", file_id: item.fileId });
     const userDisplay = [content, ...attached.map((item) => `📎 ${item.file.name}`)].filter(Boolean).join("\n\n");
     const userMessage = { id: uid(), role: "user", content: userDisplay, createdAt: Date.now() };
     const assistantMessage = { id: uid(), role: "assistant", content: "", createdAt: Date.now(), pending: true, route: "" };
@@ -459,7 +576,7 @@
       });
       assistantMessage.route = response.headers.get("x-llmgateway-route") || "";
       if (!response.ok) throw new Error(extractError(await response.text(), response.status));
-      clearPendingImagesAfterSend();
+      clearPendingAttachmentsAfterSend();
       if (!response.body) throw new Error("Gateway returned an empty stream");
       await consumeOpenAiStream(response.body, (delta) => {
         assistantMessage.content += delta;
@@ -807,6 +924,11 @@
       addPendingImages(elements.imageFileInput.files || []);
       elements.imageFileInput.value = "";
     });
+    elements.attachFileButton.addEventListener("click", () => elements.documentFileInput.click());
+    elements.documentFileInput.addEventListener("change", () => {
+      addPendingFiles(elements.documentFileInput.files || []);
+      elements.documentFileInput.value = "";
+    });
     elements.composerDropZone.addEventListener("dragover", (event) => {
       event.preventDefault();
       elements.composerDropZone.classList.add("drag-active");
@@ -815,7 +937,9 @@
     elements.composerDropZone.addEventListener("drop", (event) => {
       event.preventDefault();
       elements.composerDropZone.classList.remove("drag-active");
-      addPendingImages(event.dataTransfer?.files || []);
+      const dropped = event.dataTransfer?.files || [];
+      addPendingImages(dropped);
+      addPendingFiles(dropped);
     });
     elements.composerInput.addEventListener("paste", (event) => {
       const images = [...(event.clipboardData?.files || [])].filter((file) => String(file.type || "").startsWith("image/"));
