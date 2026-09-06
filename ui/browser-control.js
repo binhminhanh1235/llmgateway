@@ -112,7 +112,7 @@
         <div class="browser-empty-icon">◎</div>
         <div>
           <strong>No browser accounts yet</strong>
-          <p>Create a ChatGPT, Gemini, Qwen, or DeepSeek browser account. llmgateway will generate the linked session, provider, route, and isolated profile configuration for you.</p>
+          <p>Create a ChatGPT, Gemini, Qwen, DeepSeek, or Xiaomi MiMo browser account. llmgateway will generate the linked session, provider, route, and isolated profile configuration for you.</p>
           <button type="button" class="browser-primary-action" data-open-browser-wizard>+ Add browser account</button>
         </div>
         <span class="browser-empty-meta">${summary?.profile_root ? `Profiles: ${escapeHtml(summary.profile_root)}` : "Isolated profiles"}</span>
@@ -247,6 +247,7 @@
       { id: "gemini", label: "Gemini Web", default_model_id: "gemini-web-default" },
       { id: "qwen", label: "Qwen Web", default_model_id: "qwen-web-default" },
       { id: "deepseek", label: "DeepSeek Web", default_model_id: "deepseek-web-default" },
+      { id: "mimo", label: "Xiaomi MiMo Web", default_model_id: "mimo-web-default" },
     ];
     const presets = providerPresets.length ? providerPresets : fallback;
     picker.innerHTML = presets.map((preset) => `
