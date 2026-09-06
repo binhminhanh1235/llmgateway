@@ -309,7 +309,6 @@ pub async fn image_edits(
             &input.bytes,
         )
         .await
-    .await
     {
         return json_error(
             StatusCode::BAD_REQUEST,
