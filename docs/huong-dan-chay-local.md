@@ -20,28 +20,35 @@ Sau khi hoàn tất tài liệu này, bạn có thể:
 
 ## 2. Prerequisites
 
-### Bắt buộc
+### Nếu dùng release binary
 
-- Git
-- Rust stable + Cargo
-- curl
+Chỉ cần:
 
-### Khi dùng browser accounts
+- file `llmgateway` hoặc `llmgateway.exe`;
+- config/env local;
+- một browser tương thích nếu dùng browser account.
 
-- Google Chrome hoặc Chromium-compatible browser
-- GUI session để đăng nhập provider lần đầu
+Không cần Python, Node.js, pip hoặc npm để chạy application.
 
-### Khi chạy test đầy đủ
+Browser runtime được phát hiện tự động trong WebUI. Auto priority:
 
-- Node.js 20+
-- Python 3
-- Bash
-- Docker
+1. Google Chrome;
+2. Microsoft Edge;
+3. Brave;
+4. Chromium.
 
-Windows có thể dùng:
+### Nếu build/test từ source
 
-- PowerShell cho native Rust
-- Git Bash hoặc WSL cho các `.sh` smoke tests
+- Git;
+- Rust stable + Cargo;
+- curl;
+- Node.js cho UI/adapter fixtures;
+- Python 3 cho fake provider/stress/acceptance tools;
+- Bash hoặc PowerShell;
+- Docker nếu test container.
+
+Python và Node chỉ phục vụ development/CI, không nằm trong production runtime path.
+
 
 ## 3. Clone và checkout main
 
@@ -178,68 +185,71 @@ PowerShell:
 $env:LLMGATEWAY_API_KEY="local_secret_change_me"
 ```
 
-## 9. Thêm browser account
+## 9. Chọn browser runtime và thêm browser account
 
-Mở UI → **Accounts** → **Add browser account**.
+Mở UI → **Accounts**.
+
+Phía trên browser accounts có **Browser runtime** selector.
+
+llmgateway quét browser đã cài trên máy và hiển thị các lựa chọn tương thích:
+
+- Google Chrome;
+- Microsoft Edge;
+- Brave;
+- Chromium.
+
+Chế độ **Auto** ưu tiên Google Chrome. Khi user đổi browser, lựa chọn được persist vào config và hot-reload; không cần restart llmgateway. Browser đang chạy không bị cưỡng bức đổi giữa phiên, lựa chọn áp dụng từ lần launch tiếp theo.
+
+Sau đó chọn **Add browser account**.
 
 Managed presets:
 
-- ChatGPT
-- Gemini
-- DeepSeek
-- Xiaomi MiMo
-- Qwen
+- ChatGPT;
+- Gemini;
+- DeepSeek;
+- Xiaomi MiMo;
+- Qwen.
 
 Flow:
 
-1. chọn provider;
-2. đặt account ID/label nếu cần;
-3. tạo account;
-4. bấm Login/Open browser;
-5. đăng nhập provider;
-6. hoàn thành CAPTCHA/2FA/passkey thủ công;
-7. verify session;
-8. refresh model;
-9. bật model muốn dùng;
-10. test chat.
+1. chọn browser runtime hoặc để Auto;
+2. chọn provider;
+3. đặt account ID/label nếu cần;
+4. tạo account;
+5. bấm Login/Open browser;
+6. đăng nhập provider trong browser đã chọn;
+7. hoàn thành CAPTCHA/2FA/passkey thủ công;
+8. verify session;
+9. refresh model;
+10. bật model muốn dùng;
+11. test chat.
 
-Browser profile được tách biệt theo session/account.
+Mỗi account vẫn có isolated browser profile riêng.
 
-## 10. Nếu Chromium không tự tìm thấy
+## 10. Browser không được phát hiện
 
-Trong `config/llmgateway.toml`:
+Ưu tiên xử lý từ **Accounts → Browser runtime** trước.
+
+Nếu danh sách rỗng:
+
+1. kiểm tra Chrome/Edge/Brave/Chromium đã cài thật;
+2. restart llmgateway nếu browser vừa được cài sau khi process đã khởi động;
+3. nếu cần tương thích config cũ, có thể đặt executable thủ công trong `[chromium]`.
+
+Ví dụ legacy-compatible config:
 
 ```toml
 [chromium]
 enabled = true
-executable = "/duong/dan/toi/chrome"
+executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 startup_timeout_seconds = 15
 auto_recover = true
 reconcile_interval_seconds = 15
 extra_args = []
 ```
 
-macOS thường gặp:
+Tên section `[chromium]` hiện được giữ để backward compatibility. User-facing runtime không bị khóa vào Chromium; WebUI có thể chọn Chrome, Edge, Brave hoặc Chromium.
 
-```text
-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
-```
-
-Linux thường gặp:
-
-```text
-/usr/bin/google-chrome
-/usr/bin/chromium
-/usr/bin/chromium-browser
-```
-
-Windows ví dụ:
-
-```toml
-executable = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-```
-
-Sau khi sửa config, restart gateway nếu thay đổi đó chưa được hot-reload bởi flow UI tương ứng.
 
 ## 11. Browserless
 
@@ -254,7 +264,7 @@ Browserless chỉ khả dụng khi adapter/provider công bố support.
 
 UI Accounts có toggle khi supported.
 
-Để test, stop Chromium rồi gửi request. Nếu direct transport hoạt động, request vẫn thành công mà browser process không cần chạy.
+Để test, stop browser rồi gửi request. Nếu direct transport hoạt động, request vẫn thành công mà browser process không cần chạy.
 
 Live runner tổng quát:
 
@@ -413,21 +423,24 @@ node scripts/test-status-sync-ui.mjs
 bash scripts/smoke-model-groups.sh
 ```
 
-## 17.1 Dùng AI Agent Skill
+## 17.1 Dùng AI Agent Skill và MCP native
 
-Agent-Native P0 đã có trên `main`.
+P0 Skill đã ship trên main. PR #93 chuyển runtime helper/MCP sang cùng Rust executable và thêm P1-P3; chưa merge vào main tại thời điểm tài liệu feature branch này được viết.
 
-Bundle:
+Skill bundle không còn script Python:
 
 ```text
 skills/llmgateway/
 ├── SKILL.md
-├── references/
-├── scripts/llmgateway_agent.py
-└── tests/test_llmgateway_agent.py
+└── references/
+    ├── api.md
+    ├── diagnostics.md
+    ├── mcp.md
+    ├── operations.md
+    └── routing.md
 ```
 
-Thiết lập env:
+Thiết lập:
 
 ```bash
 export LLMGATEWAY_CLIENT_API_KEY="client-key"
@@ -435,31 +448,43 @@ export LLMGATEWAY_API_KEY="admin-key"
 export LLMGATEWAY_BASE_URL="http://127.0.0.1:7331"
 ```
 
-Smoke nhanh:
+Native Agent CLI:
 
 ```bash
-python3 skills/llmgateway/scripts/llmgateway_agent.py health
-python3 skills/llmgateway/scripts/llmgateway_agent.py models
-# P1-P3 feature branch:
-python3 skills/llmgateway/scripts/llmgateway_agent.py capabilities
-python3 skills/llmgateway/scripts/llmgateway_agent.py resolve --model llmgateway-auto --capability coding --prompt "coding task"
-python3 skills/llmgateway/scripts/llmgateway_agent.py responses llmgateway-auto "hello" --capability coding
-python3 skills/llmgateway/scripts/llmgateway_agent.py diagnostics --model llmgateway-auto --capability coding
+llmgateway agent health
+llmgateway agent models
+llmgateway agent capabilities
+llmgateway agent resolve --model llmgateway-auto --capability coding --prompt "coding task"
+llmgateway agent responses llmgateway-auto "hello" --capability coding
+llmgateway agent diagnostics --model llmgateway-auto --capability coding
 ```
 
-Test helper/bundle:
+MCP HTTP chạy cùng gateway:
+
+```text
+POST http://127.0.0.1:7331/mcp
+```
+
+MCP stdio-only host dùng cùng binary:
 
 ```bash
-python3 -m unittest \
-  skills/llmgateway/tests/test_llmgateway_agent.py \
-  skills/llmgateway/tests/test_llmgateway_mcp.py
+llmgateway mcp --stdio
 ```
 
-Helper chỉ expose READ + EXECUTE. Enable/disable/delete và các mutation quản trị vẫn phải đi qua UI/admin API với đúng authorization.
+Không cần Python/pip/Node/npm cho Agent hoặc MCP runtime.
 
-Nếu dùng Agent Skills-compatible client, copy/import toàn bộ folder `skills/llmgateway`, không chỉ riêng `SKILL.md`.
+Dedicated test:
 
-Xem thêm: [agent-native-gateway.md](agent-native-gateway.md).
+```bash
+bash scripts/smoke-agent-control.sh
+bash scripts/smoke-native-agent-mcp.sh
+```
+
+Native Agent/MCP chỉ expose READ + EXECUTE và non-mutating diagnostics. Enable/disable/delete/browser selection vẫn thuộc UI/admin/operator surface.
+
+Nếu dùng Agent Skills-compatible client, copy/import toàn bộ folder `skills/llmgateway`.
+
+Xem thêm: [agent-native-gateway.md](agent-native-gateway.md) và [mcp-server.md](mcp-server.md).
 
 ## 18. Basic Rust quality gate
 
@@ -489,7 +514,6 @@ node --check adapters/deepseek-web.js
 node --check adapters/mimo-web.js
 
 node scripts/test-browser-adapter-fixtures.mjs
-python3 -m unittest skills/llmgateway/tests/test_llmgateway_agent.py
 ```
 
 ## 20. Shell syntax checks
@@ -561,7 +585,7 @@ docker build -t llmgateway:ci .
 
 Native browser-account workflow phù hợp hơn container nếu bạn cần:
 
-- visible Chromium window;
+- visible browser window;
 - interactive login;
 - persistent local browser profiles.
 
@@ -629,7 +653,7 @@ Kiểm tra theo thứ tự:
 1. account enabled?
 2. model enabled?
 3. browser session state?
-4. Chromium process đang chạy?
+4. browser process đang chạy?
 5. CDP reachable?
 6. login còn hiệu lực?
 7. adapter probe healthy?
