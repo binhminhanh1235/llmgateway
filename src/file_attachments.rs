@@ -496,6 +496,47 @@ mod tests {
         assert!(native_file_mime_supported("application/pdf"));
     }
 
+    fn extraction_record(mime_type: &str) -> ArtifactRecord {
+        ArtifactRecord {
+            id: "file_guard".into(),
+            filename: "guard.txt".into(),
+            mime_type: mime_type.into(),
+            size_bytes: 0,
+            sha256: "sha".into(),
+            purpose: "assistants".into(),
+            source: "test".into(),
+            lifecycle_state: "active".into(),
+            created_at: "now".into(),
+        }
+    }
+
+    #[test]
+    fn extraction_guardrails_reject_oversize_bytes_and_characters() {
+        let record = extraction_record("text/plain");
+        let too_many_bytes = vec![b'a'; MAX_EXTRACTED_FILE_BYTES + 1];
+        assert!(matches!(
+            extract_text(&record, &too_many_bytes),
+            Err(FileAttachmentError::ExtractionTooLarge(id)) if id == "file_guard"
+        ));
+
+        let too_many_characters = "é".repeat(MAX_EXTRACTED_CHARS + 1);
+        assert!(too_many_characters.len() <= MAX_EXTRACTED_FILE_BYTES);
+        assert!(matches!(
+            extract_text(&record, too_many_characters.as_bytes()),
+            Err(FileAttachmentError::ExtractionTooLarge(id)) if id == "file_guard"
+        ));
+    }
+
+    #[test]
+    fn json_extraction_rejects_invalid_documents() {
+        let record = extraction_record("application/json");
+        assert!(matches!(
+            extract_text(&record, br#"{"broken":"#),
+            Err(FileAttachmentError::InvalidRequest(message))
+                if message.contains("JSON file 'file_guard' is invalid")
+        ));
+    }
+
     #[test]
     fn file_artifact_collection_does_not_capture_image_uris() {
         let body = json!({
