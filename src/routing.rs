@@ -289,20 +289,22 @@ impl Router {
             let task_adjustment = task_fit.snapshot.adjustment;
             let mut exclusion_reasons = Vec::new();
             let mut warnings = Vec::new();
-            let model_enabled = catalog_snapshot
+            let (model_enabled, model_binding_enabled) = catalog_snapshot
                 .as_ref()
                 .and_then(|models| {
                     let account = config.account(&route.account)?;
                     let model = models.iter().find(|model| {
                         model.provider == account.provider && model.external_id == route.model
                     })?;
-                    model
+                    let binding_enabled = model
                         .accounts
                         .iter()
                         .find(|binding| binding.account_id == route.account)
                         .map(|binding| binding.enabled)
+                        .unwrap_or(true);
+                    Some((model.enabled, binding_enabled))
                 })
-                .unwrap_or(true);
+                .unwrap_or((true, true));
 
             if !group_enabled {
                 push_unique(&mut exclusion_reasons, "group_disabled");
@@ -312,6 +314,9 @@ impl Router {
             }
             if !model_enabled {
                 push_unique(&mut exclusion_reasons, "model_disabled");
+            }
+            if !model_binding_enabled {
+                push_unique(&mut exclusion_reasons, "model_binding_disabled");
             }
             if transport == "browser"
                 && browser_provider_runtime::get()
@@ -703,7 +708,8 @@ impl Router {
         let mut routes = Vec::new();
         let mut seen = HashSet::new();
         for model in models.into_iter().filter(|model| {
-            model.external_id == external_id
+            model.enabled
+                && model.external_id == external_id
                 && provider_filter.is_none_or(|provider| model.provider == provider)
         }) {
             for binding in model.accounts.into_iter().filter(|binding| {
