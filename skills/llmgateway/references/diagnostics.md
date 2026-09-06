@@ -24,7 +24,9 @@ With admin access, inspect models, accounts and model groups.
 
 ## 3. Model exists but route fails
 
-Run route explain for the same logical model and representative task.
+First call `POST /_llmgateway/agent/diagnostics` with the same model, task, capability and context requirements. This endpoint is client-scoped and reports normalized blocking reasons without needing the admin key.
+
+Use admin route explain only when deeper candidate scoring/readiness detail is necessary.
 
 Inspect exclusion/reason fields for:
 
