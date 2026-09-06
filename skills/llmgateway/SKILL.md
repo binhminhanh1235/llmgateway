@@ -36,15 +36,19 @@ Never print, echo, serialize, commit, or return credential values.
 
 1. Run health:
    `python3 skills/llmgateway/scripts/llmgateway_agent.py health`
-2. Discover client-visible models:
-   `python3 skills/llmgateway/scripts/llmgateway_agent.py models`
-3. Pick a logical model/group if available.
-4. For a coding/reasoning task, use route explain only when an admin key is available and diagnostics are actually useful:
-   `python3 skills/llmgateway/scripts/llmgateway_agent.py explain llmgateway-auto --prompt "task summary"`
-5. Execute through Responses, Chat Completions, or Anthropic Messages.
+2. Discover client-visible capability/model metadata:
+   `python3 skills/llmgateway/scripts/llmgateway_agent.py capabilities`
+3. Resolve semantic requirements through the gateway Router:
+   `python3 skills/llmgateway/scripts/llmgateway_agent.py resolve --model llmgateway-auto --capability coding --capability reasoning --prompt "task summary"`
+4. Execute with the **same requirements**, for example:
+   `python3 skills/llmgateway/scripts/llmgateway_agent.py responses llmgateway-auto "task" --capability coding --capability reasoning`
+5. If resolution is blocked, use client-scoped diagnostics:
+   `python3 skills/llmgateway/scripts/llmgateway_agent.py diagnostics --model llmgateway-auto --capability coding`
+6. Use admin route explain/account/browser diagnostics only when deeper operator evidence is needed.
 
 Read [references/routing.md](references/routing.md) before making model-selection decisions.
-Read [references/api.md](references/api.md) for endpoint and protocol details.
+Read [references/api.md](references/api.md) for endpoint details.
+Read [references/mcp.md](references/mcp.md) when connecting an MCP host.
 
 ## Protocol choice
 
@@ -62,12 +66,13 @@ When a request fails, do not immediately switch providers.
 Follow this sequence:
 
 1. health;
-2. client-visible models;
-3. route explain for the requested logical model;
-4. account/model/group state;
-5. account intelligence and execution trace;
-6. provider/browser diagnostics when the selected route is browser-backed;
-7. retry only when the failure is classified as retryable.
+2. client-visible capability/model metadata;
+3. client-scoped Agent diagnostics for the same requirements;
+4. route explain only when deeper admin evidence is needed;
+5. account/model/group state;
+6. account intelligence and execution trace;
+7. provider/browser diagnostics when the selected route is browser-backed;
+8. retry only when the failure is classified as retryable.
 
 Read [references/diagnostics.md](references/diagnostics.md) for the full decision tree.
 
