@@ -74,7 +74,9 @@ Admin state endpoints:
 - `PATCH /_llmgateway/models/{canonical_model_id}` with `{"enabled":true|false}`;
 - `PATCH /_llmgateway/model-groups/{group_id}` with `{"enabled":true|false}`.
 
-The built-in Accounts, Models, and Groups screens expose the same controls as toggle switches and provide **All / Enabled / Disabled** tabs.
+The built-in Accounts, Models, and Groups screens expose the same controls as toggle switches and provide **All / Enabled / Disabled** tabs. **Enabled** is the default tab.
+
+For the Models screen, tab membership follows **effective fallback eligibility**, not only the model's global switch. A model appears under Enabled only when the model is globally enabled and at least one enabled, available binding belongs to an enabled account. Disabling the only eligible account or its model binding therefore moves that physical model to Disabled immediately. The Model Group editor uses the same eligibility rule for its selectable-model list. Existing inactive members remain preserved in the fallback order but are not offered as selectable models until they become eligible again.
 
 ## Observability
 
