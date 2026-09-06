@@ -519,9 +519,10 @@
       }).join("") || '<div class="account-model-row"><div class="model-meta">No models discovered yet</div></div>';
       const transport = accountTransportHtml(account);
       const enabled = account.enabled === true;
-      return `<article class="account-card ${enabled ? "" : "is-disabled"}"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><div class="entity-state-actions"><span class="badge ${enabled ? "available" : "unavailable"}">${enabled ? "Enabled" : "Disabled"}</span><label class="toggle" title="${enabled ? "Disable account routing" : "Enable account routing"}"><input type="checkbox" data-toggle-account-state="${escapeAttr(account.id)}" ${enabled ? "checked" : ""}/><span class="toggle-track"></span></label><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button></div></div>${transport}<div class="account-models">${rows}</div></article>`;
+      return `<article class="account-card ${enabled ? "" : "is-disabled"}"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><div class="entity-state-actions"><span class="badge ${enabled ? "available" : "unavailable"}">${enabled ? "Enabled" : "Disabled"}</span><label class="toggle" title="${enabled ? "Disable account routing" : "Enable account routing"}"><input type="checkbox" data-toggle-account-state="${escapeAttr(account.id)}" ${enabled ? "checked" : ""}/><span class="toggle-track"></span></label><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button><button type="button" class="secondary-button account-delete" data-delete-account="${escapeAttr(account.id)}">Delete</button></div></div>${transport}<div class="account-models">${rows}</div></article>`;
     }).join("")}</div>` : '<div class="loading-box">No accounts in this status</div>';
     elements.accountsContent.querySelectorAll(".refresh-account").forEach((button) => button.addEventListener("click", () => refreshAccountModels(button.dataset.account, button)));
+    elements.accountsContent.querySelectorAll("[data-delete-account]").forEach((button) => button.addEventListener("click", () => deleteAccount(button.dataset.deleteAccount, button)));
     elements.accountsContent.querySelectorAll("[data-toggle-account-state]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleAccountState(checkbox)));
     elements.accountsContent.querySelectorAll("[data-toggle-model]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleAccountModel(checkbox)));
     elements.accountsContent.querySelectorAll("[data-toggle-browserless]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleBrowserless(checkbox)));
@@ -614,6 +615,33 @@
       state.accounts = []; state.catalog = []; await loadModels(); await loadAccounts(true);
     } catch (error) { toast(error.message || String(error)); }
     finally { button.disabled = false; button.textContent = old; }
+  }
+
+  async function deleteAccount(accountId, button) {
+    const confirmed = confirm(
+      `Delete account "${accountId}"? This removes its routes and local browser session data. Model-group model entries are preserved and will be ignored if no enabled account can serve them.`
+    );
+    if (!confirmed) return;
+
+    button.disabled = true;
+    const old = button.textContent;
+    button.textContent = "Deleting…";
+    try {
+      const response = await apiFetch(`/_llmgateway/accounts/${encodeURIComponent(accountId)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      state.accounts = [];
+      state.catalog = [];
+      await loadModels();
+      await loadAccounts(true);
+      window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
+      toast(`Deleted account ${accountId}`);
+    } catch (error) {
+      toast(error.message || String(error));
+      button.disabled = false;
+      button.textContent = old;
+    }
   }
 
   async function toggleAccountState(checkbox) {
@@ -754,6 +782,12 @@
 
   function changeApiKey() { localStorage.removeItem(LOCAL_KEY); sessionStorage.removeItem(SESSION_KEY); state.apiKey = ""; openAuthModal(); }
   function toast(message) { elements.toast.textContent = message; elements.toast.classList.remove("hidden"); clearTimeout(toast.timer); toast.timer = setTimeout(() => elements.toast.classList.add("hidden"), 3200); }
+
+  window.addEventListener("llmgateway:accounts-changed", () => {
+    state.accounts = [];
+    state.catalog = [];
+    if (state.currentView === "accounts") loadAccounts(true);
+  });
 
   function bindEvents() {
     elements.newChatButton.addEventListener("click", createThread);
