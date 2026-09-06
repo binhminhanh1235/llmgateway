@@ -1,47 +1,62 @@
-# llmgateway MCP server
+# Native MCP server
 
-Status: P2 implementation on `feat/agent-native-runtime`; tracking issue #92.
+Tracking: issue #92 / PR #93.
 
-## Goal
+## Single-executable invariant
 
-Expose llmgateway to MCP hosts without teaching each host provider-specific routing or giving it unrestricted admin controls.
+MCP is part of the Rust `llmgateway` executable.
 
-The MCP bridge is dependency-free Python:
+Production/runtime requirements do **not** include:
 
-```text
-skills/llmgateway/mcp/llmgateway_mcp.py
-```
+- Python;
+- pip;
+- Node.js;
+- npm;
+- a separately installed MCP bridge.
 
-## Run
+The old Python proof-of-concept bridge is removed before this work is merged.
 
-Gateway must already be running.
+## HTTP MCP
+
+Start the normal gateway:
 
 ```bash
-export LLMGATEWAY_BASE_URL="http://127.0.0.1:7331"
-export LLMGATEWAY_CLIENT_API_KEY="client-key"
-python3 skills/llmgateway/mcp/llmgateway_mcp.py
+llmgateway
 ```
 
-Use the global admin key only when the client truly needs legacy/admin access. The default MCP tool set does not require admin mutations.
+Endpoint:
 
-## Transport and protocol
+```text
+POST http://127.0.0.1:7331/mcp
+```
 
-The bridge speaks newline-delimited JSON-RPC over stdio.
+The current native HTTP path targets MCP `2026-07-28`.
 
-It supports:
+Modern requests are stateless and validate:
 
-- modern discovery: `server/discover`;
-- legacy initialization: `initialize`;
-- `ping`;
-- `tools/list`;
-- `tools/call`.
+- `MCP-Protocol-Version`;
+- `Mcp-Method`;
+- `Mcp-Name` for tool calls;
+- normal llmgateway client authentication.
 
-Modern discovery advertises protocol `2026-07-28` plus legacy compatibility versions.
+MCP does not create a second authorization model. The same ClientPolicy boundary remains authoritative.
+
+## STDIO compatibility
+
+Hosts that only support stdio can spawn the same binary:
+
+```bash
+export LLMGATEWAY_CLIENT_API_KEY="client-key"
+llmgateway mcp --stdio
+```
+
+The stdio frontend talks to the already-running local gateway using the same Agent Control and compatibility APIs. This keeps one routing engine and one source of truth.
 
 ## Tool surface
 
 | Tool | Permission | Purpose |
 |---|---|---|
+| `llmgateway_health` | READ | gateway health |
 | `llmgateway_capabilities` | READ | client-visible capability/model summary |
 | `llmgateway_resolve` | READ | dry-run Router with semantic requirements |
 | `llmgateway_diagnostics` | READ | normalized blockers and next action |
@@ -50,16 +65,16 @@ Modern discovery advertises protocol `2026-07-28` plus legacy compatibility vers
 | `llmgateway_chat` | EXECUTE | Chat Completions inference |
 | `llmgateway_messages` | EXECUTE | Anthropic Messages inference |
 
-No OPERATE/ADMIN tools are exposed by default.
+No OPERATE/ADMIN mutation tools are exposed.
 
 ## Capability-aware workflow
 
-1. `llmgateway_capabilities`
-2. `llmgateway_resolve` with semantic requirements
-3. execute using the **same** task/capabilities/context requirement
-4. if blocked, `llmgateway_diagnostics`
+1. discover capabilities;
+2. dry-run resolve semantic requirements;
+3. execute with the same requirements;
+4. diagnose only if blocked.
 
-Example requirements:
+Example:
 
 ```json
 {
@@ -68,16 +83,14 @@ Example requirements:
 }
 ```
 
-The MCP bridge forwards these constraints to llmgateway. It does not resolve providers itself.
+The MCP frontend never chooses providers itself. It forwards semantic constraints into the existing llmgateway Router.
 
-## Generic host configuration
-
-A host that accepts stdio MCP server configuration can launch:
+## Generic stdio host config
 
 ```json
 {
-  "command": "python3",
-  "args": ["skills/llmgateway/mcp/llmgateway_mcp.py"],
+  "command": "/absolute/path/to/llmgateway",
+  "args": ["mcp", "--stdio"],
   "env": {
     "LLMGATEWAY_BASE_URL": "http://127.0.0.1:7331",
     "LLMGATEWAY_CLIENT_API_KEY": "<client-key>"
@@ -85,21 +98,24 @@ A host that accepts stdio MCP server configuration can launch:
 }
 ```
 
-Use an absolute path to the script when the host runs from another working directory.
-
 ## Security
 
 - no cookie/token extraction;
 - no credential-return tools;
 - no account/group deletion;
 - no enable/disable mutation;
-- no browser restart/re-auth tool;
+- no browser restart/re-auth MCP tool;
 - client policy remains authoritative;
-- requirements cannot broaden allowed models/routes/transports.
+- semantic requirements can narrow route eligibility but cannot broaden policy.
 
-## Tests
+## Native verification
+
+Relevant gates:
 
 ```bash
-python3 -m unittest skills/llmgateway/tests/test_llmgateway_mcp.py
+RUSTFLAGS="-D warnings" cargo check --all-targets
+cargo clippy --all-targets
+cargo test --all-targets
 bash scripts/smoke-agent-control.sh
+bash scripts/smoke-native-agent-mcp.sh
 ```
