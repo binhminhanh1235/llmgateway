@@ -332,18 +332,45 @@ impl ModelCatalog {
         provider_id: &str,
         discovered: &[DiscoveredModel],
     ) -> Result<(), CatalogError> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "UPDATE account_models SET
-                discovered = 0,
-                availability = CASE WHEN configured = 1 THEN 'unknown' ELSE 'unavailable' END
-             WHERE account_id = ?",
-        )
-        .bind(account_id)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
+        let discovered_canonical_ids: Vec<String> = discovered
+            .iter()
+            .map(|m| canonical_model_id(provider_id, &m.external_id))
+            .collect();
 
+        // 1. Delete models for this account that are no longer in the discovered list
+        if !discovered_canonical_ids.is_empty() {
+            let placeholders = (0..discovered_canonical_ids.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let delete_query = format!(
+                "DELETE FROM account_models WHERE account_id = ? AND canonical_model_id NOT IN ({})",
+                placeholders
+            );
+            let mut q = sqlx::query(&delete_query).bind(account_id);
+            for id in &discovered_canonical_ids {
+                q = q.bind(id);
+            }
+            q.execute(&self.pool).await?;
+        } else {
+            sqlx::query("DELETE FROM account_models WHERE account_id = ?")
+                .bind(account_id)
+                .execute(&self.pool)
+                .await?;
+        }
+
+        // 2. Clean up any orphaned models in the models table
+        sqlx::query(
+            "DELETE FROM models
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM account_models am
+                 WHERE am.canonical_model_id = models.canonical_id
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // 3. Upsert discovered models, keeping existing enabled state on conflict and auto-enabling new models
         for model in discovered {
             self.upsert_discovered_model(provider_id, model).await?;
             let canonical_id = canonical_model_id(provider_id, &model.external_id);
@@ -364,6 +391,23 @@ impl ModelCatalog {
             .execute(&self.pool)
             .await?;
         }
+
+        // 4. Synchronize models.enabled with account_models.enabled
+        sqlx::query(
+            "UPDATE models
+             SET enabled = CASE
+                 WHEN EXISTS (
+                     SELECT 1 FROM account_models
+                     WHERE account_models.canonical_model_id = models.canonical_id
+                       AND account_models.enabled = 1
+                 ) THEN 1 ELSE 0 END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE provider_id = ?",
+        )
+        .bind(provider_id)
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -849,5 +893,123 @@ mod tests {
         assert_eq!(models[0].external_id, "gemini-test");
         assert_eq!(models[0].display_name, "Gemini Test");
         assert!(models[0].capabilities.contains(&"chat".to_string()));
+    }
+
+    #[tokio::test]
+    async fn persist_discovered_models_preserves_state_and_cleans_up() {
+        use crate::config::AppConfig;
+        use std::sync::Arc;
+
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+default_model = "test-model"
+
+[[providers]]
+id = "test-provider"
+kind = "openai-compatible"
+base_url = "https://api.test.com"
+
+[[accounts]]
+id = "test-account"
+provider = "test-provider"
+api_key_env = "TEST_API_KEY"
+enabled = true
+
+[[routes]]
+id = "test-route"
+model = "model-1"
+account = "test-account"
+
+[virtual_models.test-model]
+routes = ["test-route"]
+
+[storage]
+database_url = "sqlite::memory:"
+"#;
+        let config = Arc::new(AppConfig::parse(config_toml).unwrap());
+        let live_config = LiveConfig::new(config);
+        let catalog = ModelCatalog::connect(live_config).await.unwrap();
+
+        let initial_models = vec![
+            DiscoveredModel {
+                external_id: "model-1".into(),
+                display_name: "Model 1".into(),
+                owned_by: "test".into(),
+                context_window: Some(4096),
+                capabilities: vec!["chat".into()],
+                metadata_json: "{}".into(),
+            },
+            DiscoveredModel {
+                external_id: "model-2".into(),
+                display_name: "Model 2".into(),
+                owned_by: "test".into(),
+                context_window: Some(8192),
+                capabilities: vec!["chat".into()],
+                metadata_json: "{}".into(),
+            },
+        ];
+
+        catalog
+            .persist_discovered_models("test-account", "test-provider", &initial_models)
+            .await
+            .unwrap();
+
+        let models = catalog.models().await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().all(|m| m.enabled));
+
+        // Disable model-1 in account_models
+        sqlx::query(
+            "UPDATE account_models SET enabled = 0 WHERE account_id = 'test-account' AND canonical_model_id = 'test-provider/model-1'",
+        )
+        .execute(&catalog.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE models SET enabled = 0 WHERE canonical_id = 'test-provider/model-1'")
+            .execute(&catalog.pool)
+            .await
+            .unwrap();
+
+        // Refresh with model-1 and model-3 (model-2 is removed, model-3 is new)
+        let refreshed_models = vec![
+            DiscoveredModel {
+                external_id: "model-1".into(),
+                display_name: "Model 1 Updated".into(),
+                owned_by: "test".into(),
+                context_window: Some(4096),
+                capabilities: vec!["chat".into()],
+                metadata_json: "{}".into(),
+            },
+            DiscoveredModel {
+                external_id: "model-3".into(),
+                display_name: "Model 3".into(),
+                owned_by: "test".into(),
+                context_window: Some(16384),
+                capabilities: vec!["chat".into()],
+                metadata_json: "{}".into(),
+            },
+        ];
+
+        catalog
+            .persist_discovered_models("test-account", "test-provider", &refreshed_models)
+            .await
+            .unwrap();
+
+        let models = catalog.models().await.unwrap();
+        assert_eq!(models.len(), 2);
+
+        let m1 = models.iter().find(|m| m.external_id == "model-1").unwrap();
+        assert!(!m1.enabled, "model-1 should remain disabled");
+        assert_eq!(m1.display_name, "Model 1 Updated");
+
+        let m3 = models.iter().find(|m| m.external_id == "model-3").unwrap();
+        assert!(m3.enabled, "new model-3 should be automatically enabled");
+
+        // model-2 should be removed from both account_models and models
+        assert!(models.iter().find(|m| m.external_id == "model-2").is_none());
     }
 }

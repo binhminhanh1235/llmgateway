@@ -235,6 +235,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let enabled_accounts = config
+        .accounts
+        .iter()
+        .filter(|account| account.enabled)
+        .collect::<Vec<_>>();
+
+    if !enabled_accounts.is_empty() {
+        let has_available_models = match catalog.models().await {
+            Ok(models) => models.iter().any(|m| {
+                m.fallback_eligible
+                    || (m.enabled
+                        && m.accounts
+                            .iter()
+                            .any(|a| a.enabled && a.availability == "available"))
+            }),
+            Err(_) => false,
+        };
+
+        if !has_available_models {
+            info!("no available models found on startup; refreshing enabled accounts");
+            for account in enabled_accounts {
+                match catalog.refresh_account(&account.id).await {
+                    Ok(result) => {
+                        info!(
+                            account_id = %account.id,
+                            discovered_models = result.discovered_models,
+                            "startup model refresh succeeded"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            account_id = %account.id,
+                            %error,
+                            "startup model refresh failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     let gateway = Arc::new(Gateway::new(
         config.clone(),
         live_config.clone(),
