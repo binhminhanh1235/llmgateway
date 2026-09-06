@@ -202,7 +202,10 @@ pub async fn update_model_group(
             )
         }
     };
-    if let Err(error) = validate_active_models(&body.tiers, &active_models) {
+    let preserved_models = existing_group_models(config.as_ref(), &group_id);
+    if let Err(error) =
+        validate_active_models_with_preserved(&body.tiers, &active_models, &preserved_models)
+    {
         return model_group_error_response(error);
     }
 
@@ -514,9 +517,17 @@ fn validate_active_models(
     tiers: &[ModelGroupTierInput],
     active_models: &HashSet<String>,
 ) -> Result<(), ModelGroupError> {
+    validate_active_models_with_preserved(tiers, active_models, &HashSet::new())
+}
+
+fn validate_active_models_with_preserved(
+    tiers: &[ModelGroupTierInput],
+    active_models: &HashSet<String>,
+    preserved_models: &HashSet<String>,
+) -> Result<(), ModelGroupError> {
     for tier in tiers {
         for model_id in &tier.models {
-            if !active_models.contains(model_id) {
+            if !active_models.contains(model_id) && !preserved_models.contains(model_id) {
                 return Err(ModelGroupError::Invalid(format!(
                     "model '{}' is not currently enabled and active",
                     model_id
@@ -525,6 +536,28 @@ fn validate_active_models(
         }
     }
     Ok(())
+}
+
+fn existing_group_models(config: &AppConfig, group_id: &str) -> HashSet<String> {
+    let Some(group) = config.virtual_models.get(group_id.trim()) else {
+        return HashSet::new();
+    };
+    if group.is_tiered() {
+        return group
+            .tiers
+            .iter()
+            .flat_map(|tier| {
+                if tier.models.is_empty() {
+                    models_for_routes(config, &tier.routes)
+                } else {
+                    tier.models.clone()
+                }
+            })
+            .collect();
+    }
+    models_for_routes(config, &group.routes)
+        .into_iter()
+        .collect()
 }
 
 fn route_views(config: &AppConfig) -> Vec<ModelGroupRouteView> {
