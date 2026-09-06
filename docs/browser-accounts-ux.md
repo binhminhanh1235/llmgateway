@@ -1,12 +1,12 @@
 # Browser Accounts UX
 
-v0.29 makes Gemini Web and Qwen Web browser accounts manageable from the local llmgateway UI without hand-authoring the linked TOML sections.
+v0.29 introduced managed browser accounts. The current main branch extends that UX to ChatGPT Web, Gemini Web, DeepSeek Web, Xiaomi MiMo Studio Web, and Qwen Web, with account/model status synchronization, browserless transport controls where supported, and account deletion.
 
 ## Managed setup flow
 
 Open **Accounts** and choose **Add browser account**.
 
-1. Choose **Gemini Web** or **Qwen Web**.
+1. Choose a managed provider: **ChatGPT Web**, **Gemini Web**, **DeepSeek Web**, **Xiaomi MiMo Studio Web**, or **Qwen Web**.
 2. Optionally set an account ID, display label, logical model ID/model label, and route priority.
 3. llmgateway validates the full generated configuration before replacing the active config file.
 4. The linked browser session, provider binding, Chromium session, account, route, and virtual-model membership are hot-activated.
@@ -57,14 +57,16 @@ Managed browser account cards expose:
 - **Restart browser**
 - **Stop browser**
 - **Reset** when recovery requires it
+- **Browserless** enable/disable when the provider advertises direct-transport support
+- **Delete account** with config validation and UI/catalog refresh
 
-Disabling an account removes it from routing without deleting its Chromium profile. Stopping Chromium also preserves the profile. Re-enabling can reuse an already authenticated profile/session when it is still valid.
+Disabling an account removes it and its models from active routing without deleting its Chromium profile. Model-group membership can be preserved, but disabled models are ignored for fallback until they become eligible again. Stopping Chromium also preserves the profile. Re-enabling can reuse an already authenticated profile/session when it is still valid.
 
 Re-authentication intentionally resets the session lifecycle and opens the same isolated profile again so the user can complete provider authentication normally.
 
 ## Readiness and diagnostics
 
-A browser route is eligible only when all required layers agree:
+A browser route is eligible only when all required layers agree. The current UI also keeps account, account-model, catalog-model, group fallback eligibility, and the public model list synchronized:
 
 ```text
 account enabled
@@ -126,7 +128,7 @@ curl -X PATCH http://127.0.0.1:7331/_llmgateway/browser-account-setup/qwen-perso
 
 v0.29 does not change the browser-account security boundary:
 
-- cookies and local-storage authentication remain inside the isolated Chromium profile;
+- cookies and local-storage authentication remain inside the isolated Chromium profile or encrypted auth vault used by supported direct transports;
 - raw browser credentials are not written into llmgateway config or returned by the APIs;
 - DevTools remains loopback-local;
 - CAPTCHA and 2FA stay interactive;
@@ -137,3 +139,48 @@ v0.29 does not change the browser-account security boundary:
 The v0.29 release gate includes a deterministic browser-account UX smoke test. It starts with no browser account, creates a managed Qwen account while the gateway is running, validates hot catalog/session visibility, proves the route is ineligible before login, launches a fake CDP browser, verifies an authenticated page and adapter contract, executes through the browser route, tests API fallback after disable, re-enables the account without restart, and verifies duplicate-create conflict handling.
 
 The fake CDP fixture avoids depending on live Gemini/Qwen websites while still exercising the real Chromium/CDP and adapter-contract path.
+
+
+## Current managed provider presets
+
+The setup API currently exposes these built-in presets:
+
+```text
+chatgpt  -> browser-chatgpt
+gemini   -> browser-gemini
+deepseek -> browser-deepseek
+mimo     -> browser-mimo
+qwen     -> browser-qwen
+```
+
+Provider capability is not assumed to be identical. CDP/browser transport, direct/browserless transport, model discovery, and provider-native conversation support are advertised by the corresponding adapter/runtime capability contract.
+
+## Browserless transport control
+
+For providers with a supported direct adapter, the Accounts UI can switch the account between the normal browser-only path and `browserless-preferred`.
+
+Browserless still requires a legitimate interactive login first. It reuses persisted authenticated state and must never be treated as a CAPTCHA/2FA or provider-policy bypass.
+
+When browserless is enabled and healthy, Chromium can remain stopped during normal model refresh/chat requests for adapters that support that behavior. If authentication expires, the expected recovery path is browser re-authentication.
+
+## Account/model/group synchronization
+
+The current main branch keeps status aligned across the management surfaces:
+
+```text
+account enabled
+    |
+    +-- account model enabled
+            |
+            +-- catalog model active
+                    |
+                    +-- model-group fallback eligible
+                            |
+                            +-- visible through /v1/models when viable
+```
+
+A disabled model may remain configured inside a model group so user ordering is not destroyed, but it is ignored during fallback. Re-enabling restores eligibility when the account, route, transport, and other readiness checks are healthy.
+
+## Account deletion
+
+Account deletion is a lifecycle operation rather than a blind TOML text removal. The backend validates the resulting configuration, updates runtime/catalog state, and the UI refreshes account/model pickers after deletion. Browser-profile handling remains conservative so authentication data is not unexpectedly exported or exposed.
