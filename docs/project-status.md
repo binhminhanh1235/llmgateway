@@ -390,7 +390,7 @@ Main hiện có:
 - explicit READ / EXECUTE / OPERATE / ADMIN boundary;
 - deterministic offline helper/bundle tests trong CI.
 
-P1 Agent Control API, P2 MCP server và P3 capability-based Agent Routing đang được implement/verify trên branch `feat/agent-native-runtime`, tracking issue #92. Các capability này **chưa thuộc main** tại snapshot này và không được mô tả là shipped cho tới khi merge + post-merge verification.
+P1 Agent Control API, P2 MCP server và P3 capability-based Agent Routing đã **DONE / VERIFIED trên branch `feat/agent-native-runtime`**, tracking issue #92 / PR #93. Verified implementation head `e05f32b25f24b9886bd45e7876f544afa86cd83b`, push CI #1798 / run `34032721869`: PASS. Các capability này **chưa thuộc main** tại snapshot này và không được mô tả là shipped cho tới khi merge + post-merge verification.
 
 ## 17. Open work đáng chú ý
 
