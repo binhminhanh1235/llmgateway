@@ -22,9 +22,11 @@ assert payload["error"]["message"], payload
 PY
 }
 
+echo "[p3-file-smoke] prepare fixtures"
 printf 'P3 extraction fallback marker: alpha beta gamma\n' >"$TMP_DIR/notes.txt"
 printf '%%PDF-1.7\nP3 native PDF fixture\n%%%%EOF\n' >"$TMP_DIR/report.pdf"
 
+echo "[p3-file-smoke] upload text fixture"
 TEXT_JSON=$(curl -fsS -X POST "$BASE_URL/v1/files" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -F 'purpose=assistants' \
@@ -46,6 +48,7 @@ body={
 with open(sys.argv[2],"w",encoding="utf-8") as f: json.dump(body,f)
 PY
 
+echo "[p3-file-smoke] execute extraction fallback"
 TEXT_REPLY=$(curl -fsS -X POST "$BASE_URL/v1/chat/completions" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -55,6 +58,7 @@ printf '%s' "$TEXT_REPLY" | grep -q 'fake file reply messages=1 extracted_file=y
 curl -fsS -X DELETE "$BASE_URL/v1/files/$TEXT_ID" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" | grep -q '"deleted":true'
 
+echo "[p3-file-smoke] upload native PDF fixture"
 PDF_JSON=$(curl -fsS -X POST "$BASE_URL/v1/files" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -F 'purpose=assistants' \
@@ -89,6 +93,7 @@ for path,body in [(sys.argv[2],responses),(sys.argv[3],text_only)]:
     with open(path,"w",encoding="utf-8") as f: json.dump(body,f)
 PY
 
+echo "[p3-file-smoke] execute native PDF via Responses"
 PDF_RESPONSE=$(curl -fsS -X POST "$BASE_URL/v1/responses" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -113,6 +118,7 @@ STATUS=$(curl -sS -o "$TMP_DIR/error.json" -w '%{http_code}' -X DELETE "$BASE_UR
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 assert_json_error 409 artifact_in_use "$STATUS"
 
+echo "[p3-file-smoke] execute native PDF via Threads"
 THREAD_PDF_JSON=$(curl -fsS -X POST "$BASE_URL/v1/files" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -F 'purpose=assistants' \
@@ -185,6 +191,7 @@ STATUS=$(curl -sS -o "$TMP_DIR/error.json" -w '%{http_code}' -X POST "$BASE_URL/
   --data-binary "@$TMP_DIR/remote-file.json")
 assert_json_error 400 unsupported_capability "$STATUS"
 
+echo "[p3-file-smoke] verify capability metadata"
 CAPS=$(curl -fsS "$BASE_URL/v1/capabilities" -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 printf '%s' "$CAPS" | python3 -c '
 import json,sys
