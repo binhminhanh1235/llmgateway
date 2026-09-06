@@ -369,6 +369,23 @@ impl ModelCatalog {
         Ok(())
     }
 
+    pub async fn remove_account(&self, account_id: &str) -> Result<u64, CatalogError> {
+        let result = sqlx::query("DELETE FROM account_models WHERE account_id = ?")
+            .bind(account_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "DELETE FROM models
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM account_models am
+                 WHERE am.canonical_model_id = models.canonical_id
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn accounts(&self) -> Result<Vec<AccountView>, CatalogError> {
         let config = self.config.snapshot();
         let mut result = Vec::with_capacity(config.accounts.len());
