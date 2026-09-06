@@ -503,6 +503,19 @@ fn translate_message_content(content: &Value) -> Value {
                         .or_else(|| image_url.get("url").and_then(Value::as_str))
                 })
                 .map(|url| json!({"type":"image_url","image_url":{"url":url}})),
+            Some("input_file") | Some("file") | Some("document") => {
+                let file_id = part
+                    .get("file_id")
+                    .or_else(|| part.get("artifact_id"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                Some(json!({
+                    "type":"input_file",
+                    "file_id":file_id,
+                    "filename":part.get("filename").cloned().unwrap_or(Value::Null),
+                    "mime_type":part.get("mime_type").cloned().unwrap_or(Value::Null)
+                }))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
