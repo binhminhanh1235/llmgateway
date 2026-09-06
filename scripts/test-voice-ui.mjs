@@ -17,6 +17,10 @@ assert.deepEqual(
   { type: "set_model", query: "gemini 3.1 pro" }
 );
 assert.deepEqual(
+  { ...parseCommand("use provider Gemini") },
+  { type: "set_provider", query: "gemini" }
+);
+assert.deepEqual(
   { ...parseCommand("attach file quarterly report.pdf") },
   { type: "attach_artifact", query: "quarterly report.pdf" }
 );
