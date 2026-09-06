@@ -32,6 +32,7 @@ jobs:
       - run: node --check adapters/chatgpt-web.js
       - run: node --check adapters/qwen-web.js
       - run: node --check adapters/deepseek-web.js
+      - run: node --check adapters/mimo-web.js
       - run: node scripts/test-browser-adapter-fixtures.mjs
       - run: bash -n scripts/live-browserless-acceptance.sh
       - run: bash -n scripts/live-gemini-model-selection.sh
@@ -39,10 +40,14 @@ jobs:
       - run: bash -n scripts/live-file-acceptance.sh
       - run: bash -n scripts/smoke-file-attachments.sh
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
+      - run: bash -n scripts/live-mimo-browserless-acceptance.sh
       - run: bash -n scripts/smoke-gemini-recovery.sh
+      - run: cargo fmt --all -- --check
+      - run: git diff --check
       - run: RUSTFLAGS="-D warnings" cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
+      - run: bash scripts/smoke-file-attachments.sh
       - run: bash scripts/smoke-provider-conversation-affinity.sh
       - run: bash scripts/smoke-gemini-recovery.sh
       - run: bash scripts/smoke-chatgpt-browser.sh
@@ -87,6 +92,11 @@ jobs:
           )
           [void][System.Management.Automation.Language.Parser]::ParseFile(
             (Resolve-Path 'scripts/live-gemini-model-selection.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/live-mimo-browserless-acceptance.ps1'),
             [ref]$tokens,
             [ref]$errors
           )
