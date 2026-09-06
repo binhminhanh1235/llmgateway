@@ -275,7 +275,7 @@ Tracking: issue #92.
 Working branch: `feat/agent-native-runtime`.  
 Baseline main: `f85e54b8741a8a184bdc84b142c8b770adee29c0`.
 
-P1-P3 đang ở trạng thái **implemented on feature branch / verification pending** cho tới khi exact-head CI hoàn tất.
+P1-P3 đã **DONE / VERIFIED trên feature branch**, chưa merge vào `main`.
 
 ### P1 - Agent Control API
 
@@ -375,7 +375,7 @@ Smoke Agent Control kiểm tra:
 - client route policy không thể bị bypass;
 - same capability routing qua Chat, Responses và Anthropic Messages.
 
-P1-P3 chỉ được chuyển sang DONE / VERIFIED khi exact feature-head CI pass Linux, Windows, full existing smoke suite và Docker.
+Verified implementation head: `e05f32b25f24b9886bd45e7876f544afa86cd83b`. Push CI #1798 / run `34032721869`: PASS Linux, Windows, Agent/MCP tests, full existing smoke suite và Docker. Final documentation-head CI vẫn phải giữ xanh trước khi merge.
 
 ## 14. Non-goals
 
