@@ -27,6 +27,11 @@
       return { type: "set_model", query: model[1].trim() };
     }
 
+    const provider = text.match(/^(?:switch to|use|select) provider (.+)$/);
+    if (provider?.[1]?.trim()) {
+      return { type: "set_provider", query: provider[1].trim() };
+    }
+
     const artifact = text.match(/^(?:attach|select) (?:file|artifact) (.+)$/);
     if (artifact?.[1]?.trim()) {
       return { type: "attach_artifact", query: artifact[1].trim() };
