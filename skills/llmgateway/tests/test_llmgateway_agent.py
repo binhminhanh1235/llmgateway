@@ -136,6 +136,7 @@ class AgentHelperTests(unittest.TestCase):
             "references/routing.md",
             "references/diagnostics.md",
             "references/operations.md",
+            "references/mcp.md",
         ):
             self.assertTrue((root / relative).is_file(), relative)
             self.assertIn(f"]({relative})", skill)
