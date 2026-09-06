@@ -19,6 +19,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: node --check ui/app.js
+      - run: node --check ui/voice.js
+      - run: node scripts/test-voice-ui.mjs
+      - run: node scripts/test-media-ui.mjs
       - run: node scripts/test-status-sync-ui.mjs
       - run: node scripts/test-vision-ui.mjs
       - run: node scripts/test-file-ui.mjs
@@ -39,6 +42,8 @@ jobs:
       - run: bash -n scripts/live-vision-acceptance.sh
       - run: bash -n scripts/live-file-acceptance.sh
       - run: bash -n scripts/smoke-file-attachments.sh
+      - run: bash -n scripts/smoke-media-api.sh
+      - run: bash -n scripts/live-multimodal-acceptance.sh
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
       - run: bash -n scripts/live-mimo-browserless-acceptance.sh
       - run: bash -n scripts/smoke-gemini-recovery.sh
