@@ -1,7 +1,7 @@
 use crate::{
     compat::{anthropic, responses},
     multimodal::{
-        validate_vision_execution, InputContent, Modality, MultimodalError,
+        validate_attachment_execution, InputContent, Modality, MultimodalError,
         MultimodalMessage, MultimodalRequest, ToolCall,
     },
 };
@@ -51,7 +51,7 @@ fn normalize_current_execution(
     requested_model: String,
 ) -> Result<NormalizedTextRequest, MultimodalError> {
     let canonical = canonical_from_current_execution(&execution_template, requested_model)?;
-    validate_vision_execution(&canonical)?;
+    validate_attachment_execution(&canonical)?;
     Ok(NormalizedTextRequest {
         canonical,
         execution_template,
@@ -182,9 +182,28 @@ fn parse_content(content: &Value) -> Result<Vec<InputContent>, MultimodalError> 
                                 });
                             }
                             "file" | "input_file" | "document" => {
-                                return Err(MultimodalError::UnsupportedInputModality(
-                                    Modality::File,
-                                ));
+                                let artifact_id = object
+                                    .get("file_id")
+                                    .or_else(|| object.get("artifact_id"))
+                                    .and_then(Value::as_str)
+                                    .and_then(|raw| {
+                                        raw.strip_prefix("llmgateway://artifact/")
+                                            .or(Some(raw))
+                                    })
+                                    .filter(|id| id.starts_with("file_"))
+                                    .map(str::to_string)
+                                    .ok_or_else(|| {
+                                        MultimodalError::InvalidRequest(
+                                            "file content must be resolved to a gateway artifact before canonical normalization".into(),
+                                        )
+                                    })?;
+                                normalized.push(InputContent::File {
+                                    artifact_id,
+                                    mime_type: object
+                                        .get("mime_type")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string),
+                                });
                             }
                             "audio" | "input_audio" => {
                                 return Err(MultimodalError::UnsupportedInputModality(
@@ -282,9 +301,7 @@ fn reject_responses_unsupported_inputs(body: &Value) -> Result<(), MultimodalErr
 
 fn reject_unsupported_responses_kind(kind: &str) -> Result<(), MultimodalError> {
     match kind {
-        "file" | "input_file" | "document" => Err(
-            MultimodalError::UnsupportedInputModality(Modality::File),
-        ),
+        "file" | "input_file" | "document" => Ok(()),
         "audio" | "input_audio" => Err(
             MultimodalError::UnsupportedInputModality(Modality::Audio),
         ),
@@ -470,12 +487,20 @@ mod tests {
         let responses = normalize_responses_request(&json!({
             "model":"llmgateway-auto",
             "input":[{
+                "type":"message",
                 "role":"user",
-                "content":[{"type":"input_file","file_id":"file_123"}]
+                "content":[{
+                    "type":"input_file",
+                    "file_id":"llmgateway://artifact/file_123",
+                    "mime_type":"application/pdf"
+                }]
             }]
         }))
-        .unwrap_err();
-        assert_eq!(responses.code(), "unsupported_input_modality");
+        .unwrap();
+        assert!(matches!(
+            responses.canonical.messages[0].content[0],
+            InputContent::File { ref artifact_id, .. } if artifact_id == "file_123"
+        ));
 
         let output = normalize_chat_request(
             &json!({
