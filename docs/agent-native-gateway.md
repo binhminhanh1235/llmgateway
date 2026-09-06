@@ -269,37 +269,120 @@ Không copy riêng `SKILL.md`, vì các links tương đối tới `references/`
 
 Nếu client không hỗ trợ Agent Skills native, vẫn có thể dùng helper CLI trực tiếp hoặc gọi compatibility APIs của llmgateway.
 
-## 12. Future slices
+## 12. P1-P3 runtime extension
+
+Tracking: issue #92.  
+Working branch: `feat/agent-native-runtime`.  
+Baseline main: `f85e54b8741a8a184bdc84b142c8b770adee29c0`.
+
+P1-P3 đang ở trạng thái **implemented on feature branch / verification pending** cho tới khi exact-head CI hoàn tất.
 
 ### P1 - Agent Control API
 
-Planned.
+Client-scoped endpoints:
 
-Chỉ thêm compact agent-facing status/capability views khi admin API hiện tại quá verbose. Reuse Router và state stores hiện có.
+```text
+GET  /_llmgateway/agent/capabilities
+POST /_llmgateway/agent/resolve
+POST /_llmgateway/agent/diagnostics
+```
 
-Candidate:
+`capabilities` trả model/group nhìn thấy bởi credential hiện tại, capability metadata, context metadata và số route eligible.
 
-- capability summary;
-- normalized diagnostic snapshot;
-- safe probe endpoint.
+`resolve` là dry-run routing. Nó không gọi provider. Request ví dụ:
+
+```json
+{
+  "model": "llmgateway-auto",
+  "task": "coding",
+  "requirements": {
+    "capabilities": ["coding", "reasoning"],
+    "min_context_window": 32000
+  }
+}
+```
+
+Response chứa selected route, compact candidates, exclusion reasons và blocking reason counts.
+
+`diagnostics` dùng cùng evidence nhưng thêm normalized status/recommended action. Endpoint này dùng normal client credential, không cần admin key.
 
 ### P2 - MCP server
 
-Planned.
+Portable stdio bridge:
 
-Expose selected llmgateway operations thành narrow MCP tools, tách read/execute/mutation permission.
+```text
+skills/llmgateway/mcp/llmgateway_mcp.py
+```
+
+Tool surface mặc định chỉ READ + EXECUTE:
+
+- `llmgateway_capabilities`
+- `llmgateway_resolve`
+- `llmgateway_diagnostics`
+- `llmgateway_models`
+- `llmgateway_responses`
+- `llmgateway_chat`
+- `llmgateway_messages`
+
+Không expose delete/enable/disable/reset/restart/credential mutation tool.
+
+Server hỗ trợ modern `server/discover` và legacy `initialize` để tương thích nhiều MCP hosts. Chi tiết: [mcp-server.md](mcp-server.md).
 
 ### P3 - Capability-based Agent Routing
 
-Planned.
+Gateway-only extension:
 
-Cho phép agent biểu đạt requirement như coding, reasoning, vision hoặc context mà không phụ thuộc provider brand. Implementation phải mở rộng Model Catalog/Router hiện tại, không bypass model groups/client policies.
+```json
+{
+  "llmgateway_requirements": {
+    "capabilities": ["coding"],
+    "min_context_window": 32000
+  }
+}
+```
 
-## 13. Non-goals
+Semantics:
+
+- required capabilities là hard eligibility constraints;
+- capability names normalize lowercase và `_` → `-`;
+- known context nhỏ hơn minimum bị loại;
+- context metadata unknown bị loại khi minimum context là hard requirement;
+- client model/route policy vẫn là hard boundary;
+- model-group tiers, readiness, quota/cooldown, health, transport policy, task fit và fairness vẫn chạy trong Router hiện tại;
+- requirements được giữ xuyên Chat, Responses và Anthropic normalization;
+- gateway-only fields bị strip trước khi request tới provider.
+
+Resolver và execution phải nhận cùng requirements để tránh route drift.
+
+## 13. Verification gates
+
+Dedicated tests:
+
+```bash
+python3 -m unittest \
+  skills/llmgateway/tests/test_llmgateway_agent.py \
+  skills/llmgateway/tests/test_llmgateway_mcp.py
+
+bash scripts/smoke-agent-control.sh
+```
+
+Smoke Agent Control kiểm tra:
+
+- capability aggregation;
+- coding hard requirement;
+- minimum context requirement;
+- impossible capability diagnostics;
+- client route policy không thể bị bypass;
+- same capability routing qua Chat, Responses và Anthropic Messages.
+
+P1-P3 chỉ được chuyển sang DONE / VERIFIED khi exact feature-head CI pass Linux, Windows, full existing smoke suite và Docker.
+
+## 14. Non-goals
 
 - automated credential extraction;
 - CAPTCHA/2FA bypass;
 - unrestricted autonomous admin;
 - provider-specific model ranking hard-coded trong skill;
 - routing engine thứ hai ở agent layer;
-- tuyên bố unmerged capability là shipped.
+- MCP mutation/admin tools mặc định;
+- tuyên bố feature-branch capability là shipped trên main trước khi merge.
