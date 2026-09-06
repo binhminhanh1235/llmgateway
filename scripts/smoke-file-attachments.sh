@@ -221,4 +221,24 @@ for mime in ["application/pdf","text/plain","text/markdown","text/csv","applicat
     assert mime in g["supported_mime_types"], (mime,g)
 '
 
+echo "[p3-file-smoke] verify per-route file capability metadata"
+MODELS=$(curl -fsS "$BASE_URL/v1/models" -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
+printf '%s' "$MODELS" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+routes=[]
+for model in x.get("data",[]):
+    meta=model.get("llmgateway") or {}
+    caps=meta.get("multimodal_capabilities") or {}
+    if meta.get("kind")=="route" and "file" in (caps.get("input_modalities") or []):
+        routes.append((model.get("id"),caps))
+assert routes, x
+for route_id,caps in routes:
+    assert caps.get("max_attachment_count",0) > 0, (route_id,caps)
+    assert caps.get("max_attachment_size_bytes",0) > 0, (route_id,caps)
+    if caps.get("native_file_upload"):
+        assert "application/pdf" in (caps.get("supported_mime_types") or []), (route_id,caps)
+        assert "application/vnd.openxmlformats-officedocument.wordprocessingml.document" in (caps.get("supported_mime_types") or []), (route_id,caps)
+'
+
 echo "P3 file attachment API/Threads smoke passed"
