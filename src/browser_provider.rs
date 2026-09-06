@@ -5,6 +5,7 @@ use crate::{
     deepseek_web_transport::DeepSeekWebHttpAdapter,
     gemini_web_transport::GeminiWebHttpAdapter,
     qwen_web_transport::QwenWebHttpAdapter,
+    file_attachments,
     vision,
 };
 use async_trait::async_trait;
@@ -323,6 +324,10 @@ pub trait BrowserProviderAdapter: Send + Sync {
     }
 
     fn supports_image_input(&self) -> bool {
+        false
+    }
+
+    fn supports_file_input(&self) -> bool {
         false
     }
 
@@ -741,6 +746,16 @@ impl BrowserProviderRegistry {
                 .direct_adapters
                 .get(provider_kind)
                 .is_some_and(|adapter| adapter.supports_image_input())
+    }
+
+    pub fn supports_file_input(&self, provider_kind: &str) -> bool {
+        self.adapters
+            .get(provider_kind)
+            .is_some_and(|adapter| adapter.supports_file_input())
+            || self
+                .direct_adapters
+                .get(provider_kind)
+                .is_some_and(|adapter| adapter.supports_file_input())
     }
 
     pub fn supports_native_conversation_affinity(&self, provider_kind: &str) -> bool {
@@ -1340,12 +1355,20 @@ impl BrowserProviderRegistry {
         }
 
         let requires_image = vision::request_has_image(body);
+        let requires_file = file_attachments::request_has_file(body);
         if requires_image && !browser_adapter.supports_image_input() {
             return Err(BrowserProviderError::UnsupportedAdapter(format!(
                 "{} image input",
                 browser_adapter.adapter_id()
             )));
         }
+        if requires_file && !browser_adapter.supports_file_input() {
+            return Err(BrowserProviderError::UnsupportedAdapter(format!(
+                "{} file input",
+                browser_adapter.adapter_id()
+            )));
+        }
+        let requires_browser_attachment = requires_image || requires_file;
 
         let Some(store) = browser_session_runtime::get() else {
             return Err(BrowserProviderError::SessionUnavailable {
@@ -1360,15 +1383,15 @@ impl BrowserProviderRegistry {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
             })?;
-        let image_browser_was_live = if requires_image && browser_adapter.is_cdp() {
+        let attachment_browser_was_live = if requires_browser_attachment && browser_adapter.is_cdp() {
             self.cdp_session_live(&binding.session).await
         } else {
             false
         };
-        if requires_image
+        if requires_browser_attachment
             && browser_adapter.is_cdp()
             && session.enabled
-            && !image_browser_was_live
+            && !attachment_browser_was_live
         {
             let _ = self.ensure_cdp_session_ready(&binding.session).await;
             session = store
@@ -1383,7 +1406,10 @@ impl BrowserProviderRegistry {
         let direct_adapter = self.direct_adapter(&provider.kind, &binding).cloned();
         let direct_snapshot_ready = direct_adapter
             .as_ref()
-            .is_some_and(|adapter| !requires_image || adapter.supports_image_input())
+            .is_some_and(|adapter| {
+                (!requires_image || adapter.supports_image_input())
+                    && (!requires_file || adapter.supports_file_input())
+            })
             && self.auth_material_available(&binding.session);
         let auth_snapshot_ready = (provider.kind == "browser-http"
             && self.auth_material_available(&binding.session))
@@ -1406,17 +1432,23 @@ impl BrowserProviderRegistry {
             thread_id: thread_id.map(str::to_string),
         };
 
-        let image_forced_browser_fallback = requires_image
-            && direct_adapter.is_some()
-            && !direct_adapter
-                .as_ref()
-                .is_some_and(|adapter| adapter.supports_image_input());
-        let image_browser_is_ephemeral = image_forced_browser_fallback
-            && !image_browser_was_live
+        let attachment_forced_browser_fallback = direct_adapter.is_some()
+            && (
+                (requires_image
+                    && !direct_adapter
+                        .as_ref()
+                        .is_some_and(|adapter| adapter.supports_image_input()))
+                || (requires_file
+                    && !direct_adapter
+                        .as_ref()
+                        .is_some_and(|adapter| adapter.supports_file_input()))
+            );
+        let attachment_browser_is_ephemeral = attachment_forced_browser_fallback
+            && !attachment_browser_was_live
             && !matches!(binding.transport_mode, BrowserTransportMode::BrowserOnly);
 
         let mut used_adapter = browser_adapter.clone();
-        let mut browser_fallback_used = image_forced_browser_fallback;
+        let mut browser_fallback_used = attachment_forced_browser_fallback;
         let result = if direct_snapshot_ready {
             let direct = direct_adapter.expect("direct adapter checked above");
             used_adapter = direct.clone();
@@ -1476,7 +1508,7 @@ impl BrowserProviderRegistry {
             }
         } else {
             let browser_result = browser_adapter.execute_chat(adapter_request).await;
-            if image_browser_is_ephemeral {
+            if attachment_browser_is_ephemeral {
                 match browser_result {
                     Ok(response) => wrap_response_with_browser_stop(
                         response,
@@ -2751,6 +2783,10 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
     }
 
     fn supports_image_input(&self) -> bool {
+        matches!(self.spec.kind, "browser-chatgpt" | "browser-gemini")
+    }
+
+    fn supports_file_input(&self) -> bool {
         matches!(self.spec.kind, "browser-chatgpt" | "browser-gemini")
     }
 
