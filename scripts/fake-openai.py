@@ -52,6 +52,20 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
+        if "llmgateway_attachment_strategy" in body:
+            payload = json.dumps({
+                "error": {
+                    "type": "internal_metadata_leak",
+                    "message": "gateway attachment strategy metadata reached upstream",
+                }
+            }).encode()
+            self.send_response(400)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         auth = self.headers.get("authorization", "")
         if "slow200" in auth:
             time.sleep(0.15)
