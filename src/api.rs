@@ -517,6 +517,25 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         Err(error) => return catalog_error(error),
     };
     let mut data: BTreeMap<String, Value> = BTreeMap::new();
+    let mut enriched_route_capabilities: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for route in config.routes.iter().filter(|route| route.enabled) {
+        let mut capabilities = route.capabilities.iter().cloned().collect::<BTreeSet<_>>();
+        if let Some(account) = config.account(&route.account) {
+            if let Some(model) = physical.iter().find(|model| {
+                model.provider == account.provider
+                    && model.external_id == route.model
+                    && model.accounts.iter().any(|binding| {
+                        binding.account_id == route.account
+                            && binding.enabled
+                            && binding.availability != "unavailable"
+                    })
+            }) {
+                capabilities.extend(model.capabilities.iter().cloned());
+            }
+        }
+        enriched_route_capabilities
+            .insert(route.id.clone(), capabilities.into_iter().collect());
+    }
 
     for (id, virtual_model) in &config.virtual_models {
         if access.policy().is_some_and(|policy| !policy.model_allowed(id, id)) {
@@ -530,7 +549,12 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             if access.policy().is_some_and(|policy| !policy.route_allowed(&route.id)) {
                 continue;
             }
-            capability_tags.extend(route.capabilities.iter().cloned());
+            capability_tags.extend(
+                enriched_route_capabilities
+                    .get(&route.id)
+                    .cloned()
+                    .unwrap_or_else(|| route.capabilities.clone()),
+            );
         }
         let capability_tags = capability_tags.into_iter().collect::<Vec<_>>();
         data.insert(
@@ -590,6 +614,10 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         }) {
             continue;
         }
+        let route_capabilities = enriched_route_capabilities
+            .get(&route.id)
+            .cloned()
+            .unwrap_or_else(|| route.capabilities.clone());
         data.entry(route.id.clone()).or_insert_with(|| {
             json!({
                 "id":route.id,
@@ -599,8 +627,8 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                     "kind":"route",
                     "upstream_model":route.model,
                     "account":route.account,
-                    "capabilities":route.capabilities,
-                    "multimodal_capabilities":ModelCapabilities::from_legacy_tags(&route.capabilities)
+                    "capabilities":route_capabilities,
+                    "multimodal_capabilities":ModelCapabilities::from_legacy_tags(&route_capabilities)
                 }
             })
         });
