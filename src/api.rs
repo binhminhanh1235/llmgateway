@@ -692,6 +692,27 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         enriched_route_capabilities.insert(route.id.clone(), capabilities.into_iter().collect());
     }
 
+    let route_is_valid = |route: &crate::config::RouteConfig| -> bool {
+        if !route.enabled {
+            return false;
+        }
+        let Some(account) = config.account(&route.account) else {
+            return false;
+        };
+        if !account.enabled {
+            return false;
+        }
+        physical.iter().any(|model| {
+            model.provider == account.provider
+                && (model.external_id == route.model || model.id == route.model)
+                && model.accounts.iter().any(|binding| {
+                    binding.account_id == route.account
+                        && binding.enabled
+                        && matches!(binding.availability.as_str(), "available" | "unknown")
+                })
+        })
+    };
+
     for (id, virtual_model) in &config.virtual_models {
         if !virtual_model.enabled {
             continue;
