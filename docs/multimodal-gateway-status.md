@@ -32,8 +32,8 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 |---|---|---|---|---|
 | P0 | [#70 Multimodal Foundation](https://github.com/binhminhanh1235/llmgateway/issues/70) | **DONE / VERIFIED** | none | canonical contracts + structured capabilities + compatibility tests + exact-head CI |
 | P1 | [#71 ArtifactStore and Files API](https://github.com/binhminhanh1235/llmgateway/issues/71) | **DONE / VERIFIED** | P0 DONE / VERIFIED | durable files API, dedup, persistence, MIME/size/security tests |
-| P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **VERIFYING** | P1 DONE / VERIFIED | API + UI image input + deterministic fixtures + verified live adapter |
-| P3 | [#73 General File Attachments](https://github.com/binhminhanh1235/llmgateway/issues/73) | **BLOCKED** | P2 DONE / VERIFIED | native PDF path + extraction fallback + provider binding isolation |
+| P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **DONE / VERIFIED (LIVE GATE WAIVED BY USER)** | P1 DONE / VERIFIED | deterministic/API/UI gates passed; live authenticated gate explicitly waived by user |
+| P3 | [#73 General File Attachments](https://github.com/binhminhanh1235/llmgateway/issues/73) | **IN PROGRESS** | P2 DONE / VERIFIED | native PDF path + extraction fallback + provider binding isolation |
 | P4 | [#74 Voice Input and Safe Voice Commands](https://github.com/binhminhanh1235/llmgateway/issues/74) | **BLOCKED** | P3 DONE / VERIFIED | STT + microphone + allowlisted command dispatcher |
 | P5 | [#75 Image Generation and Editing](https://github.com/binhminhanh1235/llmgateway/issues/75) | **BLOCKED** | P4 DONE / VERIFIED | Responses + Images APIs share core; generation/edit verified |
 | P6 | [#76 Capability-aware Routing and Multimodal UX](https://github.com/binhminhanh1235/llmgateway/issues/76) | **BLOCKED** | P5 DONE / VERIFIED | hard capability eligibility + deterministic fallback + diagnostics |
@@ -113,6 +113,9 @@ At every meaningful checkpoint:
 - `scripts/smoke-vision-api.sh`, invoked from `scripts/smoke-local.sh`, verifies inline image Chat Completions, stored-image upload, Responses reuse, a text-only rejection, Threads stable-reference persistence, `artifact_in_use` protection and cleanup.
 - Exact implementation CI #1488 / run `34001876132` on `e47377a0264eff922a8b0435bb7cc4143bb7034c`: **PASS**. Linux passed strict `-D warnings`, Clippy, all-target tests, all P2 and regression smokes, client policies and Docker. Windows passed cargo check/test and Chromium-driver smoke.
 - Live authenticated acceptance runner: `scripts/live-vision-acceptance.sh`. It is syntax-gated in CI and is designed for an already authenticated ChatGPT/Gemini browser account without storing credentials in the repository.
-- **Remaining P2 gate:** execute that runner against at least one real authenticated ChatGPT or Gemini account and verify API + provider/UI image flow plus transport telemetry. GitHub CI has no access to the user's authenticated local browser runtime, so no live-pass claim is recorded yet.
-- P2 therefore remains **VERIFYING**, not DONE / VERIFIED. P3 #73 and later phases remain **BLOCKED / NOT STARTED**.
+- P2 final deterministic exact-head CI #1524 / run `34003689302` on `11310a65e92ef594fa95ef4bbf0199b842b3bf5a`: **PASS**, including live-runner syntax, vision API/UI fixtures, Model Groups, Linux/Windows regressions and Docker.
+- The only unexecuted P2 gate was the real authenticated ChatGPT/Gemini local vision run. On 2026-09-06 the user explicitly instructed to **ignore that live authenticated execution and continue**. This is recorded as a user waiver, not as a claimed live PASS.
+- P2 is therefore **DONE / VERIFIED (LIVE GATE WAIVED BY USER)** for dependency progression.
+- P3 #73 is **IN PROGRESS**. P4 and later phases remain **BLOCKED / NOT STARTED**.
+- P3 start checkpoint: `main` = `c8dd755ea126b12842081035d7654d66efa0e81a`; pre-start feature head = `11310a65e92ef594fa95ef4bbf0199b842b3bf5a`; branch ahead 70 / behind 0, so no reconcile is required.
 - `main` remains untouched and the merge guard remains active.
