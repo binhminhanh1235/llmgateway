@@ -609,6 +609,14 @@ fn sniff_mime(bytes: &[u8], declared: Option<&str>) -> Option<String> {
         return Some("audio/mpeg".into());
     }
     if bytes.starts_with(b"PK\x03\x04") {
+        if bytes
+            .windows(b"word/document.xml".len())
+            .any(|window| window == b"word/document.xml")
+        {
+            return Some(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+            );
+        }
         return Some("application/zip".into());
     }
     if bytes.starts_with(b"MZ") {
@@ -710,6 +718,19 @@ mod tests {
             denied_mime_types: ArtifactConfig::default().denied_mime_types,
             remote_url_ingestion: false,
         }
+    }
+
+    #[test]
+    fn docx_container_is_sniffed_before_generic_zip() {
+        let bytes = b"PK\x03\x04stub-word/document.xml-stub";
+        assert_eq!(
+            sniff_mime(
+                bytes,
+                Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            )
+            .as_deref(),
+            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        );
     }
 
     #[tokio::test]
