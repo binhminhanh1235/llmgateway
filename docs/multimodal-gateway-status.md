@@ -32,7 +32,7 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 |---|---|---|---|---|
 | P0 | [#70 Multimodal Foundation](https://github.com/binhminhanh1235/llmgateway/issues/70) | **DONE / VERIFIED** | none | canonical contracts + structured capabilities + compatibility tests + exact-head CI |
 | P1 | [#71 ArtifactStore and Files API](https://github.com/binhminhanh1235/llmgateway/issues/71) | **DONE / VERIFIED** | P0 DONE / VERIFIED | durable files API, dedup, persistence, MIME/size/security tests |
-| P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **IN PROGRESS** | P1 DONE / VERIFIED | API + UI image input + deterministic fixtures + verified live adapter |
+| P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **VERIFYING** | P1 DONE / VERIFIED | API + UI image input + deterministic fixtures + verified live adapter |
 | P3 | [#73 General File Attachments](https://github.com/binhminhanh1235/llmgateway/issues/73) | **BLOCKED** | P2 DONE / VERIFIED | native PDF path + extraction fallback + provider binding isolation |
 | P4 | [#74 Voice Input and Safe Voice Commands](https://github.com/binhminhanh1235/llmgateway/issues/74) | **BLOCKED** | P3 DONE / VERIFIED | STT + microphone + allowlisted command dispatcher |
 | P5 | [#75 Image Generation and Editing](https://github.com/binhminhanh1235/llmgateway/issues/75) | **BLOCKED** | P4 DONE / VERIFIED | Responses + Images APIs share core; generation/edit verified |
@@ -55,7 +55,7 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 - Deterministic tests cover Responses normalization, Chat/Responses equivalence, Anthropic normalization, current execution round-trip semantics, stable structured capability serialization, legacy capability compatibility, and unsupported modality errors.
 - Full implementation exact-head CI: workflow CI #1345 / run `33975834628` on `aa13c0fb7f3e3db44f86ef5238e9f75f1a207410`: **PASS** on Rust + Windows, including strict cargo check, Clippy, all-target tests, OpenAI SDK, browser/browserless, streaming, native affinity, routing/traces, client policies, local multimodal assertions, and Docker build.
 - The final status-only checkpoint commit is evidence-only. Its exact-head CI run is recorded in issue #70 after completion so no code-evidence commit is mutated merely to embed its own future run ID.
-- P1 #71 is **DONE / VERIFIED**. P2 #72 is **IN PROGRESS** by explicit user instruction. P3 #73 and every later phase remain **BLOCKED / NOT STARTED**.
+- P1 #71 is **DONE / VERIFIED**. P2 #72 is **VERIFYING** after deterministic exact-head implementation CI passed. P3 #73 and every later phase remain **BLOCKED / NOT STARTED**.
 - `main` remains untouched. No multimodal work may be merged to `main` without a separate explicit user authorization.
 
 ## Update protocol
@@ -97,3 +97,22 @@ At every meaningful checkpoint:
 
 - P2 start checkpoint: `main` = `46e70faf3b4a8034ca278f049f0af4b3e256e477`; branch = `7f3712f46e6a88163991bd662a961046d51ff8f6`; ahead 21 / behind 0; no reconcile required.
 - P1 final exact-head CI #1403 / run `33978273008`: **PASS**.
+
+
+## P2 Image Attachment and Vision Input verification
+
+- Exact main remains `46e70faf3b4a8034ca278f049f0af4b3e256e477`.
+- Deterministic P2 implementation head: `e47377a0264eff922a8b0435bb7cc4143bb7034c`; branch remained behind main by 0 commits.
+- Canonical vision input resolves data URLs and gateway `file_id` references through ArtifactStore, persists stable `llmgateway://artifact/<file_id>` references and materializes provider payloads only at the execution boundary.
+- Chat Completions and Responses accept image input; Responses can reuse a previously uploaded gateway artifact. Unsupported file/audio input remains deterministic and is not silently collapsed by compatibility translation.
+- Threads persist image artifact references, rematerialize them for provider execution and hold reference guards so referenced files cannot be deleted until the owning thread is deleted.
+- Image routing rejects unsupported API routes deterministically. Verified ChatGPT/Gemini browser adapters can supply vision capability for legacy account/route metadata without falsely enabling non-browser API providers.
+- ChatGPT Web and Gemini Web CDP adapters attach image bytes through real file inputs before submit. Direct/browserless transports do not claim image support. Browserless-preferred image turns temporarily fall back to CDP when required and restore a previously closed browser posture after the turn.
+- UI supports picker, drag/drop, pasted screenshots, preview/remove and model-capability gating. Selected images upload through `/v1/files` first and chat state sends stable `file_id` references rather than storing base64 blobs.
+- Deterministic browser fixtures verify attach-before-submit for ChatGPT/Gemini. `scripts/test-vision-ui.mjs` locks the composer image contract.
+- `scripts/smoke-vision-api.sh`, invoked from `scripts/smoke-local.sh`, verifies inline image Chat Completions, stored-image upload, Responses reuse, a text-only rejection, Threads stable-reference persistence, `artifact_in_use` protection and cleanup.
+- Exact implementation CI #1488 / run `34001876132` on `e47377a0264eff922a8b0435bb7cc4143bb7034c`: **PASS**. Linux passed strict `-D warnings`, Clippy, all-target tests, all P2 and regression smokes, client policies and Docker. Windows passed cargo check/test and Chromium-driver smoke.
+- Live authenticated acceptance runner: `scripts/live-vision-acceptance.sh`. It is syntax-gated in CI and is designed for an already authenticated ChatGPT/Gemini browser account without storing credentials in the repository.
+- **Remaining P2 gate:** execute that runner against at least one real authenticated ChatGPT or Gemini account and verify API + provider/UI image flow plus transport telemetry. GitHub CI has no access to the user's authenticated local browser runtime, so no live-pass claim is recorded yet.
+- P2 therefore remains **VERIFYING**, not DONE / VERIFIED. P3 #73 and later phases remain **BLOCKED / NOT STARTED**.
+- `main` remains untouched and the merge guard remains active.
