@@ -394,21 +394,23 @@ The skill reuses the existing Router, model groups, client policies, readiness, 
 
 ### P1 - Agent Control API
 
-**Status: planned**
+**Status: implemented on `feat/agent-native-runtime`, verification pending**
 
-Add compact agent-facing status/capability views only where the existing admin API is too verbose. Candidate surfaces: capability summary, normalized diagnostics and safe probe.
+Adds client-scoped capability summary, dry-run resolve and normalized diagnostics on top of the existing Router.
 
 ### P2 - MCP server
 
-**Status: planned**
+**Status: implemented on `feat/agent-native-runtime`, verification pending**
 
-Expose selected llmgateway operations as narrow MCP tools with separate read/execute/mutation permissions.
+Adds a dependency-free stdio MCP bridge with READ + EXECUTE tools only, including capability resolve/diagnostics and compatibility inference.
 
 ### P3 - Capability-based Agent Routing
 
-**Status: planned**
+**Status: implemented on `feat/agent-native-runtime`, verification pending**
 
-Allow agents to express task/capability requirements without provider-brand coupling, extending current Model Catalog/Router contracts.
+Adds hard capability/context requirements inside the existing Router, preserves client/model-group/policy boundaries, and carries the same constraints through Chat, Responses, Anthropic Messages and MCP execution.
+
+Tracking for P1-P3: issue #92.
 
 Security invariants remain unchanged: no credential export, no CAPTCHA/2FA bypass, no unrestricted autonomous admin.
 
