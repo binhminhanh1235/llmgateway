@@ -368,6 +368,46 @@ Different local tools can safely share one llmgateway process without sharing id
 
 ---
 
+## Active initiative - Agent-Native llmgateway
+
+Tracking: issue #90.
+
+Goal: let AI agents use llmgateway as a model runtime through stable abstractions instead of provider-specific prompt logic.
+
+### P0 - Portable Agent Skill
+
+Working branch:
+
+`feat/agent-native-skill`
+
+Scope:
+
+- Agent Skills-compatible `skills/llmgateway/SKILL.md`;
+- progressive-disclosure API/routing/diagnostics/operations references;
+- stdlib-only READ + EXECUTE helper CLI;
+- client-policy-aware model discovery;
+- logical model/group-first selection;
+- deterministic offline tests;
+- explicit READ / EXECUTE / OPERATE / ADMIN safety boundary.
+
+The skill must reuse the existing Router, model groups, client policies, readiness, quota, route explain and execution trace. It must not become a second routing engine.
+
+### P1 - Agent Control API
+
+Only add compact agent-facing status/capability views where the existing admin API is too verbose. Candidate surfaces: capability summary, normalized diagnostics and safe probe.
+
+### P2 - MCP server
+
+Expose selected llmgateway operations as narrow MCP tools with separate read/execute/mutation permissions.
+
+### P3 - Capability-based Agent Routing
+
+Allow agents to express task/capability requirements without provider-brand coupling, extending current Model Catalog/Router contracts.
+
+Security invariants remain unchanged: no credential export, no CAPTCHA/2FA bypass, no unrestricted autonomous admin.
+
+---
+
 ## v0.33 - Usage, Cost and Savings Intelligence
 
 **Priority: P1**

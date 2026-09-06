@@ -470,6 +470,59 @@ Xem: [docs/client-policies.md](docs/client-policies.md).
 
 ---
 
+## AI Agent Skill
+
+Repo có portable Agent Skill tại:
+
+```text
+skills/llmgateway/
+├── SKILL.md
+├── references/
+├── scripts/llmgateway_agent.py
+└── tests/
+```
+
+Mục tiêu của skill là để Codex/ChatGPT/Claude-style agent dùng llmgateway như **model runtime**, thay vì hard-code provider/model và tự dựng fallback riêng.
+
+Nguyên tắc chọn model:
+
+```text
+discover /v1/models
+      |
+      v
+prefer logical model/group
+      |
+      v
+llmgateway Router
+      |
+      +-- client policy
+      +-- readiness
+      +-- ordered fallback tiers
+      +-- quota/cooldown
+      +-- health/task fit/fairness
+      |
+      v
+provider route
+```
+
+Helper CLI chỉ có **READ + EXECUTE**, không có lệnh delete/disable:
+
+```bash
+export LLMGATEWAY_CLIENT_API_KEY="client-key"
+export LLMGATEWAY_API_KEY="admin-key"   # chỉ cần cho diagnostics admin
+
+python3 skills/llmgateway/scripts/llmgateway_agent.py health
+python3 skills/llmgateway/scripts/llmgateway_agent.py models
+python3 skills/llmgateway/scripts/llmgateway_agent.py explain llmgateway-auto --prompt "debug Rust"
+python3 skills/llmgateway/scripts/llmgateway_agent.py responses llmgateway-auto "xin chào"
+```
+
+Với Agent Skills-compatible client, import/copy cả folder `skills/llmgateway` để giữ `SKILL.md`, references và helper cùng nhau.
+
+Chi tiết kiến trúc và roadmap: [docs/agent-native-gateway.md](docs/agent-native-gateway.md).
+
+---
+
 ## Test nhanh
 
 Format/check:

@@ -366,7 +366,27 @@ Các tracking issue đang mở gồm:
 
 Không ghi các capability này là shipped trên main cho tới khi merge và verification hoàn tất.
 
-## 16. Open work đáng chú ý
+## 16. Agent-Native initiative
+
+Agent-Native llmgateway đang được triển khai riêng ở issue #90 và branch:
+
+`feat/agent-native-skill`
+
+P0 tập trung vào portable Agent Skill, không thay đổi Router:
+
+- `skills/llmgateway/SKILL.md`;
+- reference playbooks cho API, routing, diagnostics và operations;
+- helper CLI stdlib-only;
+- helper chỉ READ + EXECUTE;
+- normal execution ưu tiên scoped client key;
+- admin diagnostics dùng global admin key;
+- model discovery trước, logical model/group trước physical provider model;
+- destructive/mutating actions không phải default skill behavior;
+- deterministic offline helper tests được nối vào CI.
+
+Các bước sau mới xem xét Agent Control API, MCP server và capability-based agent routing. Không mô tả chúng là shipped cho tới khi implementation/verification tương ứng hoàn tất.
+
+## 17. Open work đáng chú ý
 
 Tại thời điểm audit repository còn các tracking/PR mở liên quan tới:
 
@@ -374,10 +394,11 @@ Tại thời điểm audit repository còn các tracking/PR mở liên quan tớ
 - ChatGPT model picker/Sentinel recovery
 - Xiaomi MiMo tracking
 - multimodal initiative
+- Agent-Native llmgateway issue #90
 
 Trạng thái issue/PR là tracking signal, không luôn đồng nghĩa code chưa tồn tại. Một số thay đổi có thể đã cherry-pick/merge theo commit khác trong khi PR cũ vẫn còn mở.
 
-## 17. Điểm cần tiếp tục chuẩn hóa
+## 18. Điểm cần tiếp tục chuẩn hóa
 
 Các điểm tài liệu/versioning nên tiếp tục xử lý ở release kế tiếp:
 
@@ -388,7 +409,7 @@ Các điểm tài liệu/versioning nên tiếp tục xử lý ở release kế 
 5. cập nhật roadmap theo release number thực tế sau khi các gate trên hoàn tất;
 6. thêm release artifacts/installation policy khi bước production distribution bắt đầu.
 
-## 18. Source of truth
+## 19. Source of truth
 
 Ưu tiên theo thứ tự:
 
