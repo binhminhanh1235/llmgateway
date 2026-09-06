@@ -145,10 +145,12 @@ printf '%s' "$THREAD_REPLY" | grep -q 'fake file reply messages=1 native_file=ye
 
 THREAD_DETAIL=$(curl -fsS "$BASE_URL/v1/threads/$THREAD_ID" \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
-printf '%s' "$THREAD_DETAIL" | python3 - "$THREAD_PDF_ID" <<'PY'
+printf '%s' "$THREAD_DETAIL" > "$TMP_DIR/thread-detail.json"
+python3 - "$THREAD_PDF_ID" "$TMP_DIR/thread-detail.json" <<'PY'
 import json,sys
 file_id=sys.argv[1]
-x=json.load(sys.stdin)
+with open(sys.argv[2], encoding="utf-8") as f:
+    x=json.load(f)
 content=x["messages"][0]["message"]["content"]
 part=next(item for item in content if item.get("type")=="input_file")
 assert part["file_id"] == "llmgateway://artifact/" + file_id, x
