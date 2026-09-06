@@ -294,7 +294,8 @@
   }
 
   function selectedModelSupportsImages() {
-    return selectedModelInputModalities().includes("image");
+    const inputs = selectedModelInputModalities();
+    return inputs.includes("image");
   }
 
   function selectedModelSupportsFiles() {
