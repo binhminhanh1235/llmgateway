@@ -1,4 +1,5 @@
 mod account_intelligence_api;
+mod agent_cli;
 mod agent_control_api;
 mod admin;
 mod admin_api;
@@ -36,6 +37,8 @@ mod execution_trace_api;
 mod gateway;
 mod gemini_web_transport;
 mod live_config;
+mod local_client;
+mod mcp;
 mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
@@ -104,6 +107,7 @@ use live_config::LiveConfig;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
+use mcp::mcp_http;
 use model_group_api::{
     create_model_group, delete_model_group, list_model_groups, set_model_group_enabled,
     update_model_group,
@@ -125,6 +129,30 @@ use usage_api::{get_account_usage, get_usage, reset_account_quota};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
+
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if let Some(command) = args.first().map(String::as_str) {
+        match command {
+            "agent" => {
+                return agent_cli::run(&args[1..]).await;
+            }
+            "mcp" if args.get(1).map(String::as_str) == Some("--stdio") => {
+                return mcp::serve_stdio().await;
+            }
+            "mcp" if args.get(1).is_some_and(|arg| matches!(arg.as_str(), "-h" | "--help" | "help")) => {
+                println!("llmgateway mcp --stdio\n\nHTTP MCP is served at POST /mcp by the normal llmgateway server.");
+                return Ok(());
+            }
+            "-h" | "--help" | "help" => {
+                println!(
+                    "llmgateway\n\n  llmgateway                 Start the gateway server\n  llmgateway agent ...       Native Agent CLI\n  llmgateway mcp --stdio     Native MCP stdio server\n\nThe normal server also exposes MCP at POST /mcp."
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -356,6 +384,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui/model-groups.js", get(model_groups_js))
         .route("/ui/trace-console.css", get(trace_console_css))
         .route("/ui/trace-console.js", get(trace_console_js))
+        .route("/mcp", post(mcp_http))
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/responses", post(openai_responses))
         .route("/v1/messages", post(anthropic_messages))
