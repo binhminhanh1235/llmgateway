@@ -538,7 +538,21 @@ impl Gateway {
                 .router
                 .explain_for_body_with_config(config.clone(), requested_model, Some(body))
                 .await;
-            let error = GatewayError::NoRoute(no_route_message(&trace));
+            let error = trace
+                .required_capabilities
+                .iter()
+                .find(|capability| {
+                    let expected = format!("capability_missing:{capability}");
+                    trace.candidates.iter().any(|candidate| {
+                        candidate.exclusion_reasons.len() == 1
+                            && candidate
+                                .exclusion_reasons
+                                .iter()
+                                .any(|reason| reason == &expected)
+                    })
+                })
+                .map(|capability| GatewayError::UnsupportedCapability(capability.clone()))
+                .unwrap_or_else(|| GatewayError::NoRoute(no_route_message(&trace)));
             return Err(self.finish_execution_error(&request_id, error).await);
         }
 
