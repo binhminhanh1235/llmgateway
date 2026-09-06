@@ -1285,7 +1285,11 @@ fn parse_model_recipe(
 
 fn infer_model_capabilities(category: &str, display: &str, description: &str) -> Vec<String> {
     let haystack = format!("{category} {display} {description}").to_ascii_lowercase();
-    let mut capabilities = BTreeSet::from(["chat".to_string(), "long-context".to_string()]);
+    let mut capabilities = BTreeSet::from([
+        "chat".to_string(),
+        "long-context".to_string(),
+        "vision".to_string(),
+    ]);
     if haystack.contains("pro") || haystack.contains("think") || haystack.contains("reason") {
         capabilities.insert("reasoning".into());
         capabilities.insert("coding".into());
@@ -1789,6 +1793,7 @@ mod tests {
         assert_eq!(model.capacity, 2);
         assert_eq!(model.model_number, 3);
         assert!(model.capabilities.contains(&"reasoning".to_string()));
+        assert!(model.capabilities.contains(&"vision".to_string()));
         let header = model_header_value(model, "SESSION").unwrap();
         assert!(header.contains("model-hex-pro"));
         assert!(header.contains("SESSION"));
