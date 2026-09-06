@@ -17,6 +17,49 @@ Admin diagnostics use the global admin credential.
 
 `GET /_llmgateway/health` is suitable as the first liveness check.
 
+## Agent Control API
+
+These endpoints use the normal execution credential and therefore honor the same client policy as inference:
+
+- `GET /_llmgateway/agent/capabilities`
+- `POST /_llmgateway/agent/resolve`
+- `POST /_llmgateway/agent/diagnostics`
+
+Capability resolve body:
+
+```json
+{
+  "model": "llmgateway-auto",
+  "task": "coding",
+  "requirements": {
+    "capabilities": ["coding", "reasoning"],
+    "min_context_window": 32000
+  },
+  "body": {
+    "messages": [
+      {"role": "user", "content": "Implement a retry function"}
+    ]
+  }
+}
+```
+
+`resolve` does not execute provider inference. It returns the selected route plus compact candidate/exclusion evidence from the existing Router.
+
+`diagnostics` wraps the same resolution evidence with normalized blocking reasons and a safe recommended action.
+
+The same hard requirements can be attached to Chat, Responses, or Anthropic Messages with the gateway-only field:
+
+```json
+{
+  "llmgateway_requirements": {
+    "capabilities": ["coding"],
+    "min_context_window": 32000
+  }
+}
+```
+
+Gateway-only routing fields are stripped before the upstream provider request.
+
 ## Execution
 
 ### Model discovery
