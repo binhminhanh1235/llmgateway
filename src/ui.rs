@@ -7,6 +7,7 @@ use axum::{
 const INDEX_HTML: &str = include_str!("../ui/index.html");
 const APP_CSS: &str = include_str!("../ui/app.css");
 const APP_JS: &str = include_str!("../ui/app.js");
+const VOICE_JS: &str = include_str!("../ui/voice.js");
 const ACCOUNT_CONTROL_CSS: &str = include_str!("../ui/account-control.css");
 const ACCOUNT_CONTROL_JS: &str = include_str!("../ui/account-control.js");
 const ACCOUNT_INTELLIGENCE_CSS: &str = include_str!("../ui/account-intelligence.css");
@@ -28,6 +29,10 @@ pub async fn app_css() -> Response<Body> {
 
 pub async fn app_js() -> Response<Body> {
     asset_response("text/javascript; charset=utf-8", APP_JS)
+}
+
+pub async fn voice_js() -> Response<Body> {
+    asset_response("text/javascript; charset=utf-8", VOICE_JS)
 }
 
 pub async fn account_control_css() -> Response<Body> {
