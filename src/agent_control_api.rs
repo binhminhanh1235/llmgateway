@@ -243,23 +243,19 @@ async fn resolve(
         }),
     );
 
-    let effective_config = match state.gateway.effective_request_config(
-        config.clone(),
-        access.policy(),
-        &body,
-    ) {
-        Ok(config) => config,
-        Err(error) => return Err(gateway_error(error)),
-    };
+    let effective_config =
+        match state
+            .gateway
+            .effective_request_config(config.clone(), access.policy(), &body)
+        {
+            Ok(config) => config,
+            Err(error) => return Err(gateway_error(error)),
+        };
 
     let mut trace = state
         .gateway
         .router
-        .explain_for_body_with_config(
-            effective_config,
-            &requested_model,
-            Some(&body),
-        )
+        .explain_for_body_with_config(effective_config, &requested_model, Some(&body))
         .await;
     apply_policy(&config, access.policy(), &requested_model, &mut trace);
 
@@ -281,7 +277,11 @@ async fn resolve(
         });
 
     let mut blocking_reasons = BTreeMap::<String, usize>::new();
-    for candidate in trace.candidates.iter().filter(|candidate| !candidate.eligible) {
+    for candidate in trace
+        .candidates
+        .iter()
+        .filter(|candidate| !candidate.eligible)
+    {
         for reason in &candidate.exclusion_reasons {
             *blocking_reasons.entry(reason.clone()).or_default() += 1;
         }
@@ -417,7 +417,10 @@ fn recommended_action(blocking: &Value) -> &'static str {
         || reasons.contains_key("context_window_unknown")
     {
         "relax_requirements_or_enable_capable_model"
-    } else if reasons.keys().any(|reason| reason.contains("auth") || reason.contains("login")) {
+    } else if reasons
+        .keys()
+        .any(|reason| reason.contains("auth") || reason.contains("login"))
+    {
         "reverify_provider_authentication"
     } else if reasons.contains_key("quota_blocked") || reasons.contains_key("route_cooldown") {
         "wait_for_quota_or_cooldown_or_use_fallback"
@@ -436,11 +439,7 @@ mod tests {
     #[test]
     fn capability_names_are_normalized_and_deduplicated() {
         assert_eq!(
-            normalized_capabilities(&[
-                "Coding".into(),
-                "long_context".into(),
-                "coding".into()
-            ]),
+            normalized_capabilities(&["Coding".into(), "long_context".into(), "coding".into()]),
             vec!["coding", "long-context"]
         );
     }

@@ -141,10 +141,7 @@ pub async fn serve_stdio() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn write_stdio(
-    stdout: &mut tokio::io::Stdout,
-    value: &Value,
-) -> Result<(), Box<dyn Error>> {
+async fn write_stdio(stdout: &mut tokio::io::Stdout, value: &Value) -> Result<(), Box<dyn Error>> {
     let mut rendered = serde_json::to_vec(value)?;
     rendered.push(b'\n');
     stdout.write_all(&rendered).await?;
@@ -152,11 +149,7 @@ async fn write_stdio(
     Ok(())
 }
 
-async fn dispatch(
-    client: &LocalGatewayClient,
-    message: &Value,
-    era: McpEra,
-) -> Option<Value> {
+async fn dispatch(client: &LocalGatewayClient, message: &Value, era: McpEra) -> Option<Value> {
     if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Some(rpc_error(
             message.get("id").cloned().unwrap_or(Value::Null),
@@ -253,12 +246,8 @@ async fn call_tool(
         "llmgateway_health" => client.health().await,
         "llmgateway_capabilities" => client.capabilities().await,
         "llmgateway_models" => client.models().await,
-        "llmgateway_resolve" => {
-            client.resolve(false, &route_payload(&arguments)).await
-        }
-        "llmgateway_diagnostics" => {
-            client.resolve(true, &route_payload(&arguments)).await
-        }
+        "llmgateway_resolve" => client.resolve(false, &route_payload(&arguments)).await,
+        "llmgateway_diagnostics" => client.resolve(true, &route_payload(&arguments)).await,
         "llmgateway_responses" => match execution_payload(&arguments, "responses") {
             Ok(body) => client.responses(&body).await,
             Err(error) => Err(error),
@@ -367,7 +356,9 @@ fn execution_payload(
         .get("min_context_window")
         .cloned()
         .unwrap_or(Value::Null);
-    if capabilities.as_array().is_some_and(|values| !values.is_empty())
+    if capabilities
+        .as_array()
+        .is_some_and(|values| !values.is_empty())
         || !min_context_window.is_null()
     {
         object.insert(
@@ -400,14 +391,46 @@ fn complete(mut value: Value, era: McpEra) -> Value {
 
 fn tool_catalog() -> Vec<Value> {
     vec![
-        tool("llmgateway_health", "Check llmgateway health.", json!({"type":"object","properties":{},"additionalProperties":false})),
-        tool("llmgateway_capabilities", "List client-visible models and capability metadata.", json!({"type":"object","properties":{},"additionalProperties":false})),
-        tool("llmgateway_models", "List compatibility models visible to the current client.", json!({"type":"object","properties":{},"additionalProperties":false})),
-        tool("llmgateway_resolve", "Dry-run capability-aware routing through the existing Router.", route_schema()),
-        tool("llmgateway_diagnostics", "Return normalized route blockers and recommended next action.", route_schema()),
-        tool("llmgateway_responses", "Execute a non-streaming OpenAI Responses request.", execution_schema(false)),
-        tool("llmgateway_chat", "Execute a non-streaming OpenAI Chat Completions request.", execution_schema(false)),
-        tool("llmgateway_messages", "Execute a non-streaming Anthropic Messages request.", execution_schema(true)),
+        tool(
+            "llmgateway_health",
+            "Check llmgateway health.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
+            "llmgateway_capabilities",
+            "List client-visible models and capability metadata.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
+            "llmgateway_models",
+            "List compatibility models visible to the current client.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
+            "llmgateway_resolve",
+            "Dry-run capability-aware routing through the existing Router.",
+            route_schema(),
+        ),
+        tool(
+            "llmgateway_diagnostics",
+            "Return normalized route blockers and recommended next action.",
+            route_schema(),
+        ),
+        tool(
+            "llmgateway_responses",
+            "Execute a non-streaming OpenAI Responses request.",
+            execution_schema(false),
+        ),
+        tool(
+            "llmgateway_chat",
+            "Execute a non-streaming OpenAI Chat Completions request.",
+            execution_schema(false),
+        ),
+        tool(
+            "llmgateway_messages",
+            "Execute a non-streaming Anthropic Messages request.",
+            execution_schema(true),
+        ),
     ]
 }
 
@@ -469,7 +492,11 @@ fn validate_modern_headers(headers: &HeaderMap, message: &Value) -> Result<(), R
         .unwrap_or("");
     if header_method != method {
         return Err(mcp_json_response(
-            rpc_error(id, -32020, "Mcp-Method header does not match JSON-RPC method"),
+            rpc_error(
+                id,
+                -32020,
+                "Mcp-Method header does not match JSON-RPC method",
+            ),
             None,
         ));
     }
@@ -522,7 +549,8 @@ fn mcp_json_response(value: Value, legacy_session: Option<&str>) -> Response<Bod
     if let Some(session) = legacy_session {
         builder = builder.header(
             "mcp-session-id",
-            HeaderValue::from_str(session).unwrap_or_else(|_| HeaderValue::from_static("llmgateway")),
+            HeaderValue::from_str(session)
+                .unwrap_or_else(|_| HeaderValue::from_static("llmgateway")),
         );
     }
     builder
@@ -535,7 +563,11 @@ fn presented_key(headers: &HeaderMap) -> Option<&str> {
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .or_else(|| headers.get("x-api-key").and_then(|value| value.to_str().ok()))
+        .or_else(|| {
+            headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+        })
 }
 
 fn local_base_url(state: &AppState) -> String {
@@ -564,11 +596,22 @@ mod tests {
     fn tool_catalog_is_read_execute_only() {
         let names = tool_catalog()
             .into_iter()
-            .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()).map(str::to_string))
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
             .collect::<Vec<_>>();
         assert!(names.iter().any(|name| name == "llmgateway_resolve"));
         assert!(names.iter().any(|name| name == "llmgateway_chat"));
-        for forbidden in ["delete", "disable", "enable", "reset", "restart", "credential"] {
+        for forbidden in [
+            "delete",
+            "disable",
+            "enable",
+            "reset",
+            "restart",
+            "credential",
+        ] {
             assert!(!names.iter().any(|name| name.contains(forbidden)));
         }
     }

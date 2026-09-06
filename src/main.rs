@@ -1,8 +1,8 @@
 mod account_intelligence_api;
-mod agent_cli;
-mod agent_control_api;
 mod admin;
 mod admin_api;
+mod agent_cli;
+mod agent_control_api;
 mod api;
 mod browser_account_setup;
 mod browser_auth;
@@ -58,8 +58,8 @@ mod ui;
 mod usage_api;
 
 use account_intelligence_api::account_intelligence;
-use agent_control_api::{agent_capabilities, agent_diagnostics, agent_resolve};
 use admin_api::{set_account, set_account_model, set_model};
+use agent_control_api::{agent_capabilities, agent_diagnostics, agent_resolve};
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
     anthropic_messages, health, models, openai_chat, openai_responses, AppState,
@@ -77,9 +77,7 @@ use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
 use browser_runtime_api::{
     browser_account_runtime_diagnostics, browser_thread_affinity_diagnostics,
 };
-use browser_runtime_settings::{
-    browser_runtime_settings, set_browser_runtime_selection,
-};
+use browser_runtime_settings::{browser_runtime_settings, set_browser_runtime_selection};
 use browser_session::{BrowserConfig, BrowserSessionStore};
 use browser_session_api::{
     begin_browser_login, complete_browser_login, get_browser_session, list_browser_sessions,
@@ -104,10 +102,10 @@ use execution_trace::ExecutionTraceStore;
 use execution_trace_api::{get_execution, list_executions};
 use gateway::Gateway;
 use live_config::LiveConfig;
+use mcp::mcp_http;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
-use mcp::mcp_http;
 use model_group_api::{
     create_model_group, delete_model_group, list_model_groups, set_model_group_enabled,
     update_model_group,
@@ -139,7 +137,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "mcp" if args.get(1).map(String::as_str) == Some("--stdio") => {
                 return mcp::serve_stdio().await;
             }
-            "mcp" if args.get(1).is_some_and(|arg| matches!(arg.as_str(), "-h" | "--help" | "help")) => {
+            "mcp"
+                if args
+                    .get(1)
+                    .is_some_and(|arg| matches!(arg.as_str(), "-h" | "--help" | "help")) =>
+            {
                 println!("llmgateway mcp --stdio\n\nHTTP MCP is served at POST /mcp by the normal llmgateway server.");
                 return Ok(());
             }

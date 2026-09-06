@@ -1194,10 +1194,7 @@ mod client_policy_tests {
         assert!(sanitized.get("llmgateway_requirements").is_none());
         assert!(sanitized.get("llmgateway_execution_preference").is_none());
         assert!(sanitized.get("llmgateway_api_fallback").is_none());
-        assert_eq!(
-            sanitized["messages"][0]["content"],
-            "hello"
-        );
+        assert_eq!(sanitized["messages"][0]["content"], "hello");
     }
 
     #[test]

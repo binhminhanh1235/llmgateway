@@ -361,9 +361,10 @@ impl Router {
             if !missing_required_capabilities.is_empty() {
                 push_unique(&mut exclusion_reasons, "required_capability_missing");
             }
-            if requirements.min_context_window.is_some_and(|minimum| {
-                route.context_window.is_some_and(|window| window < minimum)
-            }) {
+            if requirements
+                .min_context_window
+                .is_some_and(|minimum| route.context_window.is_some_and(|window| window < minimum))
+            {
                 push_unique(&mut exclusion_reasons, "minimum_context_window_not_met");
             }
             if requirements.min_context_window.is_some() && route.context_window.is_none() {

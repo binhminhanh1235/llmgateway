@@ -1472,9 +1472,7 @@ fn diagnostic_stderr(stderr: &str) -> String {
     }
 }
 
-pub(crate) fn resolve_executable(
-    configured: Option<&str>,
-) -> Result<String, ChromiumDriverError> {
+pub(crate) fn resolve_executable(configured: Option<&str>) -> Result<String, ChromiumDriverError> {
     if let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) {
         if let Some(path) = find_executable(configured) {
             return Ok(path.display().to_string());
@@ -1557,7 +1555,9 @@ fn push_browser(
     candidates: &[&str],
     windows_suffixes: &[&str],
 ) {
-    let path_candidate = candidates.iter().find_map(|candidate| find_executable(candidate));
+    let path_candidate = candidates
+        .iter()
+        .find_map(|candidate| find_executable(candidate));
 
     #[cfg(target_os = "windows")]
     let executable = path_candidate.or_else(|| {

@@ -108,8 +108,9 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         }
         "explain" => {
             if args.len() < 2 {
-                return Err("usage: llmgateway agent explain MODEL [--client-id ID] [--prompt TEXT]"
-                    .into());
+                return Err(
+                    "usage: llmgateway agent explain MODEL [--client-id ID] [--prompt TEXT]".into(),
+                );
             }
             let model = args[1].clone();
             let options = parse_options(&args[2..])?;
@@ -135,10 +136,9 @@ pub async fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
                 .await?
         }
         other => {
-            return Err(format!(
-                "unknown agent command '{other}'. Run 'llmgateway agent --help'."
+            return Err(
+                format!("unknown agent command '{other}'. Run 'llmgateway agent --help'.").into(),
             )
-            .into())
         }
     };
 
@@ -219,11 +219,7 @@ fn parse_options(args: &[String]) -> Result<AgentOptions, Box<dyn Error>> {
     Ok(options)
 }
 
-fn take_value(
-    args: &[String],
-    index: &mut usize,
-    flag: &str,
-) -> Result<String, Box<dyn Error>> {
+fn take_value(args: &[String], index: &mut usize, flag: &str) -> Result<String, Box<dyn Error>> {
     *index += 1;
     args.get(*index)
         .cloned()
@@ -254,12 +250,7 @@ fn resolve_body(options: AgentOptions) -> Value {
     Value::Object(body)
 }
 
-fn execution_body(
-    protocol: &str,
-    model: String,
-    prompt: String,
-    options: AgentOptions,
-) -> Value {
+fn execution_body(protocol: &str, model: String, prompt: String, options: AgentOptions) -> Value {
     let mut body = match protocol {
         "responses" => json!({"model":model,"input":prompt}),
         "messages" => json!({
@@ -336,14 +327,12 @@ mod tests {
             "32000".to_string(),
         ];
         let options = parse_options(&args).unwrap();
-        let body = execution_body(
-            "chat",
-            "llmgateway-auto".into(),
-            "hello".into(),
-            options,
-        );
+        let body = execution_body("chat", "llmgateway-auto".into(), "hello".into(), options);
         assert_eq!(body["llmgateway_task"], "coding");
-        assert_eq!(body["llmgateway_requirements"]["capabilities"], json!(["coding"]));
+        assert_eq!(
+            body["llmgateway_requirements"]["capabilities"],
+            json!(["coding"])
+        );
         assert_eq!(body["llmgateway_requirements"]["min_context_window"], 32000);
     }
 }

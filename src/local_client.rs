@@ -77,7 +77,9 @@ impl LocalGatewayClient {
         auth: LocalAuth,
         anthropic: bool,
     ) -> Result<Value, LocalClientError> {
-        let mut request = self.client.request(method, format!("{}{}", self.base_url, path));
+        let mut request = self
+            .client
+            .request(method, format!("{}{}", self.base_url, path));
         if let Some(body) = body {
             request = request.json(body);
         }

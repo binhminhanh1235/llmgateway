@@ -1,0 +1,499 @@
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+key_env = "LLMGATEWAY_API_KEY"
+default_model = "llmgateway-auto"
+
+[storage]
+database_url = "sqlite://data/llmgateway.db"
+
+# Browser sessions are opt-in. Each session receives an isolated Chromium profile directory.
+# llmgateway never returns raw cookies through its API. Login challenges, CAPTCHA, and 2FA
+# must be completed normally by the user in the browser.
+[browser]
+enabled = true
+profile_root = "data/browser-profiles"
+auth_vault_root = "data/browser-auth"
+
+[browser.sessions]
+
+[browser.sessions.chatgpt-web-41d15799]
+provider = "chatgpt-web"
+label = "chatgpt-web-41d15799"
+login_url = "https://chatgpt.com/"
+enabled = true
+
+[browser.sessions.deepseek-web-cc8d6e90]
+provider = "deepseek-web"
+label = "deepseek-web-cc8d6e90"
+login_url = "https://chat.deepseek.com/"
+enabled = true
+
+[browser.sessions.mimo-web-099bc0bc]
+provider = "mimo-web"
+label = "mimo-web-099bc0bc"
+login_url = "https://aistudio.xiaomimimo.com/#/c"
+enabled = true
+
+[browser.sessions.gemini-web-77c02275]
+provider = "gemini-web"
+label = "gemini-web-77c02275"
+login_url = "https://gemini.google.com/app"
+enabled = true
+
+[browser.bindings]
+
+[browser.bindings.chatgpt-web-41d15799]
+session = "chatgpt-web-41d15799"
+adapter_contract_version = 1
+models = ["chatgpt-web-default"]
+ephemeral_chat = true
+probe_timeout_ms = 10000
+response_timeout_ms = 180000
+first_byte_timeout_ms = 30000
+idle_stream_timeout_ms = 30000
+max_concurrency = 2
+
+[browser.bindings.deepseek-web-cc8d6e90]
+session = "deepseek-web-cc8d6e90"
+transport_mode = "auto"
+adapter_contract_version = 1
+models = ["deepseek-web-default"]
+ephemeral_chat = true
+probe_timeout_ms = 10000
+response_timeout_ms = 180000
+first_byte_timeout_ms = 30000
+idle_stream_timeout_ms = 30000
+max_concurrency = 2
+
+[browser.bindings.mimo-web-099bc0bc]
+session = "mimo-web-099bc0bc"
+transport_mode = "auto"
+adapter_contract_version = 1
+models = ["mimo-web-default"]
+ephemeral_chat = true
+probe_timeout_ms = 10000
+response_timeout_ms = 180000
+first_byte_timeout_ms = 60000
+idle_stream_timeout_ms = 60000
+max_concurrency = 2
+
+[browser.bindings.gemini-web-77c02275]
+session = "gemini-web-77c02275"
+transport_mode = "auto"
+adapter_contract_version = 1
+models = ["gemini-web-default"]
+ephemeral_chat = true
+probe_timeout_ms = 10000
+response_timeout_ms = 180000
+first_byte_timeout_ms = 30000
+idle_stream_timeout_ms = 30000
+
+# Enable the browser section and one or more sessions when you are ready to use a browser adapter.
+# [browser.sessions.gemini-web-primary]
+# provider = "gemini-web"
+# label = "Gemini web primary"
+# login_url = "https://gemini.google.com/app"
+# enabled = true
+#
+# [browser.sessions.qwen-web-primary]
+# provider = "qwen-web"
+# label = "Qwen web primary"
+# login_url = "https://chat.qwen.ai/"
+# enabled = true
+#
+# Browser-backed gateway accounts are explicitly bound to one isolated browser session.
+# v0.28 has built-in first-class Gemini/Qwen adapters. Their scripts are embedded in the
+# binary, versioned by contract, and probed before routing; no adapter_script is required.
+# Provider UI model selection is optional. If model_labels is omitted, the adapter keeps
+# the model already selected in the provider UI.
+# [browser.bindings.gemini-web-account]
+# session = "gemini-web-primary"
+# adapter_contract_version = 1
+# models = ["gemini-web-pro", "gemini-web-flash"]
+# model_labels = { "gemini-web-pro" = "Pro", "gemini-web-flash" = "Flash" }
+# ephemeral_chat = true
+# probe_timeout_ms = 3000
+# response_timeout_ms = 180000
+# first_byte_timeout_ms = 30000
+# idle_stream_timeout_ms = 30000
+# # Emergency DOM drift override example:
+# # selector_overrides = { input = ["div[aria-label='Enter a prompt for Gemini']"] }
+#
+# [browser.bindings.qwen-web-account]
+# session = "qwen-web-primary"
+# adapter_contract_version = 1
+# models = ["qwen-web-coder"]
+# model_labels = { "qwen-web-coder" = "Qwen3-Coder" }
+# ephemeral_chat = true
+# probe_timeout_ms = 3000
+# response_timeout_ms = 180000
+
+# Optional local Chromium launcher. This is separate from browser session persistence so API-only
+# and headless deployments remain unchanged. The driver always uses the isolated profile above,
+# binds DevTools to 127.0.0.1, and observes only sanitized page URLs (query/fragment removed).
+[chromium]
+enabled = true
+# executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+startup_timeout_seconds = 15
+# v0.27 reconciles SQLite lifecycle state with the real Chromium/CDP runtime.
+# A previously-ready profile is safely relaunched after an unexpected browser crash.
+# Deliberately stopped / login-required / attention sessions are never auto-launched.
+auto_recover = true
+reconcile_interval_seconds = 15
+extra_args = []
+
+[chromium.sessions]
+
+[chromium.sessions.chatgpt-web-41d15799]
+enabled = true
+ready_url_prefixes = ["https://chatgpt.com/"]
+
+[chromium.sessions.deepseek-web-cc8d6e90]
+enabled = true
+ready_url_prefixes = ["https://chat.deepseek.com/"]
+
+[chromium.sessions.mimo-web-099bc0bc]
+enabled = true
+ready_url_prefixes = ["https://aistudio.xiaomimimo.com/"]
+
+[chromium.sessions.gemini-web-77c02275]
+enabled = true
+ready_url_prefixes = ["https://gemini.google.com/app"]
+
+# Enable a driver mapping for each browser session you want llmgateway to launch/verify.
+# ready_url_prefixes are used only to decide whether normal interactive login reached an authenticated page.
+# [chromium.sessions.gemini-web-primary]
+# enabled = true
+# ready_url_prefixes = ["https://gemini.google.com/app"]
+#
+# [chromium.sessions.qwen-web-primary]
+# enabled = true
+# ready_url_prefixes = ["https://chat.qwen.ai/"]
+
+# Account-level usage/quota state is persisted in the same SQLite database.
+# 429 cooldown applies to the whole account, not only the route that failed.
+[usage]
+enabled = true
+hard_limits = true
+default_rate_limit_cooldown_seconds = 60
+# Adds a small penalty for accounts already used more today. Set 0 to disable balancing.
+balance_weight = 1
+
+# Optional local budget hints. Leave a field unset when the provider does not expose a stable limit.
+# [usage.accounts.gemini-primary]
+# daily_request_limit = 1000
+# monthly_request_limit = 20000
+# daily_token_limit = 2000000
+# monthly_token_limit = 40000000
+# rate_limit_cooldown_seconds = 60
+
+# [usage.accounts.gemini-secondary]
+# daily_request_limit = 1000
+# monthly_request_limit = 20000
+
+# Adaptive routing is conservative: readiness/quota/cooldown still decide eligibility first.
+# Once a route has enough runtime samples, slower or less reliable routes receive a bounded
+# positive penalty. Configured priority remains part of the final score, and max_penalty caps
+# how far telemetry may move a route.
+[routing]
+adaptive_enabled = true
+adaptive_min_samples = 3
+# On restart, replay at most this many qualifying execution attempts per route.
+adaptive_history_samples = 100
+# Adaptive penalties expire after this idle period. History remains visible in explain output,
+# but stale telemetry becomes neutral so previously degraded routes can be tried again.
+adaptive_stale_after_seconds = 3600
+adaptive_ewma_alpha = 0.25
+adaptive_latency_target_ms = 1200
+adaptive_max_penalty = 30
+adaptive_failure_weight = 0.70
+
+# v0.26 task-aware routing classifies the request locally, without another LLM call.
+# Lower final scores win. Matching route metadata can subtract a bounded bonus while
+# explicit premium/expensive metadata may add a small simple-chat mismatch penalty.
+task_aware_enabled = true
+task_fit_max_bonus = 20
+task_mismatch_penalty = 12
+task_long_context_threshold_tokens = 12000
+task_simple_max_input_tokens = 800
+
+# v0.31 keeps browser execution as the default while making the policy explicit.
+# Preferred names are "prefer-browser", "browser-only", "balanced", "prefer-api", and "api-only".
+# Legacy "browser-first" and "api-first" remain accepted aliases.
+execution_preference = "prefer-browser"
+# Under prefer-browser, false removes API routes from fallback. browser-only is the hard boundary.
+api_fallback = true
+
+# Equal-quality browser routes rotate by least-recent successful account use. Persistent threads
+# can keep a healthy browser route sticky so provider/session churn does not defeat context affinity.
+browser_fairness_enabled = true
+browser_sticky_affinity = true
+
+# A browser route that just left cooldown re-enters cautiously. The penalty is additive to the
+# normal priority/quota/adaptive/task score and disappears after a successful request.
+browser_recovery_penalty = 8
+browser_recovery_max_penalty = 40
+
+# Context is compiled before persistent-thread requests are sent upstream.
+# Full transcripts remain in SQLite; checkpoints only replace older turns in the model input.
+[context]
+enabled = true
+target_tokens = 16000
+reserve_output_tokens = 4000
+recent_messages = 12
+compaction_trigger_ratio = 0.85
+summary_input_tokens = 12000
+summary_max_tokens = 1200
+# summary_model = "llmgateway-auto" # optional; defaults to the thread/requested model
+
+# Relevant excerpts are retrieved only from transcript history already represented by a checkpoint.
+retrieval_enabled = true
+retrieval_max_chunks = 3
+retrieval_max_tokens = 2400
+retrieval_min_score = 0.35
+
+# "local" is zero-config and uses the v0.7 lexical/phrase scorer.
+# "hybrid" adds OpenAI-compatible embeddings as a semantic reranker and falls back to local
+# retrieval in the same request if embedding credentials, quota, transport, or response fail.
+retrieval_backend = "local"
+# retrieval_embedding_account = "openrouter-main"
+# retrieval_embedding_model = "openai/text-embedding-3-small"
+retrieval_semantic_weight = 0.70
+retrieval_min_similarity = 0.15
+retrieval_embedding_batch_size = 64
+
+# Providers describe execution protocols/endpoints. models_path is used by API model discovery.
+[[providers]]
+id = "openrouter"
+kind = "openai-compatible"
+base_url = "https://openrouter.ai/api/v1"
+models_path = "models"
+
+[[providers]]
+id = "gemini"
+kind = "openai-compatible"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+models_path = "models"
+
+[[providers]]
+id = "qwen"
+kind = "openai-compatible"
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+models_path = "models"
+
+[[providers]]
+id = "gemini-web"
+kind = "browser-gemini"
+
+[[providers]]
+id = "qwen-web"
+kind = "browser-qwen"
+
+[[providers]]
+id = "chatgpt-web"
+kind = "browser-chatgpt"
+
+[[providers]]
+id = "deepseek-web"
+kind = "browser-deepseek"
+
+[[providers]]
+id = "mimo-web"
+kind = "browser-mimo"
+
+# v0.28 built-in browser providers execute the embedded, versioned adapter contract inside
+# an authenticated Chromium page. Browser providers do not require base_url or API keys.
+# [[providers]]
+# id = "gemini-web"
+# kind = "browser-gemini"
+#
+# [[providers]]
+# id = "qwen-web"
+# kind = "browser-qwen"
+#
+# Generic custom browser-cdp remains available for trusted local adapter scripts:
+# [[providers]]
+# id = "custom-web"
+# kind = "browser-cdp"
+
+# v0.15 browser-http remains available for a local bridge/test adapter.
+# [[providers]]
+# id = "gemini-web-bridge"
+# kind = "browser-http"
+# base_url = "http://127.0.0.1:7441/v1"
+# models_path = "models"
+
+# Accounts are credential/quota domains. API accounts require api_key_env and default to
+# model discovery enabled.
+[[accounts]]
+id = "openrouter-main"
+provider = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+auth_style = "bearer"
+enabled = false
+discover_models = true
+
+[[accounts]]
+id = "gemini-primary"
+provider = "gemini"
+api_key_env = "GEMINI_API_KEY_PRIMARY"
+auth_style = "bearer"
+enabled = false
+discover_models = true
+
+[[accounts]]
+id = "gemini-secondary"
+provider = "gemini"
+api_key_env = "GEMINI_API_KEY_SECONDARY"
+auth_style = "bearer"
+enabled = false
+discover_models = true
+
+[[accounts]]
+id = "qwen-primary"
+provider = "qwen"
+api_key_env = "QWEN_API_KEY"
+auth_style = "bearer"
+enabled = false
+discover_models = true
+
+[[accounts]]
+id = "chatgpt-web-41d15799"
+provider = "chatgpt-web"
+enabled = false
+discover_models = false
+
+[[accounts]]
+id = "deepseek-web-cc8d6e90"
+provider = "deepseek-web"
+enabled = true
+discover_models = true
+
+[[accounts]]
+id = "mimo-web-099bc0bc"
+provider = "mimo-web"
+enabled = true
+discover_models = true
+
+[[accounts]]
+id = "gemini-web-77c02275"
+provider = "gemini-web"
+enabled = true
+discover_models = true
+
+# v0.17 browser accounts are first-class: no dummy api_key_env/auth_style is required and
+# API model discovery is automatically disabled for every browser-* provider.
+# [[accounts]]
+# id = "gemini-web-account"
+# provider = "gemini-web"
+# enabled = true
+#
+# [[accounts]]
+# id = "qwen-web-account"
+# provider = "qwen-web"
+# enabled = true
+
+# Routes are explicit preferred bindings. Discovered API account/model pairs can also be used dynamically.
+# Task-aware capability tags are policy metadata: coding, reasoning, long-context, cheap, fast,
+# simple-chat, premium, expensive. context_window is optional and should be set only when known;
+# a known window that cannot fit the request is excluded before scoring.
+[[routes]]
+id = "gemini-primary"
+account = "gemini-primary"
+model = "gemini-3.7-flash"
+priority = 10
+enabled = true
+capabilities = ["chat", "tools", "vision", "coding", "cheap", "fast"]
+
+[[routes]]
+id = "gemini-secondary"
+account = "gemini-secondary"
+model = "gemini-3.7-flash"
+priority = 20
+enabled = true
+capabilities = ["chat", "tools", "vision", "coding", "cheap", "fast"]
+
+[[routes]]
+id = "qwen-coder"
+account = "qwen-primary"
+model = "qwen3-coder-plus"
+priority = 10
+enabled = true
+capabilities = ["chat", "tools", "coding", "reasoning"]
+
+[[routes]]
+id = "openrouter-fallback"
+account = "openrouter-main"
+model = "anthropic/claude-sonnet-4.6"
+priority = 100
+enabled = true
+capabilities = ["chat", "tools", "coding", "reasoning", "long-context", "premium"]
+
+[[routes]]
+id = "chatgpt-web-41d15799-route"
+account = "chatgpt-web-41d15799"
+model = "chatgpt-web-default"
+priority = 1
+enabled = true
+capabilities = ["chat", "coding", "reasoning"]
+
+[[routes]]
+id = "deepseek-web-cc8d6e90-route"
+account = "deepseek-web-cc8d6e90"
+model = "deepseek-web-default"
+priority = 11
+enabled = true
+capabilities = ["chat", "coding", "reasoning"]
+
+[[routes]]
+id = "mimo-web-099bc0bc-route"
+account = "mimo-web-099bc0bc"
+model = "mimo-web-default"
+priority = 10
+enabled = true
+capabilities = ["chat", "coding", "reasoning"]
+
+[[routes]]
+id = "gemini-web-77c02275-route"
+account = "gemini-web-77c02275"
+model = "gemini-web-default"
+priority = 1
+enabled = true
+capabilities = ["chat", "reasoning", "long-context"]
+
+[virtual_models.llmgateway-auto]
+enabled = true
+
+[[virtual_models.llmgateway-auto.tiers]]
+priority = 1
+models = ["gemini-web/gemini-web-flash", "qwen-web/qwen3.8-max", "deepseek-web/deepseek-web-expert", "deepseek-web/deepseek-web-reasoning", "qwen-web/qwen3.7-plus", "gemini-web/gemini-web-pro"]
+
+[virtual_models.llmgateway-coding]
+enabled = true
+
+[[virtual_models.llmgateway-coding.tiers]]
+priority = 10
+models = ["gemini-web/gemini-web-pro", "deepseek-web/deepseek-web-reasoning", "qwen-web/qwen3.8-max", "gemini-web/gemini-web-flash"]
+
+[virtual_models.llmgateway-best]
+enabled = true
+
+[[virtual_models.llmgateway-best.tiers]]
+priority = 10
+models = ["qwen-web/qwen3.8-max", "deepseek-web/deepseek-web-reasoning", "gemini-web/gemini-web-pro"]
+
+# Claude Code can keep asking for its normal model names; aliases map them to policies.
+[[aliases]]
+pattern = "claude-sonnet-*"
+target = "llmgateway-coding"
+
+[[aliases]]
+pattern = "claude-opus-*"
+target = "llmgateway-best"
+
+[[aliases]]
+pattern = "claude-haiku-*"
+target = "llmgateway-auto"

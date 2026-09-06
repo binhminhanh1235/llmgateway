@@ -41,8 +41,8 @@ const GEMINI_ADAPTER_VERSION: &str = "experimental-2";
 const USAGE_LIMIT_EXCEEDED: i64 = 1037;
 const MODEL_HEADER_INVALID: i64 = 1052;
 const UPSTREAM_TRANSIENT_REJECTION: i64 = 1155;
-const MAX_TRANSIENT_RETRIES: usize = 3;
-const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(500);
+const MAX_TRANSIENT_RETRIES: usize = 4;
+const TRANSIENT_RETRY_BASE_DELAY: Duration = Duration::from_millis(1500);
 const STREAM_REWRITE_HOLD_CHARS: usize = 192;
 const MODEL_CATALOG_TTL: Duration = Duration::from_secs(600);
 
@@ -665,7 +665,9 @@ impl GeminiWebHttpAdapter {
         let mut upstream = response.bytes_stream();
         let mut decoder = GeminiFrameDecoder::default();
         let mut initial_frames = Vec::new();
-        let mut has_text_or_completion = false;
+        let mut initial_emitter = StableTextEmitter::default();
+        let mut initial_latest = GeminiFrameUpdate::default();
+        let mut confirmed = false;
 
         while let Some(chunk) = upstream.next().await {
             let chunk = chunk.map_err(|error| {
@@ -688,13 +690,21 @@ impl GeminiWebHttpAdapter {
                         return Err(generation_error(error_code, &account_id, &model));
                     }
                 }
-                if !update.text.is_empty() || update.completed {
-                    has_text_or_completion = true;
-                }
+                merge_update(&mut initial_latest, update.clone());
                 initial_frames.push(update);
+
+                if initial_latest.completed {
+                    confirmed = true;
+                } else if !initial_latest.text.is_empty() {
+                    if let Ok(Some(delta)) = initial_emitter.observe(&initial_latest.text, false) {
+                        if !delta.is_empty() {
+                            confirmed = true;
+                        }
+                    }
+                }
             }
 
-            if has_text_or_completion {
+            if confirmed {
                 break;
             }
         }
@@ -922,7 +932,7 @@ impl GeminiWebHttpAdapter {
                 return;
             }
 
-            let finish_reason = if latest.completed { "stop" } else { "length" };
+            let finish_reason = "stop";
             let final_event = json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -1068,7 +1078,8 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
             .conversation_metadata(&request, &request.route.model)
             .await?;
         let has_native_state = metadata != default_metadata();
-        let prompt = serialize_prompt(&request.body, has_native_state)?;
+        let budget = request.binding.max_prompt_chars.unwrap_or(120_000);
+        let prompt = serialize_prompt(&request.body, has_native_state, budget)?;
         let is_stream = request
             .body
             .get("stream")
@@ -1099,7 +1110,9 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
                 Err(error) => {
                     if attempts < MAX_TRANSIENT_RETRIES && is_gemini_transient_error(&error) {
                         attempts += 1;
-                        let delay = TRANSIENT_RETRY_DELAY * attempts as u32;
+                        let base = TRANSIENT_RETRY_BASE_DELAY * (1u32 << (attempts - 1).min(3));
+                        let jitter = Duration::from_millis((Uuid::new_v4().as_u128() % 500) as u64);
+                        let delay = base + jitter;
                         tracing::warn!(
                             account_id = %request.account.id,
                             model = %request.route.model,
@@ -1108,24 +1121,18 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
                             error = %error,
                             "Gemini StreamGenerate transient rejection; retrying in-flight request"
                         );
-                        if attempts >= 2 {
-                            self.invalidate_model_catalog(&request.account.id).await;
-                            if let Ok(fresh_session) = self
-                                .init_session(
-                                    &material,
-                                    &request.account.id,
-                                    Duration::from_millis(
-                                        request
-                                            .binding
-                                            .probe_timeout_ms
-                                            .unwrap_or(8_000)
-                                            .max(3_000),
-                                    ),
-                                )
-                                .await
-                            {
-                                session = fresh_session;
-                            }
+                        self.invalidate_model_catalog(&request.account.id).await;
+                        if let Ok(fresh_session) = self
+                            .init_session(
+                                &material,
+                                &request.account.id,
+                                Duration::from_millis(
+                                    request.binding.probe_timeout_ms.unwrap_or(8_000).max(3_000),
+                                ),
+                            )
+                            .await
+                        {
+                            session = fresh_session;
                         }
                         tokio::time::sleep(delay).await;
                         continue;
@@ -1494,6 +1501,7 @@ fn normalize_model_lookup(value: &str) -> String {
 fn serialize_prompt(
     body: &Value,
     native_continuation: bool,
+    budget: usize,
 ) -> Result<String, BrowserProviderError> {
     let messages = body
         .get("messages")
@@ -1512,6 +1520,16 @@ fn serialize_prompt(
         {
             let text = content_text(message.get("content").unwrap_or(&Value::Null));
             if !text.trim().is_empty() {
+                if text.len() > budget {
+                    tracing::warn!(
+                        original_len = text.len(),
+                        budget = budget,
+                        "Gemini native user turn exceeds budget; truncating"
+                    );
+                    let mut truncated = text;
+                    truncated.truncate(budget);
+                    return Ok(truncated);
+                }
                 return Ok(text);
             }
         }
@@ -1542,7 +1560,78 @@ fn serialize_prompt(
             "Gemini browserless chat requires at least one text message".into(),
         ));
     }
+
+    let prompt = if prompt.len() > budget {
+        tracing::warn!(
+            original_len = prompt.len(),
+            budget = budget,
+            "Gemini web prompt exceeds budget; truncating older messages"
+        );
+        truncate_prompt_to_budget(&rendered, budget)
+    } else {
+        prompt
+    };
+
     Ok(prompt)
+}
+
+fn truncate_prompt_to_budget(rendered: &[String], budget: usize) -> String {
+    if rendered.is_empty() {
+        return String::new();
+    }
+
+    let system_msg = rendered.first().cloned().unwrap_or_default();
+    let mut last_msg = String::new();
+
+    if rendered.len() > 1 {
+        last_msg = rendered.last().cloned().unwrap_or_default();
+    }
+
+    let sys_len = system_msg.len();
+    let last_len = last_msg.len();
+    let fixed_len = sys_len + last_len + if sys_len > 0 && last_len > 0 { 4 } else { 0 }; // 4 for "\n\n"
+
+    if fixed_len > budget {
+        // If even the first and last messages exceed budget, we have to hard truncate.
+        // We'll keep the last message intact (it's the current user query) and truncate the system message.
+        if last_len >= budget {
+            let mut truncated = last_msg;
+            truncated.truncate(budget);
+            return truncated;
+        } else {
+            let mut truncated_sys = system_msg;
+            truncated_sys.truncate(budget - last_len - 4);
+            return format!("{}\n\n{}", truncated_sys, last_msg);
+        }
+    }
+
+    let mut selected = vec![system_msg];
+    let mut current_len = sys_len;
+
+    // We add messages from the end (most recent), excluding the last message which is always added
+    let middle_indices = (1..rendered.len().saturating_sub(1))
+        .rev()
+        .collect::<Vec<_>>();
+    let mut selected_middle = Vec::new();
+
+    for idx in middle_indices {
+        let msg = &rendered[idx];
+        let cost = msg.len() + 4; // Add "\n\n"
+        if current_len + cost + last_len <= budget {
+            current_len += cost;
+            selected_middle.push(msg.clone());
+        } else {
+            break;
+        }
+    }
+
+    selected_middle.reverse(); // put them back in chronological order
+    selected.extend(selected_middle);
+    if rendered.len() > 1 {
+        selected.push(last_msg);
+    }
+
+    selected.join("\n\n")
 }
 
 fn content_text(value: &Value) -> String {
@@ -1900,10 +1989,26 @@ mod tests {
                 {"role":"user","content":"second"}
             ]
         });
-        assert_eq!(serialize_prompt(&body, true).unwrap(), "second");
-        assert!(serialize_prompt(&body, false)
+        assert_eq!(serialize_prompt(&body, true, 120_000).unwrap(), "second");
+        assert!(serialize_prompt(&body, false, 120_000)
             .unwrap()
             .contains("User: first"));
+    }
+
+    #[test]
+    fn prompt_truncation_preserves_system_and_latest_user() {
+        let body = json!({
+            "messages": [
+                {"role":"system","content":"System instructions."},
+                {"role":"user","content":"First question that is very long: ".to_string() + &"x".repeat(500)},
+                {"role":"assistant","content":"First answer: ".to_string() + &"y".repeat(500)},
+                {"role":"user","content":"Latest question"}
+            ]
+        });
+        let serialized = serialize_prompt(&body, false, 100).unwrap();
+        assert!(serialized.contains("System: System instructions."));
+        assert!(serialized.ends_with("User: Latest question"));
+        assert!(!serialized.contains(&"x".repeat(500)));
     }
 
     #[test]
