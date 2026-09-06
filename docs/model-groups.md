@@ -56,6 +56,26 @@ llmgateway rejects:
 - a route listed more than once or in more than one tier;
 - groups that mix legacy `routes` with `tiers`.
 
+## Enable/disable and fallback membership
+
+Accounts, physical models, and model groups each have an independent enabled state.
+
+- Disabling an **account** removes every route backed by that account from fallback eligibility.
+- Disabling a **physical model** removes that model from fallback eligibility across accounts without changing per-account model bindings.
+- Disabling a **model group** keeps its configuration intact but prevents the logical model from routing and hides it from `/v1/models`.
+- A disabled account or physical model is **not removed from any group**. `GET /_llmgateway/model-groups` returns those preserved members in `ignored_models`.
+- Re-enabling the account or model automatically removes it from `ignored_models` as soon as at least one enabled, available account binding is routable again.
+
+This makes enable/disable a reversible routing mask rather than a destructive edit to ordered fallback membership. Existing inactive members may remain in a group while it is edited, but new group members must be currently fallback-eligible.
+
+Admin state endpoints:
+
+- `PATCH /_llmgateway/accounts/{account_id}` with `{"enabled":true|false}`;
+- `PATCH /_llmgateway/models/{canonical_model_id}` with `{"enabled":true|false}`;
+- `PATCH /_llmgateway/model-groups/{group_id}` with `{"enabled":true|false}`.
+
+The built-in Accounts, Models, and Groups screens expose the same controls as toggle switches and provide **All / Enabled / Disabled** tabs.
+
 ## Observability
 
 `POST /_llmgateway/routes/explain` includes `group_tier_priority` for every candidate in a tiered group. This makes fallback order visible without exposing provider-private model metadata.
@@ -81,6 +101,7 @@ Admin endpoints:
 - `GET /_llmgateway/model-groups` — list groups plus configured route inventory;
 - `POST /_llmgateway/model-groups` — create a tiered group;
 - `PUT /_llmgateway/model-groups/{group_id}` — replace the group's tiers;
+- `PATCH /_llmgateway/model-groups/{group_id}` — enable or disable the group without changing membership;
 - `DELETE /_llmgateway/model-groups/{group_id}` — delete a non-default group.
 
 The default group cannot be deleted. A group targeted by an alias must be detached from that alias before deletion.
