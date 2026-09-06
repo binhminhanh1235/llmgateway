@@ -72,6 +72,7 @@ pub struct RouteDecisionTrace {
     pub execution_policy: String,
     pub api_fallback: bool,
     pub task: TaskProfile,
+    pub required_capabilities: Vec<String>,
     pub selected_route: Option<String>,
     pub candidates: Vec<RouteCandidateDecision>,
 }
@@ -203,6 +204,7 @@ impl Router {
             execution_policy: config.routing.execution_policy().to_string(),
             api_fallback: config.routing.api_fallback,
             task: evaluation.task,
+            required_capabilities: evaluation.required_capabilities,
             selected_route,
             candidates: evaluation
                 .candidates
@@ -220,6 +222,7 @@ impl Router {
     ) -> RouteEvaluation {
         let resolved_model = config.resolve_model_alias(requested_model).to_string();
         let task = classify_task(body, &config.routing);
+        let required_capabilities = required_capabilities(body);
         let candidates = self.candidate_routes(config.clone(), &resolved_model).await;
         let apply_execution_policy = config.virtual_models.contains_key(&resolved_model);
         let group_enabled = config
@@ -308,6 +311,39 @@ impl Router {
                     Some((model.enabled, binding_enabled))
                 })
                 .unwrap_or((true, true));
+
+            if !required_capabilities.is_empty() {
+                let mut effective_capabilities = route
+                    .capabilities
+                    .iter()
+                    .map(|value| normalize_capability(value))
+                    .collect::<HashSet<_>>();
+                if let Some(account) = config.account(&route.account) {
+                    if let Some(provider) = config.provider(&account.provider) {
+                        if provider.is_browser() {
+                            if let Some(registry) = browser_provider_runtime::get() {
+                                if registry.supports_image_input(&provider.kind) {
+                                    effective_capabilities.insert("vision".into());
+                                    effective_capabilities.insert("image_input".into());
+                                }
+                                if registry.supports_file_input(&provider.kind) {
+                                    effective_capabilities.insert("file".into());
+                                    effective_capabilities.insert("file_input".into());
+                                    effective_capabilities.insert("native_file_upload".into());
+                                }
+                            }
+                        }
+                    }
+                }
+                for capability in &required_capabilities {
+                    if !capability_supported(&effective_capabilities, capability) {
+                        push_unique(
+                            &mut exclusion_reasons,
+                            &format!("capability_missing:{capability}"),
+                        );
+                    }
+                }
+            }
 
             if !group_enabled {
                 push_unique(&mut exclusion_reasons, "group_disabled");
@@ -522,6 +558,7 @@ impl Router {
         RouteEvaluation {
             resolved_model,
             task,
+            required_capabilities,
             candidates: evaluated,
         }
     }
@@ -865,7 +902,88 @@ impl Router {
 struct RouteEvaluation {
     resolved_model: String,
     task: TaskProfile,
+    required_capabilities: Vec<String>,
     candidates: Vec<EvaluatedRoute>,
+}
+
+fn normalize_capability(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn content_type_present(value: &Value, accepted: &[&str]) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(|value| content_type_present(value, accepted)),
+        Value::Object(object) => {
+            if object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| accepted.iter().any(|accepted| kind.eq_ignore_ascii_case(accepted)))
+            {
+                return true;
+            }
+            object.values().any(|value| content_type_present(value, accepted))
+        }
+        _ => false,
+    }
+}
+
+fn output_modality_present(body: &Value, modality: &str) -> bool {
+    ["modalities", "output_modalities"].iter().any(|field| {
+        body.get(*field)
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values.iter().any(|value| {
+                    value
+                        .as_str()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(modality))
+                })
+            })
+    })
+}
+
+fn required_capabilities(body: Option<&Value>) -> Vec<String> {
+    let Some(body) = body else {
+        return Vec::new();
+    };
+    let mut required = Vec::new();
+    let task = body
+        .get("llmgateway_task")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if content_type_present(body, &["image_url", "input_image", "image"]) {
+        push_unique(&mut required, "image_input");
+    }
+    if content_type_present(body, &["input_file", "file"]) {
+        push_unique(&mut required, "file_input");
+    }
+    if content_type_present(body, &["input_audio", "audio"]) {
+        push_unique(&mut required, "audio_input");
+    }
+    if output_modality_present(body, "image") || task == "image_generation" || task == "image_editing" {
+        push_unique(&mut required, "image_output");
+    }
+    if task == "image_editing" {
+        push_unique(&mut required, "image_editing");
+    }
+    if task == "audio_transcription" || task == "transcription" {
+        push_unique(&mut required, "audio_transcription");
+    }
+    required
+}
+
+fn capability_supported(effective: &HashSet<String>, required: &str) -> bool {
+    let any = |names: &[&str]| names.iter().any(|name| effective.contains(*name));
+    match required {
+        "image_input" => any(&["vision", "image", "image_input"]),
+        "file_input" => any(&["file", "files", "file_input", "document", "documents", "native_file_upload"]),
+        "audio_input" => any(&["audio", "audio_input"]),
+        "audio_transcription" => any(&["audio_transcription", "transcription"]),
+        "image_output" => any(&["image_generation", "image_output"]),
+        "image_editing" => any(&["image_editing", "image_edit"]),
+        other => effective.contains(other),
+    }
 }
 
 fn execution_policy_exclusion(
@@ -889,7 +1007,11 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{execution_policy_exclusion, push_unique};
+    use super::{
+        capability_supported, execution_policy_exclusion, required_capabilities, push_unique,
+    };
+    use serde_json::json;
+    use std::collections::HashSet;
     use chrono::{Duration, Utc};
 
     #[test]
@@ -918,6 +1040,46 @@ mod tests {
         assert_eq!(
             execution_policy_exclusion("prefer-api", true, "browser"),
             None
+        );
+    }
+
+    #[test]
+    fn capability_requirements_are_derived_before_route_scoring() {
+        let body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "file_id": "file_image"},
+                    {"type": "input_file", "file_id": "file_pdf"}
+                ]
+            }],
+            "output_modalities": ["text", "image"]
+        });
+        assert_eq!(
+            required_capabilities(Some(&body)),
+            vec!["image_input", "file_input", "image_output"]
+        );
+
+        let tags = HashSet::from([
+            "vision".to_string(),
+            "file".to_string(),
+            "image_generation".to_string(),
+        ]);
+        assert!(capability_supported(&tags, "image_input"));
+        assert!(capability_supported(&tags, "file_input"));
+        assert!(capability_supported(&tags, "image_output"));
+        assert!(!capability_supported(&tags, "audio_transcription"));
+    }
+
+    #[test]
+    fn media_tasks_map_to_hard_capabilities() {
+        assert_eq!(
+            required_capabilities(Some(&json!({"llmgateway_task":"audio_transcription"}))),
+            vec!["audio_transcription"]
+        );
+        assert_eq!(
+            required_capabilities(Some(&json!({"llmgateway_task":"image_editing"}))),
+            vec!["image_output", "image_editing"]
         );
     }
 
