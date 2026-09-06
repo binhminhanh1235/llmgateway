@@ -479,6 +479,27 @@ impl Gateway {
                 return Err(self.finish_execution_error(&request_id, error).await);
             }
         }
+        if file_attachments::request_has_file(body) {
+            let eligible_before_files = routes.len();
+            routes.retain(|route| {
+                let route_declares_file = file_attachments::route_supports_file(&route.capabilities);
+                let Some(account) = config.account(&route.account) else {
+                    return false;
+                };
+                let Some(provider) = config.provider(&account.provider) else {
+                    return false;
+                };
+                if !BrowserProviderRegistry::is_browser_kind(&provider.kind) {
+                    return route_declares_file;
+                }
+                browser_provider_runtime::get()
+                    .is_some_and(|registry| registry.supports_file_input(&provider.kind))
+            });
+            if eligible_before_files > 0 && routes.is_empty() {
+                let error = GatewayError::UnsupportedCapability("file_input".into());
+                return Err(self.finish_execution_error(&request_id, error).await);
+            }
+        }
         if let Some(preferred_route) = preferred_route {
             if let Some(index) = routes.iter().position(|route| route.id == preferred_route) {
                 let keep_sticky = index == 0
