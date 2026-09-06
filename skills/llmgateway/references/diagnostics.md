@@ -48,7 +48,7 @@ Inspect:
 - account state;
 - browser account runtime;
 - browser session;
-- Chromium driver status;
+- browser driver status;
 - adapter/page compatibility;
 - authentication state.
 
