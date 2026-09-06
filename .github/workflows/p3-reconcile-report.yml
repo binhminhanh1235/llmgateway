@@ -1,0 +1,37 @@
+name: P3 reconcile conflict report
+
+on:
+  push:
+    branches:
+      - feat/multimodal-gateway
+    paths:
+      - .github/workflows/p3-reconcile-report.yml
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Merge current main without committing
+        shell: bash
+        run: |
+          set +e
+          git fetch origin main
+          git merge --no-ff --no-commit origin/main
+          merge_rc=$?
+          echo "merge_rc=$merge_rc"
+          echo "=== STATUS ==="
+          git status --short
+          echo "=== UNMERGED FILES ==="
+          git diff --name-only --diff-filter=U
+          echo "=== CONFLICT MARKERS ==="
+          for f in $(git diff --name-only --diff-filter=U); do
+            echo "----- $f -----"
+            grep -n -C 12 -E '^(<<<<<<<|=======|>>>>>>>)' "$f" || true
+          done
+          exit 0
