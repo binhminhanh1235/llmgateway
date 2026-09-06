@@ -30,3 +30,16 @@ Place unit tests in a `#[cfg(test)] mod tests` block beside covered code. Name t
 Use concise Conventional Commit-style subjects consistent with history: `test: preserve target provider identity across stream control` or `ci: run native conversation affinity gate earlier`. Prefer a scoped prefix when useful, such as `fix:`, `feat:`, `docs:`, `test:`, or `ci:`.
 
 Pull requests should explain the behavioral change, configuration or migration impact, and tests run. Link the related issue when available. Include screenshots for visible UI changes and redact API keys, cookies, browser profiles, and local `.env` values. Do not commit generated `data/` state or personal configuration.
+
+
+## Agent Skill Guidelines
+
+The portable llmgateway Agent Skill lives in `skills/llmgateway/`. Keep `SKILL.md` concise and use `references/` for progressive disclosure. Runtime behavior documented by the skill must match the current API/config contracts; do not embed a second model-ranking or routing engine in agent instructions.
+
+The helper CLI in `skills/llmgateway/scripts/llmgateway_agent.py` is intentionally READ + EXECUTE only. Do not add destructive or state-mutating commands there without an explicit design/security review. Test helper changes with:
+
+```bash
+python3 -m unittest skills/llmgateway/tests/test_llmgateway_agent.py
+```
+
+When adding future multimodal, MCP, or capability-routing guidance, feature-detect against shipped code and keep credentials, browser auth material, CAPTCHA/2FA, and provider anti-abuse boundaries out of agent control.
