@@ -98,7 +98,10 @@ MODELS=$(curl -fsS http://127.0.0.1:7331/v1/models "${AUTH[@]}")
 printf '%s' "$MODELS" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
-assert "ci-tiered" in {m["id"] for m in x["data"]}, x
+models={m["id"]:m for m in x["data"]}
+assert "ci-tiered" in models, x
+caps=(models["ci-tiered"].get("llmgateway") or {}).get("capabilities") or []
+assert "chat" in caps, models["ci-tiered"]
 '
 
 EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain "${AUTH[@]}" "${JSON[@]}" \
