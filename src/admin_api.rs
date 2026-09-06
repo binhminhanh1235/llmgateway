@@ -82,12 +82,12 @@ pub async fn set_model(
 
     let config = state.gateway.config_snapshot();
     match set_model_enabled(config.as_ref(), &model_id, body.enabled).await {
-        Ok(affected_bindings) => json_response(
+        Ok(affected_models) => json_response(
             StatusCode::OK,
             json!({
                 "model_id": model_id,
                 "enabled": body.enabled,
-                "affected_bindings": affected_bindings
+                "affected_models": affected_models
             }),
         ),
         Err(message) if message.starts_with("unknown model") => json_response(
