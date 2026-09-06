@@ -79,6 +79,11 @@
             <button id="refreshAccountsButton" class="secondary-button" type="button">Refresh</button>
           </div>
         </header>
+        <div id="accountStatusTabs" class="status-tabs" role="tablist" aria-label="Account status">
+          <button class="status-tab active" type="button" data-account-status="all">All <span data-status-count="all">0</span></button>
+          <button class="status-tab" type="button" data-account-status="enabled">Enabled <span data-status-count="enabled">0</span></button>
+          <button class="status-tab" type="button" data-account-status="disabled">Disabled <span data-status-count="disabled">0</span></button>
+        </div>
         <div id="accountsContent" class="content-scroll"></div>
       </section>
 
@@ -90,6 +95,11 @@
           </div>
           <input id="modelCatalogSearch" class="search-input compact" type="search" placeholder="Search models…" />
         </header>
+        <div id="modelStatusTabs" class="status-tabs" role="tablist" aria-label="Model status">
+          <button class="status-tab active" type="button" data-model-status="all">All <span data-status-count="all">0</span></button>
+          <button class="status-tab" type="button" data-model-status="enabled">Enabled <span data-status-count="enabled">0</span></button>
+          <button class="status-tab" type="button" data-model-status="disabled">Disabled <span data-status-count="disabled">0</span></button>
+        </div>
         <div id="modelsContent" class="content-scroll"></div>
       </section>
 
@@ -104,6 +114,11 @@
             <button id="refreshModelGroupsButton" class="secondary-button" type="button">Refresh</button>
           </div>
         </header>
+        <div id="groupStatusTabs" class="status-tabs" role="tablist" aria-label="Model group status">
+          <button class="status-tab active" type="button" data-group-status="all">All <span data-status-count="all">0</span></button>
+          <button class="status-tab" type="button" data-group-status="enabled">Enabled <span data-status-count="enabled">0</span></button>
+          <button class="status-tab" type="button" data-group-status="disabled">Disabled <span data-status-count="disabled">0</span></button>
+        </div>
         <div id="groupsContent" class="content-scroll">
           <div class="loading-box">Open Groups to load logical routing groups.</div>
         </div>
