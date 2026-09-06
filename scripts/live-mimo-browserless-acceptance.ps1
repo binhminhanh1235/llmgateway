@@ -123,6 +123,46 @@ function Send-ThreadMessage {
     return $response
 }
 
+function Invoke-DiscoveredModelThread {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$CanonicalModel,
+        [Parameter(Mandatory = $true)][string]$ExternalModel
+    )
+
+    $thread = Invoke-GatewayJson -Method POST -Path "/v1/threads" -Body @{
+        title = "$Label $(Get-Date -Format s)"
+        model = $CanonicalModel
+    }
+    $threadId = [string]$thread.id
+    Assert-True (-not [string]::IsNullOrWhiteSpace($threadId)) "$Label thread creation returned no id"
+    $CreatedThreads.Add($threadId)
+
+    $response = Invoke-Gateway -Method POST -Path "/v1/threads/$threadId/messages" -Body @{
+        content = "Reply briefly and identify this as $Label"
+        model = $CanonicalModel
+        stream = $false
+    }
+    $expectedRoute = "discovered:${AccountId}:$ExternalModel"
+    $routeHeader = [string]$response.Headers["x-llmgateway-route"]
+    Assert-True ($routeHeader -eq $expectedRoute) "$Label routed through '$routeHeader' instead of '$expectedRoute'"
+    $payload = $response.Content | ConvertFrom-Json
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$payload.choices[0].message.content)) "$Label returned no assistant content"
+
+    $runtime = Assert-BrowserClosed $Label
+    Assert-DirectExecution $runtime $Label
+    Assert-True ([string]$runtime.last_execution.model -eq $ExternalModel) "$Label executed '$($runtime.last_execution.model)' instead of '$ExternalModel'"
+
+    $affinity = Get-Affinity $threadId
+    $state = $affinity.state
+    $chain = $state.native_chain
+    Assert-True ([string]$state.transport -eq "mimo-http") "$Label affinity transport is '$($state.transport)'"
+    Assert-True ([string]$chain.model_external_id -eq $ExternalModel) "$Label native model is '$($chain.model_external_id)' instead of '$ExternalModel'"
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$chain.conversation_id)) "$Label has no native conversation id"
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$chain.response_id)) "$Label has no native response id"
+    return [string]$chain.conversation_id
+}
+
 function Assert-BrowserClosed([string]$Phase) {
     Start-Sleep -Milliseconds 250
     $runtime = Get-Runtime
@@ -287,6 +327,37 @@ try {
         Assert-True ($messagesSse -match '"type"\s*:\s*"message_stop"') "messages stream has no message_stop event"
         $runtime = Assert-BrowserClosed "messages streaming"
         Assert-DirectExecution $runtime "messages streaming"
+    }
+
+    Write-Step "Checking discovered MiMo model selection"
+    $accountModels = Invoke-GatewayJson -Method GET -Path "/_llmgateway/accounts/$AccountId/models"
+    $selectableModels = @($accountModels.data | Where-Object {
+        $model = $_
+        @($model.accounts | Where-Object {
+            [string]$_.account_id -eq $AccountId -and
+            [bool]$_.enabled -and
+            [string]$_.availability -eq "available" -and
+            [bool]$_.discovered
+        }).Count -gt 0
+    })
+    Write-Step "Discovered selectable models: $($selectableModels.Count)"
+    if ($selectableModels.Count -ge 2) {
+        $modelA = $selectableModels[0]
+        $modelB = $selectableModels[1]
+        Assert-True ([string]$modelA.id -ne [string]$modelB.id) "discovered model A and model B are identical"
+
+        $publicModels = Invoke-GatewayJson -Method GET -Path "/v1/models"
+        $publicIds = @($publicModels.data | ForEach-Object { [string]$_.id })
+        Assert-True ($publicIds -contains [string]$modelA.id) "/v1/models does not expose '$($modelA.id)'"
+        Assert-True ($publicIds -contains [string]$modelB.id) "/v1/models does not expose '$($modelB.id)'"
+
+        Write-Step "Model A actual-selection evidence: $($modelA.external_id)"
+        $conversationA = Invoke-DiscoveredModelThread -Label "MiMo model A" -CanonicalModel ([string]$modelA.id) -ExternalModel ([string]$modelA.external_id)
+        Write-Step "Model B actual-selection evidence: $($modelB.external_id)"
+        $conversationB = Invoke-DiscoveredModelThread -Label "MiMo model B" -CanonicalModel ([string]$modelB.id) -ExternalModel ([string]$modelB.external_id)
+        Assert-True ($conversationA -ne $conversationB) "model A/B threads mapped to the same MiMo native conversation"
+    } else {
+        Write-Step "Account exposes fewer than two selectable MiMo models; multi-model scenario is not applicable"
     }
 
     Write-Step "Scenario 1/4: fresh native conversation with Chromium closed"
