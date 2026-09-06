@@ -585,6 +585,8 @@ Import/copy toàn bộ folder `skills/llmgateway` cho client hỗ trợ Agent Sk
 
 Chi tiết: [docs/agent-native-gateway.md](docs/agent-native-gateway.md) và [docs/mcp-server.md](docs/mcp-server.md).
 
+Hermes Agent: [docs/hermes-agent-mcp.md](docs/hermes-agent-mcp.md). **Không dùng `uv`, Python, bun hoặc npm cho Agent/MCP runtime.**
+
 ---
 
 ## Test nhanh
