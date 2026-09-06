@@ -657,6 +657,17 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             {
                 capabilities.insert("vision".into());
             }
+            if config
+                .provider(&account.provider)
+                .filter(|provider| provider.is_browser())
+                .is_some_and(|provider| {
+                    browser_provider_runtime::get()
+                        .is_some_and(|registry| registry.supports_file_input(&provider.kind))
+                })
+            {
+                capabilities.insert("file".into());
+                capabilities.insert("native_file_upload".into());
+            }
         }
         enriched_route_capabilities
             .insert(route.id.clone(), capabilities.into_iter().collect());
@@ -702,6 +713,17 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             {
                 capability_tags.insert("vision".into());
             }
+            if config
+                .provider(&model.provider)
+                .filter(|provider| provider.is_browser())
+                .is_some_and(|provider| {
+                    browser_provider_runtime::get()
+                        .is_some_and(|registry| registry.supports_file_input(&provider.kind))
+                })
+            {
+                capability_tags.insert("file".into());
+                capability_tags.insert("native_file_upload".into());
+            }
         }
         let capability_tags = capability_tags.into_iter().collect::<Vec<_>>();
         data.insert(
@@ -743,6 +765,17 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             })
         {
             model_capabilities.insert("vision".into());
+        }
+        if config
+            .provider(&model.provider)
+            .filter(|provider| provider.is_browser())
+            .is_some_and(|provider| {
+                browser_provider_runtime::get()
+                    .is_some_and(|registry| registry.supports_file_input(&provider.kind))
+            })
+        {
+            model_capabilities.insert("file".into());
+            model_capabilities.insert("native_file_upload".into());
         }
         let model_capabilities = model_capabilities.into_iter().collect::<Vec<_>>();
         let multimodal_capabilities = ModelCapabilities::from_legacy_tags(&model_capabilities);
@@ -831,6 +864,17 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
             {
                 capabilities.insert("vision".into());
             }
+            if config
+                .provider(&model.provider)
+                .filter(|provider| provider.is_browser())
+                .is_some_and(|provider| {
+                    browser_provider_runtime::get()
+                        .is_some_and(|registry| registry.supports_file_input(&provider.kind))
+                })
+            {
+                capabilities.insert("file".into());
+                capabilities.insert("native_file_upload".into());
+            }
             let capabilities = capabilities.into_iter().collect::<Vec<_>>();
             let structured = ModelCapabilities::from_legacy_tags(&capabilities);
             json!({
@@ -878,6 +922,13 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
             {
                 tags.insert("vision".into());
             }
+            if provider.is_browser()
+                && browser_provider_runtime::get()
+                    .is_some_and(|registry| registry.supports_file_input(&provider.kind))
+            {
+                tags.insert("file".into());
+                tags.insert("native_file_upload".into());
+            }
             let tags = tags.into_iter().collect::<Vec<_>>();
             Some(AdapterCapabilities {
                 id: provider.id.clone(),
@@ -897,7 +948,7 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
                 "input":canonical_input_modalities(),
                 "output":canonical_output_modalities()
             },
-            "gateway_execution":ModelCapabilities::vision_execution(),
+            "gateway_execution":ModelCapabilities::attachment_execution(),
             "live_attachments":true,
             "artifact_store":{
                 "enabled":true,
