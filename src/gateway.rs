@@ -4,6 +4,7 @@ use crate::{
     catalog::ModelCatalog,
     config::{AccountConfig, AppConfig, ClientPolicyConfig, ProviderConfig, RouteConfig},
     execution_trace::{AttemptRecord, ExecutionTraceError, ExecutionTraceStore},
+    file_attachments,
     live_config::LiveConfig,
     quota_usage::{QuotaUsageStore, UsageEvent},
     quota_usage_runtime,
