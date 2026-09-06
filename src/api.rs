@@ -553,7 +553,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             continue;
         }
         let mut capability_tags = BTreeSet::new();
-        for route_id in &virtual_model.routes {
+        for route_id in virtual_model.route_ids() {
             let Some(route) = config.route(route_id).filter(|route| route.enabled) else {
                 continue;
             };
@@ -566,6 +566,28 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                     .cloned()
                     .unwrap_or_else(|| route.capabilities.clone()),
             );
+        }
+        for model_id in virtual_model.model_ids() {
+            if access
+                .policy()
+                .is_some_and(|policy| !policy.model_allowed(model_id, model_id))
+            {
+                continue;
+            }
+            let Some(model) = physical.iter().find(|model| model.id == model_id) else {
+                continue;
+            };
+            capability_tags.extend(model.capabilities.iter().cloned());
+            if config
+                .provider(&model.provider)
+                .filter(|provider| provider.is_browser())
+                .is_some_and(|provider| {
+                    browser_provider_runtime::get()
+                        .is_some_and(|registry| registry.supports_image_input(&provider.kind))
+                })
+            {
+                capability_tags.insert("vision".into());
+            }
         }
         let capability_tags = capability_tags.into_iter().collect::<Vec<_>>();
         data.insert(
