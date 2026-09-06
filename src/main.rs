@@ -32,6 +32,7 @@ mod embedding_retrieval;
 mod embedding_runtime;
 mod execution_trace;
 mod execution_trace_api;
+mod file_attachments;
 mod files_api;
 mod gateway;
 mod gemini_web_transport;
