@@ -399,7 +399,11 @@ impl ModelCatalog {
                 enabled: account.enabled,
                 discover_models,
                 model_count: row.try_get("model_count")?,
-                available_model_count: row.try_get("available_model_count")?,
+                available_model_count: if account.enabled {
+                    row.try_get("available_model_count")?
+                } else {
+                    0
+                },
             });
         }
         Ok(result)
