@@ -488,7 +488,7 @@ async fn model_views(
             context_window: model.context_window,
             capabilities: model.capabilities,
             enabled: model.enabled,
-            fallback_eligible: !active_accounts.is_empty(),
+            fallback_eligible: model.enabled && !active_accounts.is_empty(),
             active_accounts,
         });
     }
