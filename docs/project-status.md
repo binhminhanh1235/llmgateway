@@ -390,7 +390,7 @@ Main hiện có:
 - explicit READ / EXECUTE / OPERATE / ADMIN boundary;
 - deterministic offline helper/bundle tests trong CI.
 
-P1 Agent Control API, P2 MCP server và P3 capability-based Agent Routing vẫn là **planned**, chưa được mô tả là shipped.
+P1 Agent Control API, P2 MCP server và P3 capability-based Agent Routing đang được implement/verify trên branch `feat/agent-native-runtime`, tracking issue #92. Các capability này **chưa thuộc main** tại snapshot này và không được mô tả là shipped cho tới khi merge + post-merge verification.
 
 ## 17. Open work đáng chú ý
 
@@ -400,6 +400,7 @@ Tại thời điểm audit repository còn các tracking/PR mở liên quan tớ
 - ChatGPT model picker/Sentinel recovery
 - Xiaomi MiMo tracking
 - multimodal initiative
+- Agent-Native P1-P3 branch / issue #92
 
 Trạng thái issue/PR là tracking signal, không luôn đồng nghĩa code chưa tồn tại. Một số thay đổi có thể đã cherry-pick/merge theo commit khác trong khi PR cũ vẫn còn mở.
 
