@@ -912,16 +912,24 @@ fn normalize_capability(value: &str) -> String {
 
 fn content_type_present(value: &Value, accepted: &[&str]) -> bool {
     match value {
-        Value::Array(values) => values.iter().any(|value| content_type_present(value, accepted)),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| content_type_present(value, accepted)),
         Value::Object(object) => {
             if object
                 .get("type")
                 .and_then(Value::as_str)
-                .is_some_and(|kind| accepted.iter().any(|accepted| kind.eq_ignore_ascii_case(accepted)))
+                .is_some_and(|kind| {
+                    accepted
+                        .iter()
+                        .any(|accepted| kind.eq_ignore_ascii_case(accepted))
+                })
             {
                 return true;
             }
-            object.values().any(|value| content_type_present(value, accepted))
+            object
+                .values()
+                .any(|value| content_type_present(value, accepted))
         }
         _ => false,
     }
@@ -961,7 +969,10 @@ fn required_capabilities(body: Option<&Value>) -> Vec<String> {
     if content_type_present(body, &["input_audio", "audio"]) {
         push_unique(&mut required, "audio_input");
     }
-    if output_modality_present(body, "image") || task == "image_generation" || task == "image_editing" {
+    if output_modality_present(body, "image")
+        || task == "image_generation"
+        || task == "image_editing"
+    {
         push_unique(&mut required, "image_output");
     }
     if task == "image_editing" {
@@ -977,7 +988,14 @@ fn capability_supported(effective: &HashSet<String>, required: &str) -> bool {
     let any = |names: &[&str]| names.iter().any(|name| effective.contains(*name));
     match required {
         "image_input" => any(&["vision", "image", "image_input"]),
-        "file_input" => any(&["file", "files", "file_input", "document", "documents", "native_file_upload"]),
+        "file_input" => any(&[
+            "file",
+            "files",
+            "file_input",
+            "document",
+            "documents",
+            "native_file_upload",
+        ]),
         "audio_input" => any(&["audio", "audio_input"]),
         "audio_transcription" => any(&["audio_transcription", "transcription"]),
         "image_output" => any(&["image_generation", "image_output"]),
@@ -1008,11 +1026,11 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        capability_supported, execution_policy_exclusion, required_capabilities, push_unique,
+        capability_supported, execution_policy_exclusion, push_unique, required_capabilities,
     };
+    use chrono::{Duration, Utc};
     use serde_json::json;
     use std::collections::HashSet;
-    use chrono::{Duration, Utc};
 
     #[test]
     fn execution_policy_matrix_enforces_hard_transport_boundaries() {
