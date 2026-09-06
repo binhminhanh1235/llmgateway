@@ -47,11 +47,11 @@ jobs:
       - run: RUSTFLAGS="-D warnings" cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
-      - run: bash scripts/smoke-file-attachments.sh
+      - name: Local API + P3 file attachment smoke
+        run: bash scripts/smoke-local.sh
       - run: bash scripts/smoke-provider-conversation-affinity.sh
       - run: bash scripts/smoke-gemini-recovery.sh
       - run: bash scripts/smoke-chatgpt-browser.sh
-      - run: bash scripts/smoke-local.sh
       - run: bash scripts/smoke-openai-sdk.sh
       - run: bash scripts/smoke-hybrid.sh
       - run: bash scripts/smoke-memory.sh
