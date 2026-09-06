@@ -1,8 +1,9 @@
 (() => {
-  const state = { groups: [], models: [], editingId: null, tiers: [], loaded: false };
+  const state = { groups: [], models: [], editingId: null, tiers: [], loaded: false, status: "enabled" };
   const $ = (id) => document.getElementById(id);
   const e = {
     content: $("groupsContent"),
+    tabs: $("groupStatusTabs"),
     create: $("createModelGroupButton"),
     refresh: $("refreshModelGroupsButton"),
     modal: $("modelGroupModal"),
@@ -45,38 +46,76 @@
 
   function modelMeta(id) {
     const model = modelById(id);
-    if (!model) return "currently inactive";
+    if (!model) return "not present in catalog";
     const accounts = (model.active_accounts || []).join(", ");
-    return model.provider + " · " + model.external_id + (accounts ? " · " + accounts : "");
+    const stateNote = model.fallback_eligible ? "" : " · ignored in fallback";
+    return model.provider + " · " + model.external_id + (accounts ? " · " + accounts : "") + stateNote;
   }
 
-  function renderMembers(models) {
+  function renderMembers(models, ignoredModels = []) {
     if (!(models || []).length) return "No model members";
-    return models.map((id, index) =>
-      '<span class="group-summary-member"><b>' + (index + 1) + ".</b><span><strong>" +
-      ui().escapeHtml(modelName(id)) + "</strong><small>" +
-      ui().escapeHtml(modelMeta(id)) + "</small></span></span>"
-    ).join("");
+    const ignored = new Set(ignoredModels || []);
+    return models.map((id, index) => {
+      const isIgnored = ignored.has(id);
+      return '<span class="group-summary-member' + (isIgnored ? " is-ignored" : "") +
+        '"><b>' + (index + 1) + ".</b><span><strong>" +
+        ui().escapeHtml(modelName(id)) + "</strong><small>" +
+        ui().escapeHtml(modelMeta(id)) + "</small></span>" +
+        (isIgnored ? '<span class="group-ignore-badge">Ignored</span>' : "") + "</span>";
+    }).join("");
+  }
+
+  function updateStatusTabs() {
+    if (!e.tabs) return;
+    const enabledCount = state.groups.filter((group) => group.enabled === true).length;
+    const counts = {
+      all: state.groups.length,
+      enabled: enabledCount,
+      disabled: state.groups.length - enabledCount,
+    };
+    e.tabs.querySelectorAll("[data-group-status]").forEach((button) => {
+      const status = button.dataset.groupStatus;
+      button.classList.toggle("active", status === state.status);
+      const count = button.querySelector("[data-status-count]");
+      if (count) count.textContent = String(counts[status] ?? 0);
+    });
   }
 
   function render() {
+    updateStatusTabs();
     if (!state.groups.length) {
       e.content.innerHTML =
         '<div class="loading-box">No model groups yet. Create one to define ordered fallback.</div>';
       return;
     }
 
+    const visible = state.groups.filter((group) =>
+      state.status === "all" || (state.status === "enabled") === (group.enabled === true)
+    );
+    if (!visible.length) {
+      e.content.innerHTML = '<div class="loading-box">No model groups in this status</div>';
+      return;
+    }
+
     let html = "";
-    for (const group of state.groups) {
+    for (const group of visible) {
+      const enabled = group.enabled === true;
+      const ignored = group.ignored_models || [];
       const defaultBadge = group.is_default
         ? '<span class="badge available">Default</span>'
+        : "";
+      const stateBadge = '<span class="badge ' + (enabled ? "available" : "unavailable") + '">' +
+        (enabled ? "Enabled" : "Disabled") + "</span>";
+      const ignoredBadge = ignored.length
+        ? '<span class="badge unavailable">' + ignored.length + " ignored</span>"
         : "";
       const modeLabel = group.mode === "model-tiered"
         ? "Ordered models"
         : group.mode === "route-tiered"
           ? "Legacy route tiers"
           : "Legacy flat";
-      const badges = defaultBadge + '<span class="badge">' + modeLabel + "</span>";
+      const badges = defaultBadge + stateBadge + ignoredBadge +
+        '<span class="badge">' + modeLabel + "</span>";
 
       let body = "";
       if ((group.tiers || []).length) {
@@ -84,27 +123,60 @@
           body += '<div class="group-tier-summary"><div class="group-tier-number">' +
             (index + 1) + '</div><div class="group-tier-summary-body"><strong>Tier priority ' +
             Number(tier.priority) + '</strong><div class="group-summary-members">' +
-            renderMembers(tier.models || []) + "</div></div></div>";
+            renderMembers(tier.models || [], ignored) + "</div></div></div>";
         });
       } else {
         body = '<div class="group-summary-members group-flat-models">' +
-          renderMembers(group.models || []) + "</div>";
+          renderMembers(group.models || [], ignored) + "</div>";
       }
 
-      html += '<article class="group-card"><div class="group-card-head"><div><div class="group-badges">' +
+      html += '<article class="group-card' + (enabled ? "" : " is-disabled") +
+        '"><div class="group-card-head"><div><div class="group-badges">' +
         badges + "</div><h3>" + ui().escapeHtml(group.id) +
-        '</h3></div><div class="group-actions"><button class="secondary-button" data-group-edit="' +
-        ui().escapeAttr(group.id) +
+        '</h3></div><div class="group-actions"><label class="toggle group-state-toggle" title="' +
+        (enabled ? "Disable this model group" : "Enable this model group") +
+        '"><input type="checkbox" data-toggle-group-state="' + ui().escapeAttr(group.id) + '"' +
+        (enabled ? " checked" : "") + '><span class="toggle-track"></span></label>' +
+        '<button class="secondary-button" data-group-edit="' + ui().escapeAttr(group.id) +
         '">Edit</button><button class="secondary-button group-delete" data-group-delete="' +
         ui().escapeAttr(group.id) + '"' + (group.is_default ? " disabled" : "") +
         '>Delete</button></div></div><div class="group-tier-list">' + body + "</div></article>";
     }
 
     e.content.innerHTML = '<div class="group-grid">' + html + "</div>";
+    e.content.querySelectorAll("[data-toggle-group-state]").forEach((checkbox) =>
+      checkbox.addEventListener("change", () => toggleGroupState(checkbox)));
     e.content.querySelectorAll("[data-group-edit]").forEach((button) =>
       button.addEventListener("click", () => open(button.dataset.groupEdit)));
     e.content.querySelectorAll("[data-group-delete]").forEach((button) =>
       button.addEventListener("click", () => remove(button.dataset.groupDelete)));
+  }
+
+  async function toggleGroupState(checkbox) {
+    const groupId = checkbox.dataset.toggleGroupState;
+    const desired = checkbox.checked;
+    checkbox.disabled = true;
+    try {
+      const response = await ui().apiFetch(
+        "/_llmgateway/model-groups/" + encodeURIComponent(groupId),
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: desired }),
+        }
+      );
+      if (!response.ok) {
+        throw new Error(ui().extractError(await response.text(), response.status));
+      }
+      state.loaded = false;
+      await load(true);
+      window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
+      ui().toast((desired ? "Enabled " : "Disabled ") + groupId);
+    } catch (error) {
+      checkbox.checked = !desired;
+      checkbox.disabled = false;
+      ui().toast(error.message || String(error));
+    }
   }
 
   function activeOnly(ids) {
@@ -159,11 +231,12 @@
   }
 
   function availableModelsHtml(tierIndex, assigned) {
-    if (!state.models.length) {
-      return '<div class="group-no-routes">No enabled and active models are currently available.</div>';
+    const selectable = state.models.filter((model) => model.fallback_eligible === true);
+    if (!selectable.length) {
+      return '<div class="group-no-routes">No enabled models are currently available for fallback.</div>';
     }
 
-    return state.models.map((model) => {
+    return selectable.map((model) => {
       const selectedHere = state.tiers[tierIndex].models.includes(model.id);
       const assignedTier = assigned.get(model.id);
       const assignedElsewhere = assignedTier !== undefined && assignedTier !== tierIndex;
@@ -199,7 +272,7 @@
         '<div class="group-order-section"><div class="group-order-heading"><strong>Fallback order</strong>' +
         '<span>Models are tried top to bottom. Use ↑ ↓ to reorder.</span></div>' +
         '<div class="group-order-list">' + selectedOrderHtml(tier, tierIndex) + "</div></div>" +
-        '<div class="group-active-model-note">Available models · only enabled models on active accounts are selectable.</div>' +
+        '<div class="group-active-model-note">Available models · only currently enabled fallback models are selectable. Existing inactive members stay preserved in the order above.</div>' +
         '<div class="group-route-list">' + availableModelsHtml(tierIndex, assigned) + "</div></section>";
     }).join("");
 
@@ -274,7 +347,7 @@
         throw new Error("Each tier priority must be unique.");
       }
       if (!tier.models.length) {
-        throw new Error("Every tier must contain at least one enabled model.");
+        throw new Error("Every tier must contain at least one model.");
       }
       priorities.add(tier.priority);
     }
@@ -359,6 +432,12 @@
 
   e.create?.addEventListener("click", () => open());
   e.refresh?.addEventListener("click", () => load(true));
+  e.tabs?.querySelectorAll("[data-group-status]").forEach((button) =>
+    button.addEventListener("click", () => {
+      state.status = button.dataset.groupStatus;
+      render();
+    })
+  );
   e.addTier?.addEventListener("click", () => {
     const max = state.tiers.reduce(
       (value, tier) => Math.max(value, Number(tier.priority) || 0),
