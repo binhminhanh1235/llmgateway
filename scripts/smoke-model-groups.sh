@@ -118,6 +118,161 @@ assert c["fast-fallback"]["group_model_order"] == 1, c
 assert c["slow-primary"]["final_score"] > c["fast-fallback"]["final_score"], c
 '
 
+# A disabled physical model remains a member of the group but is ignored during fallback.
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/models/fake%2Fmodel-primary "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"enabled":false}' \
+  | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["enabled"] is False, x'
+
+GROUP_PAYLOAD=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
+printf '%s' "$GROUP_PAYLOAD" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+g=next(g for g in x["data"] if g["id"]=="ci-tiered")
+assert g["tiers"][0]["models"] == ["fake/model-primary","fake/model-fallback"], g
+assert g["ignored_models"] == ["fake/model-primary"], g
+m=next(m for m in x["models"] if m["id"]=="fake/model-primary")
+assert m["enabled"] is False and m["fallback_eligible"] is False, m
+binding=next(b for b in m["active_accounts"] if b=="group-account")
+assert binding == "group-account", m
+'
+
+EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model":"ci-tiered"}')
+printf '%s' "$EXPLAIN" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+c={r["route_id"]:r for r in x["candidates"]}
+assert x["selected_route"] == "fast-fallback", x
+assert "model_disabled" in c["slow-primary"]["exclusion_reasons"], c
+'
+
+# Editing a group must preserve an already-member model even while it is inactive.
+curl -fsS -X PUT http://127.0.0.1:7331/_llmgateway/model-groups/ci-tiered "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"tiers":[{"priority":10,"models":["fake/model-primary","fake/model-fallback"]}]}' \
+  | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["group"]["tiers"][0]["models"][0] == "fake/model-primary", x'
+
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/models/fake%2Fmodel-primary "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"enabled":true}' >/dev/null
+
+EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model":"ci-tiered"}')
+printf '%s' "$EXPLAIN" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] == "slow-primary", x
+'
+
+# Disabling the account makes every member backed only by that account derived-ignored.
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/accounts/group-account "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"enabled":false}' \
+  | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["enabled"] is False, x'
+
+GROUP_PAYLOAD=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
+printf '%s' "$GROUP_PAYLOAD" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+g=next(g for g in x["data"] if g["id"]=="ci-tiered")
+assert set(g["ignored_models"]) == {"fake/model-primary","fake/model-fallback"}, g
+assert g["tiers"][0]["models"] == ["fake/model-primary","fake/model-fallback"], g
+'
+
+CATALOG=$(curl -fsS http://127.0.0.1:7331/_llmgateway/models "${AUTH[@]}")
+printf '%s' "$CATALOG" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+models={m["id"]:m for m in x["data"]}
+assert models["fake/model-primary"]["fallback_eligible"] is False, models["fake/model-primary"]
+assert models["fake/model-fallback"]["fallback_eligible"] is False, models["fake/model-fallback"]
+'
+
+EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model":"ci-tiered"}')
+printf '%s' "$EXPLAIN" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] is None, x
+assert all("account_disabled" in r["exclusion_reasons"] for r in x["candidates"]), x
+'
+
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/accounts/group-account "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"enabled":true}' >/dev/null
+
+GROUP_PAYLOAD=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
+printf '%s' "$GROUP_PAYLOAD" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+g=next(g for g in x["data"] if g["id"]=="ci-tiered")
+assert g["ignored_models"] == [], g
+'
+
+# Disabling a model on one account must move it out of effective Enabled state
+# and out of the group picker, while preserving its existing group membership.
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/accounts/group-account/models "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model_id":"fake/model-primary","enabled":false}' >/dev/null
+
+GROUP_PAYLOAD=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
+CATALOG=$(curl -fsS http://127.0.0.1:7331/_llmgateway/models "${AUTH[@]}")
+printf '%s\n%s' "$GROUP_PAYLOAD" "$CATALOG" | python3 -c '
+import json,sys
+group_payload=json.loads(sys.stdin.readline())
+catalog=json.loads(sys.stdin.readline())
+g=next(g for g in group_payload["data"] if g["id"]=="ci-tiered")
+assert g["tiers"][0]["models"] == ["fake/model-primary","fake/model-fallback"], g
+assert g["ignored_models"] == ["fake/model-primary"], g
+gm=next(m for m in group_payload["models"] if m["id"]=="fake/model-primary")
+cm=next(m for m in catalog["data"] if m["id"]=="fake/model-primary")
+assert gm["fallback_eligible"] is False, gm
+assert cm["fallback_eligible"] is False, cm
+'
+
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/accounts/group-account/models "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model_id":"fake/model-primary","enabled":true}' >/dev/null
+
+GROUP_PAYLOAD=$(curl -fsS http://127.0.0.1:7331/_llmgateway/model-groups "${AUTH[@]}")
+CATALOG=$(curl -fsS http://127.0.0.1:7331/_llmgateway/models "${AUTH[@]}")
+printf '%s\n%s' "$GROUP_PAYLOAD" "$CATALOG" | python3 -c '
+import json,sys
+group_payload=json.loads(sys.stdin.readline())
+catalog=json.loads(sys.stdin.readline())
+g=next(g for g in group_payload["data"] if g["id"]=="ci-tiered")
+gm=next(m for m in group_payload["models"] if m["id"]=="fake/model-primary")
+cm=next(m for m in catalog["data"] if m["id"]=="fake/model-primary")
+assert g["ignored_models"] == [], g
+assert gm["fallback_eligible"] is True, gm
+assert cm["fallback_eligible"] is True, cm
+'
+
+# A disabled group remains configured, but is hidden from model discovery and never routed.
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/model-groups/ci-tiered "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"enabled":false}' \
+  | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["group"]["enabled"] is False, x'
+
+MODELS=$(curl -fsS http://127.0.0.1:7331/v1/models "${AUTH[@]}")
+printf '%s' "$MODELS" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert "ci-tiered" not in {m["id"] for m in x["data"]}, x
+'
+
+EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model":"ci-tiered"}')
+printf '%s' "$EXPLAIN" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] is None, x
+assert all("group_disabled" in r["exclusion_reasons"] for r in x["candidates"]), x
+'
+
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/model-groups/ci-tiered "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"enabled":true}' >/dev/null
+
+MODELS=$(curl -fsS http://127.0.0.1:7331/v1/models "${AUTH[@]}")
+printf '%s' "$MODELS" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert "ci-tiered" in {m["id"] for m in x["data"]}, x
+'
+
 curl -fsS -X PUT http://127.0.0.1:7331/_llmgateway/model-groups/ci-tiered "${AUTH[@]}" "${JSON[@]}" \
   -d '{"tiers":[{"priority":10,"models":["fake/model-fallback","fake/model-primary"]}]}' >/tmp/model-group-update.json
 
@@ -142,4 +297,4 @@ x=json.load(sys.stdin)
 assert "ci-tiered" not in {m["id"] for m in x["data"]}, x
 '
 
-echo "llmgateway active-model group CRUD + ordered fallback smoke test passed"
+echo "llmgateway status toggles + preserved group membership + ordered fallback smoke test passed"
