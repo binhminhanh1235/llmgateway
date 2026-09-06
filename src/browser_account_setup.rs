@@ -393,7 +393,7 @@ pub async fn delete_account(
         if let Some(driver) = chromium_driver_runtime::get() {
             if let Err(error) = driver.stop(session_id).await {
                 cleanup_warnings.push(format!(
-                    "could not stop Chromium session '{session_id}': {error}"
+                    "could not stop browser session '{session_id}': {error}"
                 ));
             }
         }
@@ -462,8 +462,8 @@ pub async fn create_browser_account_setup(
                 result.restart_required = false;
                 result.next_steps = vec![
                     "Open Accounts and choose Login with browser for the new account.".into(),
-                    "Complete provider login, CAPTCHA, and 2FA normally in Chromium if requested.".into(),
-                    "Verify the authenticated page; supported web transports capture reusable auth material and can keep Chromium closed until browser-only re-auth or challenge handling is needed.".into(),
+                    "Complete provider login, CAPTCHA, and 2FA normally in the selected browser if requested.".into(),
+                    "Verify the authenticated page; supported web transports capture reusable auth material and can keep the browser closed until browser-only re-auth or challenge handling is needed.".into(),
                 ];
                 json_response(StatusCode::CREATED, json!(result), None)
             }
@@ -507,7 +507,7 @@ async fn activate_browser_account_setup(
         BrowserAccountSetupError::Activation("browser session runtime is not initialized".into())
     })?;
     let chromium_driver = chromium_driver_runtime::get().ok_or_else(|| {
-        BrowserAccountSetupError::Activation("Chromium driver runtime is not initialized".into())
+        BrowserAccountSetupError::Activation("browser driver runtime is not initialized".into())
     })?;
     let browser_providers = browser_provider_runtime::get().ok_or_else(|| {
         BrowserAccountSetupError::Activation("browser provider runtime is not initialized".into())
@@ -956,7 +956,7 @@ pub fn apply_browser_account_setup(
         next_steps: vec![
             "Restart llmgateway so the managed browser account becomes active.".into(),
             "Open Accounts and choose Login with browser for the new account.".into(),
-            "Complete provider login, CAPTCHA, and 2FA normally in Chromium if requested.".into(),
+            "Complete provider login, CAPTCHA, and 2FA normally in the selected browser if requested.".into(),
             "Verify the authenticated page; supported providers can prefer direct HTTP after reusable auth material is captured."
                 .into(),
         ],
