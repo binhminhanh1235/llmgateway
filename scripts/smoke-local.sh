@@ -77,7 +77,7 @@ capabilities = ["chat", "tools", "coding", "vision"]
 [[routes]]
 id = "fake-text-route"
 account = "fake-primary"
-model = "fake-model"
+model = "fake-text-model"
 priority = 20
 enabled = true
 capabilities = ["chat"]
