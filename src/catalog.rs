@@ -69,6 +69,8 @@ pub struct CatalogModelView {
     pub capabilities: Vec<String>,
     pub accounts: Vec<AccountModelView>,
     pub routes: Vec<String>,
+    pub enabled: bool,
+    pub fallback_eligible: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -134,6 +136,7 @@ impl ModelCatalog {
                 context_window INTEGER,
                 capabilities_json TEXT NOT NULL DEFAULT '[]',
                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(provider_id, external_id)
@@ -141,6 +144,18 @@ impl ModelCatalog {
         )
         .execute(&self.pool)
         .await?;
+
+        let model_columns = sqlx::query("PRAGMA table_info(models)")
+            .fetch_all(&self.pool)
+            .await?;
+        let has_model_enabled = model_columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "enabled");
+        if !has_model_enabled {
+            sqlx::query("ALTER TABLE models ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+                .execute(&self.pool)
+                .await?;
+        }
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS account_models (
@@ -361,9 +376,12 @@ impl ModelCatalog {
             let row = sqlx::query(
                 "SELECT
                     COUNT(*) AS model_count,
-                    COALESCE(SUM(CASE WHEN availability = 'available' AND enabled = 1 THEN 1 ELSE 0 END), 0)
-                        AS available_model_count
-                 FROM account_models WHERE account_id = ?",
+                    COALESCE(SUM(CASE
+                        WHEN am.availability = 'available' AND am.enabled = 1 AND m.enabled = 1
+                        THEN 1 ELSE 0 END), 0) AS available_model_count
+                 FROM account_models am
+                 JOIN models m ON m.canonical_id = am.canonical_model_id
+                 WHERE am.account_id = ?",
             )
             .bind(&account.id)
             .fetch_one(&self.pool)
@@ -397,7 +415,11 @@ impl ModelCatalog {
                 enabled: account.enabled,
                 discover_models,
                 model_count: row.try_get("model_count")?,
-                available_model_count: row.try_get("available_model_count")?,
+                available_model_count: if account.enabled {
+                    row.try_get("available_model_count")?
+                } else {
+                    0
+                },
             });
         }
         Ok(result)
@@ -419,7 +441,7 @@ impl ModelCatalog {
         let rows = sqlx::query(
             "SELECT
                 m.canonical_id, m.provider_id, m.external_id, m.display_name, m.owned_by,
-                m.context_window, m.capabilities_json,
+                m.context_window, m.capabilities_json, m.enabled AS model_enabled,
                 am.account_id, am.availability, am.enabled, am.configured, am.discovered,
                 am.last_seen_at, am.last_verified_at, am.last_error
              FROM models m
@@ -444,6 +466,8 @@ impl ModelCatalog {
                 capabilities,
                 accounts: Vec::new(),
                 routes: self.routes_for_model(&canonical_id),
+                enabled: row.get::<i64, _>("model_enabled") != 0,
+                fallback_eligible: false,
             });
 
             let account_id: Option<String> = row.try_get("account_id")?;
@@ -460,6 +484,18 @@ impl ModelCatalog {
                 });
             }
         }
+        let config = self.config.snapshot();
+        for model in models.values_mut() {
+            model.fallback_eligible = model.enabled
+                && model.accounts.iter().any(|binding| {
+                    binding.enabled
+                        && matches!(binding.availability.as_str(), "available" | "unknown")
+                        && config.account(&binding.account_id).is_some_and(|account| {
+                            account.enabled && account.provider == model.provider
+                        })
+                });
+        }
+
         Ok(models.into_values().collect())
     }
 
@@ -468,11 +504,7 @@ impl ModelCatalog {
             .models()
             .await?
             .into_iter()
-            .filter(|model| {
-                model.accounts.iter().any(|account| {
-                    account.enabled && matches!(account.availability.as_str(), "available" | "unknown")
-                })
-            })
+            .filter(|model| model.fallback_eligible)
             .collect())
     }
 
