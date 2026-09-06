@@ -480,6 +480,82 @@ async function testVisionAttachmentUploadBeforeSubmit() {
   }
 }
 
+
+async function testDocumentAttachmentUploadBeforeSubmit() {
+  const fixtures = [
+    {
+      adapterPath: "adapters/chatgpt-web.js",
+      host: "chatgpt.com",
+      pagePath: "/",
+      inputSelector: "#prompt-textarea",
+      fileSelector: "input[type='file']",
+      sendSelector: "#composer-submit-button",
+      responseSelector: "[data-message-author-role='assistant'] .markdown",
+      context: { response_timeout_ms: 1600, response_stable_ms: 40 }
+    },
+    {
+      adapterPath: "adapters/gemini-web.js",
+      host: "gemini.google.com",
+      pagePath: "/app",
+      inputSelector: "div[aria-label='Enter a prompt for Gemini']",
+      fileSelector: "input[type='file']",
+      sendSelector: "button[aria-label='Send message']",
+      responseSelector: "div.markdown.markdown-main-panel",
+      context: { response_timeout_ms: 1600, response_stable_ms: 40 }
+    }
+  ];
+
+  for (const fixture of fixtures) {
+    const input = new FakeElement();
+    const fileInput = new FakeInputElement();
+    fileInput.multiple = true;
+    const send = new FakeElement("Send");
+    const response = new FakeElement("");
+    const nodes = {
+      [fixture.inputSelector]: input,
+      [fixture.fileSelector]: fileInput,
+      [fixture.sendSelector]: send,
+      [fixture.responseSelector]: []
+    };
+    const sequence = [];
+    fileInput.onDispatch = (event) => {
+      if (event.type === "change") sequence.push("attached");
+      return true;
+    };
+    send.onClick = () => {
+      sequence.push("submitted");
+      response.innerText = "document-fixture-ok";
+      response.textContent = response.innerText;
+      nodes[fixture.responseSelector] = [response];
+    };
+
+    installPage({ host: fixture.host, path: fixture.pagePath, nodes });
+    const adapter = loadAdapter(fixture.adapterPath);
+    const result = await adapter.chat({
+      model: "document-test",
+      stream: false,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "Summarize the attached PDF" },
+          {
+            type: "input_file",
+            file_data: "data:application/pdf;base64,JVBERi0xLjQK",
+            filename: "report.pdf",
+            mime_type: "application/pdf"
+          }
+        ]
+      }]
+    }, fixture.context);
+
+    assert.deepEqual(sequence, ["attached", "submitted"], fixture.adapterPath);
+    assert.equal(fileInput.files.length, 1, fixture.adapterPath);
+    assert.equal(fileInput.files[0].type, "application/pdf", fixture.adapterPath);
+    assert.equal(fileInput.files[0].name, "report.pdf", fixture.adapterPath);
+    assert.equal(result.body.choices[0].message.content, "document-fixture-ok", fixture.adapterPath);
+  }
+}
+
 async function testGeminiToolBridge() {
   const input = new FakeElement();
   const response = new FakeElement("");
@@ -1318,6 +1394,7 @@ await testDeepSeek();
 await testQwenReactComposerSubmit();
 await testQwenEnterFallbackWithoutSendControl();
 await testVisionAttachmentUploadBeforeSubmit();
+await testDocumentAttachmentUploadBeforeSubmit();
 await testGeminiToolBridge();
 await testChatGPTToolBridge();
 await testChatGPTModelPickerFlow();
