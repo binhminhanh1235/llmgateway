@@ -29,12 +29,12 @@ Do not reimplement these rules in prompt logic.
 
 ## Selection algorithm
 
-1. Call `GET /v1/models` with the execution credential.
-2. If the user requested an exact visible model, use it.
-3. Otherwise prefer a suitable logical model/group such as a visible `llmgateway-*` model.
-4. If several logical models are available, choose by semantic purpose, not provider brand.
-5. Use `/_llmgateway/routes/explain` only for diagnostics or when the decision materially benefits from explaining route candidates.
-6. If no suitable logical model exists, choose a visible physical model that satisfies the explicit requirement.
+1. Call `GET /_llmgateway/agent/capabilities` with the execution credential.
+2. If the user requested an exact visible model, keep that model constraint.
+3. Otherwise prefer a logical model/group such as a visible `llmgateway-*` model.
+4. Express hard semantic requirements through `POST /_llmgateway/agent/resolve`.
+5. Execute with the same `llmgateway_requirements` so execution cannot drift from resolution.
+6. Use `/_llmgateway/routes/explain` only for deeper admin diagnostics.
 
 ## Ordered fallback groups
 
@@ -65,6 +65,10 @@ If `/v1/models` does not show a model, do not try to bypass policy through a phy
 
 Treat current advertised metadata as authoritative when present.
 
-Never infer vision/file/audio/image-generation support solely from a provider or model family name.
+`llmgateway_requirements.capabilities` are **hard eligibility constraints**, not scoring hints. Capability names are normalized to lowercase and underscores become hyphens.
 
-When a modality is required and no visible eligible model advertises it, stop and report the capability gap.
+`min_context_window` is also a hard requirement. A known smaller context window is excluded with `minimum_context_window_not_met`; unknown context metadata is conservatively excluded with `context_window_unknown`.
+
+These constraints run inside the existing Router before ranking. They do not bypass model groups, client policies, readiness, quota, transport policy, health, task fit, fairness, or fallback tiers.
+
+Never infer vision/file/audio/image-generation support solely from a provider or model family name. When a required capability is not advertised by any eligible route, report the capability gap rather than guessing.
