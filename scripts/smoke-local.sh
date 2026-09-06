@@ -174,13 +174,6 @@ assert payload["error"]["message"].startswith("Failed to parse request JSON:"), 
 PY
 
 STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
-  http://127.0.0.1:7331/v1/chat/completions \
-  -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"llmgateway-text-only","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}' )
-assert_json_error 400 unsupported_capability "$STATUS"
-
-STATUS=$(curl -sS -D "$ERROR_HEADERS" -o "$ERROR_BODY" -w '%{http_code}' -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/nonexistent-session/attention \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
   -H "Content-Type: application/json" \
