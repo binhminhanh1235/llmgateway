@@ -531,15 +531,35 @@
     }
 
     const gridHtml = `<div class="account-grid">${visible.map((account) => {
-      const rows = (account.models || []).map((model) => {
+      const boundModels = (account.models || []).filter((model) =>
+        model.accounts?.some((candidate) => candidate.account_id === account.id)
+      );
+      const totalBound = boundModels.length;
+      const enabledCount = boundModels.filter((model) => {
         const binding = model.accounts?.find((candidate) => candidate.account_id === account.id);
-        if (!binding) return "";
+        return binding && binding.enabled;
+      }).length;
+      const allEnabled = totalBound > 0 && enabledCount === totalBound;
+
+      const rows = boundModels.map((model) => {
+        const binding = model.accounts.find((candidate) => candidate.account_id === account.id);
         const badges = [binding.availability, ...(model.capabilities || []).slice(0, 3)].map((badge, i) => `<span class="badge ${i === 0 ? escapeAttr(binding.availability) : ""}">${escapeHtml(badge)}</span>`).join("");
         return `<div class="account-model-row"><div><div class="model-name">${escapeHtml(model.display_name || model.external_id)}</div><div class="model-meta">${badges}</div></div><label class="toggle" title="Enable this model on ${escapeAttr(account.id)}"><input type="checkbox" data-toggle-account="${escapeAttr(account.id)}" data-toggle-model="${escapeAttr(model.id)}" ${binding.enabled ? "checked" : ""}/><span class="toggle-track"></span></label></div>`;
       }).join("") || '<div class="account-model-row"><div class="model-meta">No models discovered yet</div></div>';
       const transport = accountTransportHtml(account);
       const enabled = account.enabled === true;
-      return `<article class="account-card ${enabled ? "" : "is-disabled"}"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><div class="entity-state-actions"><span class="badge ${enabled ? "available" : "unavailable"}">${enabled ? "Enabled" : "Disabled"}</span><label class="toggle" title="${enabled ? "Disable account routing" : "Enable account routing"}"><input type="checkbox" data-toggle-account-state="${escapeAttr(account.id)}" ${enabled ? "checked" : ""}/><span class="toggle-track"></span></label><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button><button type="button" class="secondary-button account-delete" data-delete-account="${escapeAttr(account.id)}">Delete</button></div></div>${transport}<div class="account-models">${rows}</div></article>`;
+      const modelsHeader = totalBound > 0 ? `
+        <div class="account-models-header">
+          <div class="account-models-title">Models (${enabledCount}/${totalBound})</div>
+          <div class="account-models-toggle-wrap">
+            <span class="account-models-toggle-label">All models</span>
+            <label class="toggle" title="${allEnabled ? "Disable all models" : "Enable all models"} on ${escapeAttr(account.id)}">
+              <input type="checkbox" data-toggle-all-models="${escapeAttr(account.id)}" ${allEnabled ? "checked" : ""}/>
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>` : "";
+      return `<article class="account-card ${enabled ? "" : "is-disabled"}"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><div class="entity-state-actions"><span class="badge ${enabled ? "available" : "unavailable"}">${enabled ? "Enabled" : "Disabled"}</span><label class="toggle" title="${enabled ? "Disable account routing" : "Enable account routing"}"><input type="checkbox" data-toggle-account-state="${escapeAttr(account.id)}" ${enabled ? "checked" : ""}/><span class="toggle-track"></span></label><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button><button type="button" class="secondary-button account-delete" data-delete-account="${escapeAttr(account.id)}">Delete</button></div></div>${transport}<div class="account-models">${modelsHeader}${rows}</div></article>`;
     }).join("")}</div>`;
 
     if (existingGrid) {
@@ -552,6 +572,19 @@
     elements.accountsContent.querySelectorAll("[data-delete-account]").forEach((button) => button.addEventListener("click", () => deleteAccount(button.dataset.deleteAccount, button)));
     elements.accountsContent.querySelectorAll("[data-toggle-account-state]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleAccountState(checkbox)));
     elements.accountsContent.querySelectorAll("[data-toggle-model]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleAccountModel(checkbox)));
+    elements.accountsContent.querySelectorAll("[data-toggle-all-models]").forEach((checkbox) => {
+      const accountId = checkbox.dataset.toggleAllModels;
+      const account = state.accounts.find((a) => a.id === accountId);
+      if (account) {
+        const bound = (account.models || []).filter((m) => m.accounts?.some((b) => b.account_id === accountId));
+        const count = bound.filter((m) => {
+          const b = m.accounts?.find((c) => c.account_id === accountId);
+          return b && b.enabled;
+        }).length;
+        checkbox.indeterminate = count > 0 && count < bound.length;
+      }
+      checkbox.addEventListener("change", () => toggleAllAccountModels(checkbox));
+    });
     elements.accountsContent.querySelectorAll("[data-toggle-browserless]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleBrowserless(checkbox)));
 
     if (typeof savedScrollTop === "number") {
@@ -711,9 +744,64 @@
         const binding = model?.accounts?.find((b) => b.account_id === accountId);
         if (binding) binding.enabled = checkbox.checked;
       }
+      const accountCard = checkbox.closest(".account-card");
+      if (accountCard) {
+        const allToggle = accountCard.querySelector("[data-toggle-all-models]");
+        if (allToggle) {
+          const modelCheckboxes = [...accountCard.querySelectorAll("[data-toggle-model]")];
+          const checkedCount = modelCheckboxes.filter((cb) => cb.checked).length;
+          allToggle.checked = checkedCount === modelCheckboxes.length && modelCheckboxes.length > 0;
+          allToggle.indeterminate = checkedCount > 0 && checkedCount < modelCheckboxes.length;
+          const title = accountCard.querySelector(".account-models-title");
+          if (title) {
+            title.textContent = `Models (${checkedCount}/${modelCheckboxes.length})`;
+          }
+        }
+      }
       window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
     } catch (error) { checkbox.checked = !checkbox.checked; toast(error.message || String(error)); }
     finally { checkbox.disabled = false; }
+  }
+
+  async function toggleAllAccountModels(checkbox) {
+    const accountId = checkbox.dataset.toggleAllModels;
+    const desired = checkbox.checked;
+    checkbox.disabled = true;
+
+    const accountCard = checkbox.closest(".account-card");
+    const modelCheckboxes = accountCard ? [...accountCard.querySelectorAll("[data-toggle-model]")] : [];
+    modelCheckboxes.forEach((cb) => { cb.checked = desired; });
+    const title = accountCard?.querySelector(".account-models-title");
+    if (title) {
+      title.textContent = `Models (${desired ? modelCheckboxes.length : 0}/${modelCheckboxes.length})`;
+    }
+
+    try {
+      const response = await apiFetch(`/_llmgateway/accounts/${encodeURIComponent(accountId)}/models`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ all: true, enabled: desired }),
+      });
+      if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      toast(`${desired ? "Enabled" : "Disabled"} all models on ${accountId}`);
+      const account = state.accounts.find((a) => a.id === accountId);
+      if (account && account.models) {
+        account.models.forEach((m) => {
+          const binding = m.accounts?.find((b) => b.account_id === accountId);
+          if (binding) binding.enabled = desired;
+        });
+      }
+      window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
+    } catch (error) {
+      checkbox.checked = !desired;
+      modelCheckboxes.forEach((cb) => { cb.checked = !desired; });
+      if (title) {
+        title.textContent = `Models (${!desired ? modelCheckboxes.length : 0}/${modelCheckboxes.length})`;
+      }
+      toast(error.message || String(error));
+    } finally {
+      checkbox.disabled = false;
+    }
   }
 
   async function loadCatalog(force = false) {

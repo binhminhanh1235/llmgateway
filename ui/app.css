@@ -270,6 +270,32 @@ button { cursor: pointer; }
 .account-name { margin-top: 4px; font-size: 15px; font-weight: 720; }
 .account-stats { margin-top: 6px; color: var(--muted); font-size: 12px; }
 .account-models { border-top: 1px solid var(--border); }
+.account-models-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 15px;
+  background: var(--panel-soft);
+  border-bottom: 1px solid var(--border);
+}
+.account-models-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+}
+.account-models-toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.account-models-toggle-label {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+}
 .account-model-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 11px 15px; border-bottom: 1px solid var(--border); }
 .account-model-row:last-child { border-bottom: 0; }
 .model-name { overflow-wrap: anywhere; font-size: 12px; font-weight: 650; }
@@ -283,6 +309,8 @@ button { cursor: pointer; }
 .toggle-track::after { content: ""; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; border-radius: 50%; background: var(--panel); transition: .15s; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
 .toggle input:checked + .toggle-track { background: var(--accent); }
 .toggle input:checked + .toggle-track::after { transform: translateX(16px); }
+.toggle input:indeterminate + .toggle-track { background: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.toggle input:indeterminate + .toggle-track::after { transform: translateX(8px); }
 
 .catalog-card { padding: 15px; }
 .catalog-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

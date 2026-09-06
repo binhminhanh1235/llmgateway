@@ -1,5 +1,8 @@
 use crate::{
-    admin::{set_account_enabled_in_config, set_account_model_enabled, set_model_enabled},
+    admin::{
+        set_account_all_models_enabled, set_account_enabled_in_config, set_account_model_enabled,
+        set_model_enabled,
+    },
     api::AppState,
 };
 use axum::{
@@ -17,7 +20,10 @@ use std::{env, sync::Arc};
 
 #[derive(Debug, Deserialize)]
 pub struct AccountModelToggle {
-    pub model_id: String,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub all: bool,
     pub enabled: bool,
 }
 
@@ -122,21 +128,43 @@ pub async fn set_account_model(
         );
     }
 
-    match set_account_model_enabled(config.as_ref(), &account_id, &body.model_id, body.enabled)
-        .await
-    {
-        Ok(()) => json_response(
-            StatusCode::OK,
-            json!({
-                "account_id": account_id,
-                "model_id": body.model_id,
-                "enabled": body.enabled
-            }),
-        ),
-        Err(message) => json_response(
+    if body.all || body.model_id.as_deref() == Some("*") {
+        match set_account_all_models_enabled(config.as_ref(), &account_id, body.enabled).await {
+            Ok(count) => json_response(
+                StatusCode::OK,
+                json!({
+                    "account_id": account_id,
+                    "all": true,
+                    "enabled": body.enabled,
+                    "affected": count
+                }),
+            ),
+            Err(message) => json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"error":{"type":"admin_error","message":message}}),
+            ),
+        }
+    } else if let Some(model_id) = body.model_id.as_deref() {
+        match set_account_model_enabled(config.as_ref(), &account_id, model_id, body.enabled).await
+        {
+            Ok(()) => json_response(
+                StatusCode::OK,
+                json!({
+                    "account_id": account_id,
+                    "model_id": model_id,
+                    "enabled": body.enabled
+                }),
+            ),
+            Err(message) => json_response(
+                StatusCode::BAD_REQUEST,
+                json!({"error":{"type":"admin_error","message":message}}),
+            ),
+        }
+    } else {
+        json_response(
             StatusCode::BAD_REQUEST,
-            json!({"error":{"type":"admin_error","message":message}}),
-        ),
+            json!({"error":{"type":"bad_request","message":"either 'model_id' or 'all: true' must be specified"}}),
+        )
     }
 }
 

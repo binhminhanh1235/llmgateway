@@ -67,6 +67,44 @@ pub async fn set_account_model_enabled(
     Ok(())
 }
 
+pub async fn set_account_all_models_enabled(
+    config: &AppConfig,
+    account_id: &str,
+    enabled: bool,
+) -> Result<u64, String> {
+    if config.account(account_id).is_none() {
+        return Err(format!("unknown account '{account_id}'"));
+    }
+
+    let pool = catalog_pool(config).await?;
+    let result = sqlx::query("UPDATE account_models SET enabled = ? WHERE account_id = ?")
+        .bind(if enabled { 1_i64 } else { 0_i64 })
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    sqlx::query(
+        "UPDATE models
+         SET enabled = CASE
+             WHEN EXISTS (
+                 SELECT 1 FROM account_models
+                 WHERE canonical_model_id = models.canonical_id AND enabled = 1
+             ) THEN 1 ELSE 0 END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE canonical_id IN (
+             SELECT canonical_model_id FROM account_models WHERE account_id = ?
+         )",
+    )
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    pool.close().await;
+    Ok(result.rows_affected())
+}
+
 pub async fn set_model_enabled(
     config: &AppConfig,
     model_id: &str,
@@ -285,6 +323,115 @@ database_url = "{db_url}"
         .await
         .unwrap();
         assert_eq!(m_enabled, 1);
+
+        pool.close().await;
+        let _ = fs::remove_file(&temp_db);
+    }
+
+    #[tokio::test]
+    async fn set_account_all_models_enabled_syncs_models() {
+        let temp_db = std::env::temp_dir().join(format!("llm-test-{}.db", Uuid::new_v4().simple()));
+        let db_url = format!("sqlite://{}", temp_db.display());
+
+        let config_toml = format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+default_model = "test-model"
+
+[[providers]]
+id = "test-provider"
+kind = "openai-compatible"
+base_url = "https://api.test.com"
+
+[[accounts]]
+id = "test-account"
+provider = "test-provider"
+api_key_env = "TEST_API_KEY"
+enabled = true
+
+[[routes]]
+id = "test-route"
+model = "model-1"
+account = "test-account"
+
+[virtual_models.test-model]
+routes = ["test-route"]
+
+[storage]
+database_url = "{db_url}"
+"#
+        );
+        let config = Arc::new(AppConfig::parse(&config_toml).unwrap());
+        let live_config = LiveConfig::new(config.clone());
+        let _catalog = ModelCatalog::connect(live_config).await.unwrap();
+        let pool = catalog_pool(&config).await.unwrap();
+
+        // Seed 2 models and account_models
+        sqlx::query(
+            "INSERT INTO models (canonical_id, provider_id, external_id, display_name, owned_by, enabled)
+             VALUES ('test-provider/model-1', 'test-provider', 'model-1', 'Model 1', 'test', 1),
+                    ('test-provider/model-2', 'test-provider', 'model-2', 'Model 2', 'test', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO account_models (account_id, canonical_model_id, availability, enabled, configured, discovered)
+             VALUES ('test-account', 'test-provider/model-1', 'available', 1, 1, 1),
+                    ('test-account', 'test-provider/model-2', 'available', 1, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 1. Disable all models on test-account
+        let count = set_account_all_models_enabled(&config, "test-account", false)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let enabled_am_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM account_models WHERE account_id = 'test-account' AND enabled = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(enabled_am_count, 0);
+
+        let enabled_m_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM models WHERE canonical_id IN ('test-provider/model-1', 'test-provider/model-2') AND enabled = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(enabled_m_count, 0);
+
+        // 2. Enable all models on test-account
+        let count = set_account_all_models_enabled(&config, "test-account", true)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let enabled_am_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM account_models WHERE account_id = 'test-account' AND enabled = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(enabled_am_count, 2);
+
+        let enabled_m_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM models WHERE canonical_id IN ('test-provider/model-1', 'test-provider/model-2') AND enabled = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(enabled_m_count, 2);
 
         pool.close().await;
         let _ = fs::remove_file(&temp_db);
