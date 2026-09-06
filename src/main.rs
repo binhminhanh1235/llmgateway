@@ -9,6 +9,7 @@ mod browser_auth_runtime;
 mod browser_provider;
 mod browser_provider_runtime;
 mod browser_runtime_api;
+mod browser_runtime_settings;
 mod browser_session;
 mod browser_session_api;
 mod browser_session_runtime;
@@ -72,6 +73,9 @@ use browser_auth::BrowserAuthVault;
 use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
 use browser_runtime_api::{
     browser_account_runtime_diagnostics, browser_thread_affinity_diagnostics,
+};
+use browser_runtime_settings::{
+    browser_runtime_settings, set_browser_runtime_selection,
 };
 use browser_session::{BrowserConfig, BrowserSessionStore};
 use browser_session_api::{
@@ -451,6 +455,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/_llmgateway/browser-account-setup/{account_id}",
             axum::routing::patch(set_browser_account_enabled),
+        )
+        .route(
+            "/_llmgateway/browser-runtime/settings",
+            get(browser_runtime_settings).patch(set_browser_runtime_selection),
         )
         .route(
             "/_llmgateway/browser-accounts/{account_id}/runtime",
