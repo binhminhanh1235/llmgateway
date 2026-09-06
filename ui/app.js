@@ -16,7 +16,12 @@
     modelStatus: "enabled",
     pendingImages: [],
     pendingFiles: [],
+    recentArtifacts: [],
     sending: false,
+    recording: false,
+    mediaRecorder: null,
+    currentAbortController: null,
+    voiceMode: "dictation",
     currentView: "chat",
   };
 
@@ -31,6 +36,8 @@
     statusText: el("statusText"), changeKeyButton: el("changeKeyButton"), routeNotice: el("routeNotice"),
     imageFileInput: el("imageFileInput"), attachImageButton: el("attachImageButton"),
     documentFileInput: el("documentFileInput"), attachFileButton: el("attachFileButton"),
+    micButton: el("micButton"), voiceModeButton: el("voiceModeButton"), voiceStatus: el("voiceStatus"),
+    generateImageButton: el("generateImageButton"),
     attachmentPreview: el("attachmentPreview"), composerDropZone: el("composerDropZone"), composerHelp: el("composerHelp"),
     accountsContent: el("accountsContent"), modelsContent: el("modelsContent"),
     accountStatusTabs: el("accountStatusTabs"), modelStatusTabs: el("modelStatusTabs"),
@@ -244,7 +251,14 @@
     const avatar = message.role === "user" ? "YOU" : "AI";
     const role = message.role === "user" ? "You" : "llmgateway";
     wrapper.innerHTML = `<div class="message-avatar">${avatar}</div><div><div class="message-role">${role}</div><div class="message-body"></div><div class="message-route"></div></div>`;
-    wrapper.querySelector(".message-body").innerHTML = renderRichText(message.content || "") + (message.pending ? '<span class="typing-cursor"></span>' : "");
+    const body = wrapper.querySelector(".message-body");
+    body.innerHTML = renderRichText(message.content || "") + renderImageCards(message) + (message.pending ? '<span class="typing-cursor"></span>' : "");
+    body.querySelectorAll("[data-regenerate-image]").forEach((button) => {
+      button.addEventListener("click", () => generateImage(message.imagePrompt || ""));
+    });
+    body.querySelectorAll("[data-edit-image]").forEach((button) => {
+      button.addEventListener("click", () => editGeneratedImage(button.dataset.editImage, message.imagePrompt || ""));
+    });
     const route = wrapper.querySelector(".message-route");
     if (message.route) route.textContent = `via ${message.route}`; else route.remove();
     return wrapper;
@@ -262,6 +276,21 @@
       return escapeHtml(part).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
         .split(/\n{2,}/).filter(Boolean).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
     }).join("");
+  }
+
+  function renderImageCards(message) {
+    if (!Array.isArray(message?.images) || !message.images.length) return "";
+    return `<div class="generated-image-grid">${message.images.map((image) => `
+      <figure class="generated-image-card">
+        <img src="${escapeAttr(image.url)}" alt="${escapeAttr(message.imagePrompt || "Generated image")}" />
+        <figcaption>
+          <span>${escapeHtml(image.revised_prompt || "Generated image")}</span>
+          <span class="generated-image-actions">
+            <button type="button" class="secondary-button compact-action" data-regenerate-image="1">Regenerate</button>
+            <button type="button" class="secondary-button compact-action" data-edit-image="${escapeAttr(image.file_id)}">Edit</button>
+          </span>
+        </figcaption>
+      </figure>`).join("")}</div>`;
   }
 
   function escapeHtml(value) {
@@ -303,6 +332,41 @@
 
   function selectedModelSupportsFiles() {
     return selectedModelInputModalities().includes("file");
+  }
+
+  function structuredCapabilities(model) {
+    return model?.llmgateway?.multimodal_capabilities || {};
+  }
+
+  function modelSupportsCapability(model, capability) {
+    const capabilities = structuredCapabilities(model);
+    if (capability === "image_generation") {
+      return capabilities.image_generation === true
+        || (Array.isArray(capabilities.output_modalities) && capabilities.output_modalities.includes("image"));
+    }
+    if (capability === "image_editing") return capabilities.image_editing === true;
+    if (capability === "audio_transcription") return capabilities.audio_transcription === true;
+    return false;
+  }
+
+  function findModelForCapability(capability) {
+    const selectedId = activeThread()?.model || "llmgateway-auto";
+    const selected = state.models.find((model) => model.id === selectedId);
+    if (selected && modelSupportsCapability(selected, capability)) return selected;
+    return state.models.find((model) => model.llmgateway?.kind !== "route" && modelSupportsCapability(model, capability)) || null;
+  }
+
+  function capabilitySummary(model) {
+    const capabilities = structuredCapabilities(model);
+    const input = Array.isArray(capabilities.input_modalities) ? capabilities.input_modalities : [];
+    const output = Array.isArray(capabilities.output_modalities) ? capabilities.output_modalities : [];
+    const parts = [];
+    if (input.length) parts.push(`in:${input.join("/")}`);
+    if (output.length) parts.push(`out:${output.join("/")}`);
+    if (capabilities.audio_transcription) parts.push("STT");
+    if (capabilities.image_editing) parts.push("image edit");
+    if (capabilities.max_attachment_count) parts.push(`≤${capabilities.max_attachment_count} files`);
+    return parts.join(" · ");
   }
 
   function isNativeDocument(file) {
@@ -424,6 +488,10 @@
       const uploaded = await response.json();
       item.fileId = uploaded.id;
       item.uploading = false;
+      state.recentArtifacts = [
+        { fileId: uploaded.id, name: item.file.name, type: item.file.type || uploaded.mime_type || "" },
+        ...state.recentArtifacts.filter((artifact) => artifact.fileId !== uploaded.id),
+      ].slice(0, 20);
       item.error = "";
     } catch (error) {
       item.uploading = false;
@@ -573,10 +641,13 @@
     elements.sendButton.disabled = true;
     let succeeded = false;
     try {
+      const controller = new AbortController();
+      state.currentAbortController = controller;
       const response = await apiFetch(`/v1/threads/${encodeURIComponent(thread.id)}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: requestContent, model: thread.model || "llmgateway-auto", stream: true }),
+        signal: controller.signal,
       });
       assistantMessage.route = response.headers.get("x-llmgateway-route") || "";
       if (!response.ok) throw new Error(extractError(await response.text(), response.status));
@@ -594,11 +665,14 @@
       succeeded = true;
     } catch (error) {
       assistantMessage.pending = false;
-      assistantMessage.content = `Request failed: ${error.message || error}`;
+      assistantMessage.content = error?.name === "AbortError"
+        ? "Generation stopped."
+        : `Request failed: ${error.message || error}`;
       assistantMessage.route = "";
       updateAssistantDom(assistantMessage);
     } finally {
       state.sending = false;
+      state.currentAbortController = null;
       elements.sendButton.disabled = false;
       syncComposerCapabilities();
       elements.composerInput.focus();
@@ -632,6 +706,226 @@
           else if (Array.isArray(value)) for (const part of value) if (typeof part?.text === "string") onText(part.text);
         } catch (_) {}
       }
+    }
+  }
+
+  async function generateImage(promptOverride = "") {
+    const prompt = String(promptOverride || elements.composerInput.value || "").trim();
+    if (!prompt) return toast("Enter an image prompt first.");
+    if (!state.apiKey) return openAuthModal();
+    const model = findModelForCapability("image_generation");
+    if (!model) return toast("No enabled route advertises image generation.");
+
+    let thread = ensureThread();
+    try {
+      thread = await materializeDraft(thread, prompt);
+      if (!Array.isArray(thread.messages)) thread = await loadThreadDetail(thread.id);
+    } catch (error) {
+      return toast(error.message || String(error));
+    }
+
+    const userMessage = { id: uid(), role: "user", content: `🎨 ${prompt}`, createdAt: Date.now() };
+    const assistantMessage = { id: uid(), role: "assistant", content: "Generating image…", createdAt: Date.now(), pending: true, images: [], imagePrompt: prompt };
+    thread.messages.push(userMessage, assistantMessage);
+    thread.message_count = thread.messages.length;
+    renderChat();
+    state.sending = true;
+    syncComposerCapabilities();
+    try {
+      const response = await apiFetch("/v1/images/generations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model.id, prompt, n: 1 }),
+      });
+      assistantMessage.route = response.headers.get("x-llmgateway-route") || "";
+      if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      const payload = await response.json();
+      assistantMessage.images = payload.data || [];
+      assistantMessage.content = "";
+      assistantMessage.pending = false;
+      elements.composerInput.value = "";
+      autoGrowComposer();
+      renderChat();
+      showRoute(assistantMessage.route);
+    } catch (error) {
+      assistantMessage.pending = false;
+      assistantMessage.content = `Image generation failed: ${error.message || error}`;
+      renderChat();
+    } finally {
+      state.sending = false;
+      syncComposerCapabilities();
+    }
+  }
+
+  async function editGeneratedImage(fileId, originalPrompt = "") {
+    if (!fileId) return;
+    const editPrompt = window.prompt("Describe the image edit", originalPrompt ? `Edit: ${originalPrompt}` : "");
+    if (!editPrompt?.trim()) return;
+    const model = findModelForCapability("image_editing");
+    if (!model) return toast("No enabled route advertises image editing.");
+    try {
+      const source = await apiFetch(`/v1/files/${encodeURIComponent(fileId)}/content`);
+      if (!source.ok) throw new Error(extractError(await source.text(), source.status));
+      const blob = await source.blob();
+      const form = new FormData();
+      form.append("model", model.id);
+      form.append("prompt", editPrompt.trim());
+      form.append("image", blob, "edit-source.png");
+      const response = await apiFetch("/v1/images/edits", { method: "POST", body: form });
+      if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      const payload = await response.json();
+      const thread = ensureThread();
+      if (!Array.isArray(thread.messages)) await loadThreadDetail(thread.id);
+      const current = activeThread();
+      current.messages.push({
+        id: uid(),
+        role: "assistant",
+        content: "",
+        createdAt: Date.now(),
+        images: payload.data || [],
+        imagePrompt: editPrompt.trim(),
+        route: response.headers.get("x-llmgateway-route") || "",
+      });
+      current.message_count = current.messages.length;
+      renderChat();
+    } catch (error) {
+      toast(`Image edit failed: ${error.message || error}`);
+    }
+  }
+
+  async function toggleRecording() {
+    if (state.recording) {
+      state.mediaRecorder?.stop();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      return toast("Microphone recording is not supported by this browser.");
+    }
+    const model = findModelForCapability("audio_transcription");
+    if (!model) return toast("No enabled route advertises audio transcription.");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const preferred = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]
+        .find((type) => MediaRecorder.isTypeSupported?.(type));
+      const recorder = preferred ? new MediaRecorder(stream, { mimeType: preferred }) : new MediaRecorder(stream);
+      const chunks = [];
+      recorder.addEventListener("dataavailable", (event) => { if (event.data?.size) chunks.push(event.data); });
+      recorder.addEventListener("stop", async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        state.recording = false;
+        state.mediaRecorder = null;
+        syncVoiceControls();
+        const type = recorder.mimeType || chunks[0]?.type || "audio/webm";
+        const blob = new Blob(chunks, { type });
+        if (!blob.size) return toast("No microphone audio was captured.");
+        const form = new FormData();
+        form.append("model", model.id);
+        form.append("file", blob, type.includes("ogg") ? "voice.ogg" : "voice.webm");
+        elements.voiceStatus.textContent = "Transcribing…";
+        try {
+          const response = await apiFetch("/v1/audio/transcriptions", { method: "POST", body: form });
+          if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+          const payload = await response.json();
+          applyVoiceTranscript(payload.text || "");
+        } catch (error) {
+          elements.voiceStatus.textContent = "";
+          toast(`Transcription failed: ${error.message || error}`);
+        }
+      });
+      state.mediaRecorder = recorder;
+      state.recording = true;
+      recorder.start();
+      syncVoiceControls();
+    } catch (error) {
+      toast(`Could not start microphone: ${error.message || error}`);
+    }
+  }
+
+  function syncVoiceControls() {
+    if (!elements.micButton) return;
+    elements.micButton.classList.toggle("recording", state.recording);
+    elements.micButton.textContent = state.recording ? "■" : "🎙";
+    elements.micButton.title = state.recording ? "Stop recording" : "Record voice";
+    elements.voiceModeButton.textContent = state.voiceMode === "command" ? "Command" : "Dictate";
+    if (state.recording) elements.voiceStatus.textContent = state.voiceMode === "command" ? "Listening for a safe command…" : "Listening…";
+  }
+
+  function applyVoiceTranscript(transcript) {
+    const text = String(transcript || "").trim();
+    elements.voiceStatus.textContent = text ? `Heard: ${text}` : "";
+    if (!text) return toast("No speech was transcribed.");
+    if (state.voiceMode === "dictation") {
+      elements.composerInput.value = [elements.composerInput.value.trim(), text].filter(Boolean).join(" ");
+      autoGrowComposer();
+      elements.composerInput.focus();
+      return;
+    }
+    const command = globalThis.LLMGatewayVoice?.parseCommand?.(text);
+    if (!command) return toast("Voice command not recognized. No action was executed.");
+    dispatchVoiceCommand(command);
+  }
+
+  function dispatchVoiceCommand(command) {
+    switch (command.type) {
+      case "new_thread":
+        createThread();
+        toast("Created a new chat.");
+        break;
+      case "stop_generation":
+        if (state.currentAbortController) {
+          state.currentAbortController.abort();
+          toast("Stopping current generation.");
+        } else toast("No active generation to stop.");
+        break;
+      case "retry": {
+        const thread = activeThread();
+        const lastUser = [...(thread?.messages || [])].reverse().find((message) => message.role === "user");
+        if (!lastUser?.content) return toast("No previous user message to retry.");
+        elements.composerInput.value = String(lastUser.content).replace(/^🎨\s*/, "");
+        autoGrowComposer();
+        sendMessage();
+        break;
+      }
+      case "send_current_draft":
+        sendMessage();
+        break;
+      case "set_model": {
+        const query = String(command.query || "").toLowerCase();
+        const candidates = state.models.filter((model) => {
+          if (model.llmgateway?.kind === "route") return false;
+          const haystack = `${model.id} ${model.llmgateway?.display_name || ""}`.toLowerCase();
+          return haystack === query || haystack.includes(query);
+        });
+        if (candidates.length !== 1) return toast(candidates.length ? "Model name is ambiguous." : "No matching model found.");
+        ensureThread().model = candidates[0].id;
+        renderChat();
+        toast(`Selected ${displayModel(candidates[0].id)}.`);
+        break;
+      }
+      case "attach_artifact": {
+        const query = String(command.query || "").toLowerCase();
+        const matches = state.recentArtifacts.filter((artifact) => artifact.name.toLowerCase().includes(query));
+        if (matches.length !== 1) return toast(matches.length ? "Artifact name is ambiguous." : "No recent matching artifact found.");
+        const artifact = matches[0];
+        const item = {
+          localId: uid(),
+          file: { name: artifact.name, type: artifact.type },
+          fileId: artifact.fileId,
+          uploading: false,
+          error: "",
+        };
+        if (String(artifact.type).startsWith("image/")) {
+          item.previewUrl = `/v1/files/${encodeURIComponent(artifact.fileId)}/content`;
+          state.pendingImages.push(item);
+        } else {
+          state.pendingFiles.push(item);
+        }
+        syncComposerCapabilities();
+        toast(`Attached ${artifact.name}.`);
+        break;
+      }
+      default:
+        toast("Unsupported voice command. No action was executed.");
     }
   }
 
@@ -716,7 +1010,11 @@
       const info = model.llmgateway || {};
       const accounts = info.available_accounts != null ? `${info.available_accounts} account${info.available_accounts === 1 ? "" : "s"}` : "routing policy";
       const capabilities = Array.isArray(info.capabilities) && info.capabilities.length ? ` · ${info.capabilities.slice(0, 4).join(", ")}` : "";
-      return `<button type="button" class="model-choice ${model.id === selectedId ? "selected" : ""}" data-model-id="${escapeAttr(model.id)}"><span><span class="model-choice-name">${escapeHtml(displayModel(model.id))}</span><span class="model-choice-detail">${escapeHtml(accounts + capabilities)}</span></span><span class="model-choice-check">${model.id === selectedId ? "✓" : ""}</span></button>`;
+      const multimodal = capabilitySummary(model);
+      const incompatible = (state.pendingImages.length > 0 && !(structuredCapabilities(model).input_modalities || []).includes("image"))
+        || (state.pendingFiles.some((item) => isNativeDocument(item.file)) && !(structuredCapabilities(model).input_modalities || []).includes("file"));
+      const detail = [accounts + capabilities, multimodal].filter(Boolean).join(" · ");
+      return `<button type="button" class="model-choice ${model.id === selectedId ? "selected" : ""} ${incompatible ? "incompatible" : ""}" data-model-id="${escapeAttr(model.id)}" ${incompatible ? "disabled" : ""}><span><span class="model-choice-name">${escapeHtml(displayModel(model.id))}</span><span class="model-choice-detail">${escapeHtml(detail)}</span></span><span class="model-choice-check">${model.id === selectedId ? "✓" : ""}</span></button>`;
     }).join("");
     return `<div class="model-group"><div class="model-group-title">${escapeHtml(title)}</div>${rows}</div>`;
   }
@@ -1091,6 +1389,13 @@
       elements.imageFileInput.value = "";
     });
     elements.attachFileButton.addEventListener("click", () => elements.documentFileInput.click());
+    elements.micButton?.addEventListener("click", toggleRecording);
+    elements.voiceModeButton?.addEventListener("click", () => {
+      state.voiceMode = state.voiceMode === "dictation" ? "command" : "dictation";
+      syncVoiceControls();
+      toast(state.voiceMode === "command" ? "Voice command mode enabled." : "Voice dictation mode enabled.");
+    });
+    elements.generateImageButton?.addEventListener("click", () => generateImage());
     elements.documentFileInput.addEventListener("change", () => {
       addPendingFiles(elements.documentFileInput.files || []);
       elements.documentFileInput.value = "";
@@ -1160,7 +1465,7 @@
       try { await loadModels(); await loadThreads(); }
       catch (_) { if (!state.threads.length) createThread(); }
     } else { createThread(); openAuthModal(); }
-    renderThreads(); renderChat();
+    renderThreads(); renderChat(); syncVoiceControls();
   }
 
   init();
