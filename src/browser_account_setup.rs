@@ -1472,7 +1472,10 @@ routes = ["api"]
         let route = parsed.route("mimo-a-route").unwrap();
         assert_eq!(route.model, "mimo-web-default");
         assert_eq!(route.priority, 7);
-        assert!(route.capabilities.iter().any(|capability| capability == "reasoning"));
+        assert!(route
+            .capabilities
+            .iter()
+            .any(|capability| capability == "reasoning"));
         assert!(parsed.virtual_models["llmgateway-coding"]
             .routes
             .contains(&"mimo-a-route".to_string()));
