@@ -30,10 +30,12 @@ jobs:
       - run: node --check adapters/chatgpt-web.js
       - run: node --check adapters/qwen-web.js
       - run: node --check adapters/deepseek-web.js
+      - run: node --check adapters/mimo-web.js
       - run: node scripts/test-browser-adapter-fixtures.mjs
       - run: bash -n scripts/live-browserless-acceptance.sh
       - run: bash -n scripts/live-gemini-model-selection.sh
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
+      - run: bash -n scripts/live-mimo-browserless-acceptance.sh
       - run: bash -n scripts/smoke-gemini-recovery.sh
       - run: RUSTFLAGS="-D warnings" cargo check --all-targets
       - run: cargo clippy --all-targets
@@ -82,6 +84,11 @@ jobs:
           )
           [void][System.Management.Automation.Language.Parser]::ParseFile(
             (Resolve-Path 'scripts/live-gemini-model-selection.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/live-mimo-browserless-acceptance.ps1'),
             [ref]$tokens,
             [ref]$errors
           )

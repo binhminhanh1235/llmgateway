@@ -1002,6 +1002,7 @@ enabled = true"#,
             "browser-chatgpt",
             "browser-qwen",
             "browser-deepseek",
+            "browser-mimo",
         ] {
             let providers = format!(
                 "[[providers]]\nid = \"browser\"\nkind = \"{kind}\""

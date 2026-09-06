@@ -735,6 +735,11 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
             "browser_adapter_incompatible",
             &message,
         ),
+        GatewayError::ModelBindingConflict(message) => json_error(
+            StatusCode::CONFLICT,
+            "model_binding_conflict",
+            &message,
+        ),
         GatewayError::BrowserModelUnavailable(message) => json_error(
             StatusCode::BAD_GATEWAY,
             "browser_model_unavailable",

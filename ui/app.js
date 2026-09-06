@@ -449,10 +449,14 @@
   }
 
   function displayProvider(provider) {
-    if (provider === "chatgpt-web") return "ChatGPT Web";
-    if (provider === "gemini-web") return "Gemini Web";
-    if (provider === "qwen-web") return "Qwen Web";
-    return provider || "Other";
+    const labels = {
+      "chatgpt-web": "ChatGPT Web",
+      "gemini-web": "Gemini Web",
+      "qwen-web": "Qwen Web",
+      "deepseek-web": "DeepSeek Web",
+      "mimo-web": "Xiaomi MiMo Web",
+    };
+    return labels[provider] || provider || "Other";
   }
 
   function modelGroupHtml(title, models, selectedId) {

@@ -737,6 +737,7 @@ pub fn provider_presets() -> Vec<BrowserAccountProviderPreset> {
         provider_preset("chatgpt").expect("chatgpt preset"),
         provider_preset("gemini").expect("gemini preset"),
         provider_preset("deepseek").expect("deepseek preset"),
+        provider_preset("mimo").expect("mimo preset"),
         provider_preset("qwen").expect("qwen preset"),
     ]
 }
@@ -777,6 +778,19 @@ fn provider_preset(id: &str) -> Option<BrowserAccountProviderPreset> {
             login_url: "https://chat.deepseek.com/",
             ready_url_prefix: "https://chat.deepseek.com/",
             default_model_id: "deepseek-web-default",
+            default_capabilities: &["chat", "coding", "reasoning"],
+            discover_models: true,
+            initial_transport_mode: Some(BrowserTransportMode::HttpPreferred),
+            extra_virtual_models: &["llmgateway-coding", "llmgateway-best"],
+        }),
+        "mimo" | "browser-mimo" => Some(BrowserAccountProviderPreset {
+            id: "mimo",
+            label: "Xiaomi MiMo Web",
+            provider_id: "mimo-web",
+            provider_kind: "browser-mimo",
+            login_url: "https://aistudio.xiaomimimo.com/#/c",
+            ready_url_prefix: "https://aistudio.xiaomimimo.com/",
+            default_model_id: "mimo-web-default",
             default_capabilities: &["chat", "coding", "reasoning"],
             discover_models: true,
             initial_transport_mode: Some(BrowserTransportMode::HttpPreferred),
@@ -1195,6 +1209,54 @@ routes = ["api"]
             browser["browser"]["bindings"]["deepseek-a"]["transport_mode"].as_str(),
             Some("http-preferred")
         );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn creates_mimo_browser_account_with_dynamic_models_and_browserless_policy() {
+        let path = temp_config();
+        apply_browser_account_setup(
+            &path,
+            CreateBrowserAccountRequest {
+                provider: "mimo".into(),
+                account_id: Some("mimo-a".into()),
+                label: Some("MiMo A".into()),
+                model_id: None,
+                model_label: None,
+                priority: Some(7),
+            },
+        )
+        .unwrap();
+
+        let raw = fs::read_to_string(&path).unwrap();
+        let parsed = AppConfig::parse(&raw).unwrap();
+        assert_eq!(parsed.provider("mimo-web").unwrap().kind, "browser-mimo");
+        assert!(parsed.account("mimo-a").unwrap().discover_models);
+        let route = parsed.route("mimo-a-route").unwrap();
+        assert_eq!(route.model, "mimo-web-default");
+        assert_eq!(route.priority, 7);
+        assert!(route.capabilities.iter().any(|capability| capability == "reasoning"));
+        assert!(parsed.virtual_models["llmgateway-coding"]
+            .routes
+            .contains(&"mimo-a-route".to_string()));
+        assert!(parsed.virtual_models["llmgateway-best"]
+            .routes
+            .contains(&"mimo-a-route".to_string()));
+
+        let browser: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(
+            browser["browser"]["sessions"]["mimo-a"]["login_url"].as_str(),
+            Some("https://aistudio.xiaomimimo.com/#/c")
+        );
+        assert_eq!(
+            browser["browser"]["bindings"]["mimo-a"]["transport_mode"].as_str(),
+            Some("http-preferred")
+        );
+        assert_eq!(
+            browser["chromium"]["sessions"]["mimo-a"]["ready_url_prefixes"][0].as_str(),
+            Some("https://aistudio.xiaomimimo.com/")
+        );
+
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
