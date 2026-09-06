@@ -101,6 +101,21 @@ class AgentHelperTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["delete-account", "anything"])
 
+    def test_skill_bundle_metadata_and_references_are_present(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        self.assertTrue(skill.startswith("---\n"))
+        self.assertIn("\nname: llmgateway\n", skill)
+        self.assertIn("\ndescription:", skill)
+        for relative in (
+            "references/api.md",
+            "references/routing.md",
+            "references/diagnostics.md",
+            "references/operations.md",
+        ):
+            self.assertTrue((root / relative).is_file(), relative)
+            self.assertIn(f"]({relative})", skill)
+
 
 if __name__ == "__main__":
     unittest.main()
