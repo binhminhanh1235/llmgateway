@@ -211,7 +211,7 @@ assert x["desired_policy"] == "browser-only", x
 assert x["configured_mode"] == "browser-only", x
 '
 
-for SPEC in "gemini gemini-toggle Gemini auto" "chatgpt chatgpt-toggle ChatGPT http-preferred" "mimo mimo-toggle MiMo http-preferred"; do
+for SPEC in "gemini gemini-toggle Gemini auto" "chatgpt chatgpt-toggle ChatGPT http-preferred" "mimo mimo-toggle MiMo auto"; do
   read -r PROVIDER ACCOUNT LABEL EXPECTED_BROWSERLESS_MODE <<<"$SPEC"
   curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-account-setup \
     "${AUTH[@]}" "${JSON[@]}" \
