@@ -33,7 +33,7 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 | P0 | [#70 Multimodal Foundation](https://github.com/binhminhanh1235/llmgateway/issues/70) | **DONE / VERIFIED** | none | canonical contracts + structured capabilities + compatibility tests + exact-head CI |
 | P1 | [#71 ArtifactStore and Files API](https://github.com/binhminhanh1235/llmgateway/issues/71) | **DONE / VERIFIED** | P0 DONE / VERIFIED | durable files API, dedup, persistence, MIME/size/security tests |
 | P2 | [#72 Image Attachment and Vision Input](https://github.com/binhminhanh1235/llmgateway/issues/72) | **DONE / VERIFIED (LIVE GATE WAIVED BY USER)** | P1 DONE / VERIFIED | deterministic/API/UI gates passed; live authenticated gate explicitly waived by user |
-| P3 | [#73 General File Attachments](https://github.com/binhminhanh1235/llmgateway/issues/73) | **IN PROGRESS** | P2 DONE / VERIFIED | native PDF path + extraction fallback + provider binding isolation |
+| P3 | [#73 General File Attachments](https://github.com/binhminhanh1235/llmgateway/issues/73) | **VERIFYING** | P2 DONE / VERIFIED | deterministic implementation gate passed; authenticated native PDF gate pending |
 | P4 | [#74 Voice Input and Safe Voice Commands](https://github.com/binhminhanh1235/llmgateway/issues/74) | **BLOCKED** | P3 DONE / VERIFIED | STT + microphone + allowlisted command dispatcher |
 | P5 | [#75 Image Generation and Editing](https://github.com/binhminhanh1235/llmgateway/issues/75) | **BLOCKED** | P4 DONE / VERIFIED | Responses + Images APIs share core; generation/edit verified |
 | P6 | [#76 Capability-aware Routing and Multimodal UX](https://github.com/binhminhanh1235/llmgateway/issues/76) | **BLOCKED** | P5 DONE / VERIFIED | hard capability eligibility + deterministic fallback + diagnostics |
@@ -55,7 +55,7 @@ A green CI, mergeable PR, completed phase, or completed initiative is not merge 
 - Deterministic tests cover Responses normalization, Chat/Responses equivalence, Anthropic normalization, current execution round-trip semantics, stable structured capability serialization, legacy capability compatibility, and unsupported modality errors.
 - Full implementation exact-head CI: workflow CI #1345 / run `33975834628` on `aa13c0fb7f3e3db44f86ef5238e9f75f1a207410`: **PASS** on Rust + Windows, including strict cargo check, Clippy, all-target tests, OpenAI SDK, browser/browserless, streaming, native affinity, routing/traces, client policies, local multimodal assertions, and Docker build.
 - The final status-only checkpoint commit is evidence-only. Its exact-head CI run is recorded in issue #70 after completion so no code-evidence commit is mutated merely to embed its own future run ID.
-- P1 #71 is **DONE / VERIFIED**. P2 #72 is **VERIFYING** after deterministic exact-head implementation CI passed. P3 #73 and every later phase remain **BLOCKED / NOT STARTED**.
+- P1 #71 is **DONE / VERIFIED**. P2 #72 is **DONE / VERIFIED (LIVE GATE WAIVED BY USER)**. P3 #73 is **VERIFYING** after its deterministic exact-head implementation gate passed. P4 and every later phase remain **BLOCKED / NOT STARTED**.
 - `main` remains untouched. No multimodal work may be merged to `main` without a separate explicit user authorization.
 
 ## Update protocol
@@ -116,6 +116,22 @@ At every meaningful checkpoint:
 - P2 final deterministic exact-head CI #1524 / run `34003689302` on `11310a65e92ef594fa95ef4bbf0199b842b3bf5a`: **PASS**, including live-runner syntax, vision API/UI fixtures, Model Groups, Linux/Windows regressions and Docker.
 - The only unexecuted P2 gate was the real authenticated ChatGPT/Gemini local vision run. On 2026-09-06 the user explicitly instructed to **ignore that live authenticated execution and continue**. This is recorded as a user waiver, not as a claimed live PASS.
 - P2 is therefore **DONE / VERIFIED (LIVE GATE WAIVED BY USER)** for dependency progression.
-- P3 #73 is **IN PROGRESS**. P4 and later phases remain **BLOCKED / NOT STARTED**.
+- P3 #73 is **VERIFYING** after deterministic implementation CI passed. The real authenticated native-PDF acceptance remains pending. P4 and later phases remain **BLOCKED / NOT STARTED**.
 - P3 start checkpoint: `main` = `c8dd755ea126b12842081035d7654d66efa0e81a`; pre-start feature head = `11310a65e92ef594fa95ef4bbf0199b842b3bf5a`; branch ahead 70 / behind 0, so no reconcile is required.
+- `main` remains untouched and the merge guard remains active.
+
+
+## P3 General File Attachments verification
+
+- Exact current main re-check before the verification checkpoint: `71436138b0fe5d67b93dac5c0e68b1ad112ac7c2`.
+- P3 deterministic implementation head: `fc8fc8d82b9bb85bfb959d59288b15ed3c94df73`; branch is ahead 135 / behind 0 relative to that exact main, so no reconcile is required.
+- Exact-head CI #1654 / run `34010591132`: **PASS** on Linux and Windows, including strict cargo check, Clippy, all-target tests, provider-conversation affinity, browser/browserless regression smoke, routing/policy smoke, file UI fixtures, live-runner syntax and Docker build.
+- The P3 execution lane now supports native provider document upload for PDF/DOCX and bounded extraction fallback for TXT/Markdown/CSV/JSON. Unsupported remote file URLs and unsupported MIME/route combinations fail deterministically.
+- Provider artifact bindings are wired into successful production execution and isolated by gateway artifact + provider + account affinity. Same-affinity bindings are reused as stable gateway-internal opaque bindings; provider/account switches create distinct bindings without mutating the gateway artifact. Raw provider file IDs remain outside public API payloads.
+- File-capable model, route and adapter capability metadata now exposes supported file MIME types plus `max_attachment_count` and `max_attachment_size_bytes`. Deterministic smoke coverage locks the route-level metadata contract.
+- Threads and Responses persist stable `llmgateway://artifact/<id>` references. Native conversation replay keeps already-synced file turns out of incremental provider requests, while unsynced file turns remain replayable.
+- Extraction guardrails are explicitly tested for byte limits, character limits and invalid JSON.
+- `scripts/live-file-acceptance.sh` provides the P3 authenticated acceptance gate for ChatGPT/Gemini browser adapters: valid PDF upload, Responses, Threads, native CDP transport, trace strategy, stable artifact identity, leak checks, reference-safe delete and follow-up reuse semantics.
+- Remaining P3 blocker: execute the real authenticated native-PDF acceptance against at least one supported browser account. This gate has **not** been waived and is **not** claimed as a live PASS.
+- P4 #74 remains **BLOCKED / NOT STARTED** until P3 reaches DONE / VERIFIED.
 - `main` remains untouched and the merge guard remains active.
