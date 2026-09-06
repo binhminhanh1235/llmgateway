@@ -108,7 +108,7 @@ import json,sys
 x=json.load(sys.stdin)
 assert x["hot_activation"] is True, x
 assert x["restart_required_after_create"] is False, x
-assert {p["id"] for p in x["providers"]} >= {"gemini","chatgpt","qwen","deepseek"}, x
+assert {p["id"] for p in x["providers"]} >= {"gemini","chatgpt","qwen","deepseek","mimo"}, x
 '
 
 BEFORE=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions "${AUTH[@]}")
@@ -211,7 +211,7 @@ assert x["desired_policy"] == "browser-only", x
 assert x["configured_mode"] == "browser-only", x
 '
 
-for SPEC in "gemini gemini-toggle Gemini auto" "chatgpt chatgpt-toggle ChatGPT http-preferred"; do
+for SPEC in "gemini gemini-toggle Gemini auto" "chatgpt chatgpt-toggle ChatGPT http-preferred" "mimo mimo-toggle MiMo http-preferred"; do
   read -r PROVIDER ACCOUNT LABEL EXPECTED_BROWSERLESS_MODE <<<"$SPEC"
   curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-account-setup \
     "${AUTH[@]}" "${JSON[@]}" \
