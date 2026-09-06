@@ -202,7 +202,8 @@ impl ExecutionTraceStore {
         .execute(&self.pool)
         .await?;
 
-        self.ensure_column("execution_attempts", "failure_class", "TEXT").await?;
+        self.ensure_column("execution_attempts", "failure_class", "TEXT")
+            .await?;
         self.ensure_column(
             "execution_attempts",
             "execution_phase",

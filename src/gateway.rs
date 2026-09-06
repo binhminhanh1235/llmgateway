@@ -538,8 +538,7 @@ impl Gateway {
             }
 
             let selected_transport = selected_transport_label(provider);
-            let logical_candidate =
-                format!("{}/{}/{}", account.provider, account.id, route.model);
+            let logical_candidate = format!("{}/{}/{}", account.provider, account.id, route.model);
             let attempt_started = Instant::now();
             match self
                 .send_route_chat(provider, account, &route, &upstream_body, thread_id)
@@ -1434,13 +1433,7 @@ fn normalized_gateway_failure(
         .with_cooldown(0),
         GatewayError::Upstream { status, body } => {
             return normalized_status_failure(
-                *status,
-                body,
-                provider,
-                account_id,
-                model,
-                transport,
-                false,
+                *status, body, provider, account_id, model, transport, false,
             )
         }
         GatewayError::Execution { source, .. } => {
@@ -1468,11 +1461,13 @@ fn route_failure_policy_for_failure(failure: &ExecutionFailure) -> Option<(i64, 
     if failure.class == FailureClass::SessionStateDesync && !failure.retryable {
         return None;
     }
-    let route_cooldown_secs = failure.suggested_cooldown_secs.unwrap_or(match failure.class {
-        FailureClass::ModelUnavailable | FailureClass::ModelRecipeStale => 0,
-        FailureClass::SessionBusy => 2,
-        _ => 10,
-    });
+    let route_cooldown_secs = failure
+        .suggested_cooldown_secs
+        .unwrap_or(match failure.class {
+            FailureClass::ModelUnavailable | FailureClass::ModelRecipeStale => 0,
+            FailureClass::SessionBusy => 2,
+            _ => 10,
+        });
     Some((route_cooldown_secs, failure_is_adaptive(failure)))
 }
 
