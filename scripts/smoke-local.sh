@@ -72,7 +72,7 @@ account = "fake-primary"
 model = "fake-model"
 priority = 10
 enabled = true
-capabilities = ["chat", "tools", "coding", "vision"]
+capabilities = ["chat", "tools", "coding", "vision", "file", "native_file_upload"]
 
 [[routes]]
 id = "fake-text-route"
@@ -192,7 +192,7 @@ physical=next(item for item in x["data"] if item["id"]=="fake/fake-model")
 legacy=physical["llmgateway"]["capabilities"]
 structured=physical["llmgateway"]["multimodal_capabilities"]
 assert "chat" in legacy, physical
-assert structured["input_modalities"] == ["text","image"], structured
+assert structured["input_modalities"] == ["text","image","file"], structured
 assert structured["output_modalities"] == ["text"], structured
 '
 
@@ -205,7 +205,7 @@ assert x["object"] == "llmgateway.capabilities", x
 assert x["schema_version"] == 1, x
 assert x["canonical_modalities"]["input"] == ["text","image","file","audio"], x
 assert x["canonical_modalities"]["output"] == ["text","image","audio","file"], x
-assert x["gateway_execution"]["input_modalities"] == ["text","image"], x
+assert x["gateway_execution"]["input_modalities"] == ["text","image","file"], x
 assert x["gateway_execution"]["native_file_upload"] is True, x
 assert x["live_attachments"] is True, x
 assert x["artifact_store"]["enabled"] is True, x
@@ -300,6 +300,7 @@ curl -fsS -X DELETE "http://127.0.0.1:7331/v1/files/${FILE_B_ID}" \
 test "$(find data/artifacts/blobs -type f | wc -l | tr -d ' ')" = "0"
 
 bash scripts/smoke-vision-api.sh
+bash scripts/smoke-file-attachments.sh
 
 curl -fsS -X POST http://127.0.0.1:7331/v1/chat/completions \
   -H "Authorization: Bearer ${LLMGATEWAY_API_KEY}" \
