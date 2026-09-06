@@ -786,6 +786,7 @@
   window.addEventListener("llmgateway:accounts-changed", () => {
     state.accounts = [];
     state.catalog = [];
+    loadModels().catch((error) => toast(error.message || String(error)));
     if (state.currentView === "accounts") loadAccounts(true);
   });
 
