@@ -1,8 +1,13 @@
 /target
 .env
 config/llmgateway.toml
-data/*.db
-data/*.db-*
+config/*.bak
+data/
+*.app
+.cocoindex_code/
+scripts/*_results.json
+scripts/*_result.json
+Cargo.lock
 .DS_Store
 .idea/
 .vscode/
