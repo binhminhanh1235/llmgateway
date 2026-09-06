@@ -979,6 +979,7 @@ fn sanitized_upstream_body(body: &Value) -> Value {
     let mut sanitized = body.clone();
     if let Some(object) = sanitized.as_object_mut() {
         object.remove("llmgateway_task");
+        object.remove("llmgateway_requirements");
         object.remove("llmgateway_execution_preference");
         object.remove("llmgateway_api_fallback");
     }
