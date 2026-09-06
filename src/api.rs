@@ -1,5 +1,6 @@
 use crate::{
     artifact_store::ArtifactStore,
+    browser_provider_runtime,
     catalog::{canonical_model_id, CatalogError, ModelCatalog},
     compat::{anthropic, responses},
     client_policy::{ClientAccess, ClientPolicyError, ClientPolicyStore},
@@ -532,6 +533,16 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             }) {
                 capabilities.extend(model.capabilities.iter().cloned());
             }
+            if config
+                .provider(&account.provider)
+                .filter(|provider| provider.is_browser())
+                .is_some_and(|provider| {
+                    browser_provider_runtime::get()
+                        .is_some_and(|registry| registry.supports_image_input(&provider.kind))
+                })
+            {
+                capabilities.insert("vision".into());
+            }
         }
         enriched_route_capabilities
             .insert(route.id.clone(), capabilities.into_iter().collect());
@@ -586,7 +597,19 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 account.enabled && matches!(account.availability.as_str(), "available" | "unknown")
             })
             .count();
-        let multimodal_capabilities = ModelCapabilities::from_legacy_tags(&model.capabilities);
+        let mut model_capabilities = model.capabilities.iter().cloned().collect::<BTreeSet<_>>();
+        if config
+            .provider(&model.provider)
+            .filter(|provider| provider.is_browser())
+            .is_some_and(|provider| {
+                browser_provider_runtime::get()
+                    .is_some_and(|registry| registry.supports_image_input(&provider.kind))
+            })
+        {
+            model_capabilities.insert("vision".into());
+        }
+        let model_capabilities = model_capabilities.into_iter().collect::<Vec<_>>();
+        let multimodal_capabilities = ModelCapabilities::from_legacy_tags(&model_capabilities);
         data.insert(
             model.id.clone(),
             json!({
@@ -598,7 +621,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
                     "provider":model.provider,
                     "display_name":model.display_name,
                     "context_window":model.context_window,
-                    "capabilities":model.capabilities,
+                    "capabilities":model_capabilities,
                     "multimodal_capabilities":multimodal_capabilities,
                     "available_accounts":available_accounts
                 }
@@ -661,10 +684,22 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
                 .is_some_and(|policy| !policy.model_allowed(&model.id, &model.id))
         })
         .map(|model| {
-            let structured = ModelCapabilities::from_legacy_tags(&model.capabilities);
+            let mut capabilities = model.capabilities.iter().cloned().collect::<BTreeSet<_>>();
+            if config
+                .provider(&model.provider)
+                .filter(|provider| provider.is_browser())
+                .is_some_and(|provider| {
+                    browser_provider_runtime::get()
+                        .is_some_and(|registry| registry.supports_image_input(&provider.kind))
+                })
+            {
+                capabilities.insert("vision".into());
+            }
+            let capabilities = capabilities.into_iter().collect::<Vec<_>>();
+            let structured = ModelCapabilities::from_legacy_tags(&capabilities);
             json!({
                 "id":model.id,
-                "legacy_capabilities":model.capabilities,
+                "legacy_capabilities":capabilities,
                 "capabilities":structured
             })
         })
@@ -700,11 +735,14 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
         .iter()
         .filter_map(|provider| {
             let models = models_by_adapter.remove(&provider.id)?;
-            let tags = tags_by_adapter
-                .remove(&provider.id)
-                .unwrap_or_default()
-                .into_iter()
-                .collect::<Vec<_>>();
+            let mut tags = tags_by_adapter.remove(&provider.id).unwrap_or_default();
+            if provider.is_browser()
+                && browser_provider_runtime::get()
+                    .is_some_and(|registry| registry.supports_image_input(&provider.kind))
+            {
+                tags.insert("vision".into());
+            }
+            let tags = tags.into_iter().collect::<Vec<_>>();
             Some(AdapterCapabilities {
                 id: provider.id.clone(),
                 transport: provider.transport().to_string(),
