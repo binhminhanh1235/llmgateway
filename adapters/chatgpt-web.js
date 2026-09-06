@@ -159,50 +159,79 @@
     return String(content || "");
   };
 
-  const imageDataUrls = (request) => {
-    const urls = [];
+  const attachmentPayloads = (request) => {
+    const attachments = [];
     for (const message of Array.isArray(request?.messages) ? request.messages : []) {
       for (const part of Array.isArray(message?.content) ? message.content : []) {
-        if (!["image_url", "input_image", "image"].includes(String(part?.type || ""))) continue;
-        const raw = typeof part?.image_url === "string"
-          ? part.image_url
-          : part?.image_url?.url || part?.url || "";
-        if (typeof raw === "string" && raw.startsWith("data:image/")) urls.push(raw);
+        const kind = String(part?.type || "");
+        if (["image_url", "input_image", "image"].includes(kind)) {
+          const raw = typeof part?.image_url === "string"
+            ? part.image_url
+            : part?.image_url?.url || part?.url || "";
+          if (typeof raw === "string" && raw.startsWith("data:image/")) {
+            attachments.push({
+              dataUrl: raw,
+              filename: "",
+              mimeType: raw.slice(5, raw.indexOf(";"))
+            });
+          }
+          continue;
+        }
+        if (["input_file", "file", "document"].includes(kind)) {
+          const raw = part?.file_data || part?.data || "";
+          if (typeof raw === "string" && raw.startsWith("data:")) {
+            attachments.push({
+              dataUrl: raw,
+              filename: String(part?.filename || ""),
+              mimeType: String(part?.mime_type || raw.slice(5, raw.indexOf(";")) || "")
+            });
+          }
+        }
       }
     }
-    return urls;
+    return attachments;
   };
 
-  const dataUrlFile = (dataUrl, index) => {
-    const match = String(dataUrl || "").match(/^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i);
-    if (!match) throw new Error("INVALID_REQUEST: browser image attachment must be a base64 image data URL");
-    const mime = match[1].toLowerCase();
+  const dataUrlFile = (attachment, index) => {
+    const match = String(attachment?.dataUrl || "").match(/^data:([^;]+);base64,([\s\S]+)$/i);
+    if (!match) throw new Error("INVALID_REQUEST: browser attachment must be a base64 data URL");
+    const mime = String(attachment?.mimeType || match[1]).toLowerCase();
     const binary = atob(match[2]);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-    const extension = mime === "image/jpeg" ? "jpg" : (mime.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "");
-    return new File([bytes], "llmgateway-image-" + index + "." + extension, { type: mime });
+    let filename = String(attachment?.filename || "").trim();
+    if (!filename) {
+      const extension = mime === "image/jpeg"
+        ? "jpg"
+        : mime === "application/pdf"
+          ? "pdf"
+          : mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ? "docx"
+            : (mime.split("/")[1] || "bin").replace(/[^a-z0-9]/gi, "");
+      filename = "llmgateway-attachment-" + index + "." + extension;
+    }
+    return new File([bytes], filename, { type: mime });
   };
 
   const attachImages = async (request, context) => {
-    const urls = imageDataUrls(request);
-    if (!urls.length) return 0;
+    const attachments = attachmentPayloads(request);
+    if (!attachments.length) return 0;
     const input = await waitFor(() => queryFirst(context, "fileInput"), 8000);
-    if (!input) throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT image file input was not found");
-    if (urls.length > 1 && input.multiple === false) {
-      throw new Error("INVALID_REQUEST: ChatGPT composer currently accepts one image per file input");
+    if (!input) throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT attachment file input was not found");
+    if (attachments.length > 1 && input.multiple === false) {
+      throw new Error("INVALID_REQUEST: ChatGPT composer currently accepts one attachment per file input");
     }
     const transfer = new DataTransfer();
-    urls.forEach((url, index) => transfer.items.add(dataUrlFile(url, index)));
+    attachments.forEach((attachment, index) => transfer.items.add(dataUrlFile(attachment, index)));
     try {
       input.files = transfer.files;
     } catch (_) {
-      throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT image file input rejected DataTransfer files");
+      throw new Error("ADAPTER_INCOMPATIBLE: ChatGPT attachment file input rejected DataTransfer files");
     }
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
     await sleep(350);
-    return urls.length;
+    return attachments.length;
   };
 
   const toolProtocol = (request) => {
