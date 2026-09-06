@@ -12,6 +12,8 @@
     models: [],
     catalog: [],
     accounts: [],
+    accountStatus: "all",
+    modelStatus: "all",
     sending: false,
     currentView: "chat",
   };
@@ -26,6 +28,7 @@
     saveKeyButton: el("saveKeyButton"), authError: el("authError"), statusDot: el("statusDot"),
     statusText: el("statusText"), changeKeyButton: el("changeKeyButton"), routeNotice: el("routeNotice"),
     accountsContent: el("accountsContent"), modelsContent: el("modelsContent"),
+    accountStatusTabs: el("accountStatusTabs"), modelStatusTabs: el("modelStatusTabs"),
     refreshAccountsButton: el("refreshAccountsButton"), modelCatalogSearch: el("modelCatalogSearch"), toast: el("toast"),
   };
 
@@ -483,19 +486,43 @@
     } catch (error) { elements.accountsContent.innerHTML = `<div class="error-box">${escapeHtml(error.message || error)}</div>`; }
   }
 
+  function updateStatusTabs(container, current, items, enabled) {
+    if (!container) return;
+    const counts = {
+      all: items.length,
+      enabled: items.filter(enabled).length,
+    };
+    counts.disabled = counts.all - counts.enabled;
+    container.querySelectorAll(".status-tab").forEach((button) => {
+      const status = button.dataset.accountStatus || button.dataset.modelStatus || button.dataset.groupStatus;
+      button.classList.toggle("active", status === current);
+      const count = button.querySelector("[data-status-count]");
+      if (count && Object.prototype.hasOwnProperty.call(counts, status)) {
+        count.textContent = String(counts[status]);
+      }
+    });
+  }
+
   function renderAccounts() {
+    updateStatusTabs(elements.accountStatusTabs, state.accountStatus, state.accounts, (account) => account.enabled === true);
     if (!state.accounts.length) return void (elements.accountsContent.innerHTML = '<div class="loading-box">No configured accounts</div>');
-    elements.accountsContent.innerHTML = `<div class="account-grid">${state.accounts.map((account) => {
+
+    const visible = state.accounts.filter((account) =>
+      state.accountStatus === "all" || (state.accountStatus === "enabled") === (account.enabled === true)
+    );
+    elements.accountsContent.innerHTML = visible.length ? `<div class="account-grid">${visible.map((account) => {
       const rows = (account.models || []).map((model) => {
         const binding = model.accounts?.find((candidate) => candidate.account_id === account.id);
         if (!binding) return "";
         const badges = [binding.availability, ...(model.capabilities || []).slice(0, 3)].map((badge, i) => `<span class="badge ${i === 0 ? escapeAttr(binding.availability) : ""}">${escapeHtml(badge)}</span>`).join("");
-        return `<div class="account-model-row"><div><div class="model-name">${escapeHtml(model.display_name || model.external_id)}</div><div class="model-meta">${badges}</div></div><label class="toggle"><input type="checkbox" data-toggle-account="${escapeAttr(account.id)}" data-toggle-model="${escapeAttr(model.id)}" ${binding.enabled ? "checked" : ""}/><span class="toggle-track"></span></label></div>`;
+        return `<div class="account-model-row"><div><div class="model-name">${escapeHtml(model.display_name || model.external_id)}</div><div class="model-meta">${badges}</div></div><label class="toggle" title="Enable this model on ${escapeAttr(account.id)}"><input type="checkbox" data-toggle-account="${escapeAttr(account.id)}" data-toggle-model="${escapeAttr(model.id)}" ${binding.enabled ? "checked" : ""}/><span class="toggle-track"></span></label></div>`;
       }).join("") || '<div class="account-model-row"><div class="model-meta">No models discovered yet</div></div>';
       const transport = accountTransportHtml(account);
-      return `<article class="account-card"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button></div>${transport}<div class="account-models">${rows}</div></article>`;
-    }).join("")}</div>`;
+      const enabled = account.enabled === true;
+      return `<article class="account-card ${enabled ? "" : "is-disabled"}"><div class="account-card-header"><div><div class="account-provider">${escapeHtml(account.provider)}</div><div class="account-name">${escapeHtml(account.id)}</div><div class="account-stats">${account.available_model_count} available · ${account.model_count} known</div></div><div class="entity-state-actions"><span class="badge ${enabled ? "available" : "unavailable"}">${enabled ? "Enabled" : "Disabled"}</span><label class="toggle" title="${enabled ? "Disable account routing" : "Enable account routing"}"><input type="checkbox" data-toggle-account-state="${escapeAttr(account.id)}" ${enabled ? "checked" : ""}/><span class="toggle-track"></span></label><button type="button" class="secondary-button refresh-account" data-account="${escapeAttr(account.id)}" ${account.discover_models ? "" : "disabled"}>↻ Models</button></div></div>${transport}<div class="account-models">${rows}</div></article>`;
+    }).join("")}</div>` : '<div class="loading-box">No accounts in this status</div>';
     elements.accountsContent.querySelectorAll(".refresh-account").forEach((button) => button.addEventListener("click", () => refreshAccountModels(button.dataset.account, button)));
+    elements.accountsContent.querySelectorAll("[data-toggle-account-state]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleAccountState(checkbox)));
     elements.accountsContent.querySelectorAll("[data-toggle-model]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleAccountModel(checkbox)));
     elements.accountsContent.querySelectorAll("[data-toggle-browserless]").forEach((checkbox) => checkbox.addEventListener("change", () => toggleBrowserless(checkbox)));
   }
@@ -589,6 +616,26 @@
     finally { button.disabled = false; button.textContent = old; }
   }
 
+  async function toggleAccountState(checkbox) {
+    const accountId = checkbox.dataset.toggleAccountState;
+    const desired = checkbox.checked;
+    checkbox.disabled = true;
+    try {
+      const response = await apiFetch(`/_llmgateway/accounts/${encodeURIComponent(accountId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: desired }),
+      });
+      if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      toast(`${desired ? "Enabled" : "Disabled"} account ${accountId}`);
+      window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
+    } catch (error) {
+      checkbox.checked = !desired;
+      checkbox.disabled = false;
+      toast(error.message || String(error));
+    }
+  }
+
   async function toggleAccountModel(checkbox) {
     const accountId = checkbox.dataset.toggleAccount, modelId = checkbox.dataset.toggleModel;
     checkbox.disabled = true;
@@ -596,7 +643,7 @@
       const response = await apiFetch(`/_llmgateway/accounts/${encodeURIComponent(accountId)}/models`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model_id: modelId, enabled: checkbox.checked }) });
       if (!response.ok) throw new Error(extractError(await response.text(), response.status));
       toast(`${checkbox.checked ? "Enabled" : "Disabled"} ${displayModel(modelId)} on ${accountId}`);
-      state.accounts = []; await loadModels(); await loadAccounts(true);
+      window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
     } catch (error) { checkbox.checked = !checkbox.checked; toast(error.message || String(error)); }
     finally { checkbox.disabled = false; }
   }
@@ -614,15 +661,48 @@
 
   function renderCatalog() {
     const query = (elements.modelCatalogSearch.value || "").trim().toLowerCase();
-    const visible = state.catalog.filter((model) => `${model.id} ${model.display_name} ${model.provider}`.toLowerCase().includes(query));
+    updateStatusTabs(elements.modelStatusTabs, state.modelStatus, state.catalog, (model) => model.enabled === true);
+    const visible = state.catalog.filter((model) => {
+      const matchesSearch = `${model.id} ${model.display_name} ${model.provider}`.toLowerCase().includes(query);
+      const matchesStatus = state.modelStatus === "all" || (state.modelStatus === "enabled") === (model.enabled === true);
+      return matchesSearch && matchesStatus;
+    });
     const cards = visible.map((model) => {
-      const active = (model.accounts || []).filter((a) => a.enabled && ["available", "unknown"].includes(a.availability));
-      const badges = (model.capabilities || []).map((c) => `<span class="badge">${escapeHtml(c)}</span>`).join("");
+      const bindings = (model.accounts || []).filter((a) => a.enabled && ["available", "unknown"].includes(a.availability));
+      const badges = (model.capabilities || []).map((capability) => `<span class="badge">${escapeHtml(capability)}</span>`).join("");
       const context = model.context_window ? `<span class="badge">${Number(model.context_window).toLocaleString()} ctx</span>` : "";
-      const accountText = (model.accounts || []).map((a) => `${a.account_id}: ${a.availability}${a.enabled ? "" : " (off)"}`).join(" · ") || "No account bindings";
-      return `<article class="catalog-card"><div class="catalog-card-top"><div><div class="catalog-provider">${escapeHtml(model.provider)}</div><div class="catalog-title">${escapeHtml(model.display_name || model.external_id)}</div></div><span class="badge ${active.length ? "available" : "unavailable"}">${active.length} route${active.length === 1 ? "" : "s"}</span></div><div class="catalog-details">${context}${badges}</div><div class="catalog-accounts">${escapeHtml(accountText)}</div></article>`;
+      const accountText = (model.accounts || []).map((account) => `${account.account_id}: ${account.availability}${account.enabled ? "" : " (model off)"}`).join(" · ") || "No account bindings";
+      const enabled = model.enabled === true;
+      const eligible = model.fallback_eligible === true;
+      const fallbackBadge = eligible
+        ? '<span class="badge available">Fallback ready</span>'
+        : '<span class="badge unavailable">Ignored by fallback</span>';
+      return `<article class="catalog-card ${enabled ? "" : "is-disabled"}"><div class="catalog-card-top"><div><div class="catalog-provider">${escapeHtml(model.provider)}</div><div class="catalog-title">${escapeHtml(model.display_name || model.external_id)}</div></div><div class="entity-state-actions"><span class="badge ${enabled ? "available" : "unavailable"}">${enabled ? "Enabled" : "Disabled"}</span><label class="toggle" title="${enabled ? "Disable model on every account" : "Enable model on every account"}"><input type="checkbox" data-toggle-catalog-model="${escapeAttr(model.id)}" ${enabled ? "checked" : ""}/><span class="toggle-track"></span></label></div></div><div class="catalog-details">${context}${fallbackBadge}<span class="badge">${bindings.length} enabled binding${bindings.length === 1 ? "" : "s"}</span>${badges}</div><div class="catalog-accounts">${escapeHtml(accountText)}</div></article>`;
     }).join("");
-    elements.modelsContent.innerHTML = cards ? `<div class="catalog-grid">${cards}</div>` : '<div class="loading-box">No matching models</div>';
+    elements.modelsContent.innerHTML = cards ? `<div class="catalog-grid">${cards}</div>` : '<div class="loading-box">No matching models in this status</div>';
+    elements.modelsContent.querySelectorAll("[data-toggle-catalog-model]").forEach((checkbox) =>
+      checkbox.addEventListener("change", () => toggleCatalogModel(checkbox))
+    );
+  }
+
+  async function toggleCatalogModel(checkbox) {
+    const modelId = checkbox.dataset.toggleCatalogModel;
+    const desired = checkbox.checked;
+    checkbox.disabled = true;
+    try {
+      const response = await apiFetch(`/_llmgateway/models/${encodeURIComponent(modelId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: desired }),
+      });
+      if (!response.ok) throw new Error(extractError(await response.text(), response.status));
+      toast(`${desired ? "Enabled" : "Disabled"} ${displayModel(modelId)}`);
+      window.dispatchEvent(new CustomEvent("llmgateway:models-changed"));
+    } catch (error) {
+      checkbox.checked = !desired;
+      checkbox.disabled = false;
+      toast(error.message || String(error));
+    }
   }
 
   function switchView(view) {
@@ -673,6 +753,18 @@
     elements.composerInput.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); } });
     elements.modelSearch.addEventListener("input", renderModelPicker);
     elements.modelCatalogSearch.addEventListener("input", renderCatalog);
+    elements.accountStatusTabs?.querySelectorAll("[data-account-status]").forEach((button) =>
+      button.addEventListener("click", () => {
+        state.accountStatus = button.dataset.accountStatus;
+        renderAccounts();
+      })
+    );
+    elements.modelStatusTabs?.querySelectorAll("[data-model-status]").forEach((button) =>
+      button.addEventListener("click", () => {
+        state.modelStatus = button.dataset.modelStatus;
+        renderCatalog();
+      })
+    );
     elements.refreshAccountsButton.addEventListener("click", () => loadAccounts(true));
     elements.saveKeyButton.addEventListener("click", saveApiKey);
     elements.apiKeyInput.addEventListener("keydown", (event) => { if (event.key === "Enter") saveApiKey(); });
