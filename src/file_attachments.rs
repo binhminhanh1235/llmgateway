@@ -355,24 +355,32 @@ fn scan_file_request(value: &Value, found: &mut bool) {
 
 fn collect_artifact_file_ids(value: &Value, out: &mut BTreeSet<String>) {
     match value {
-        Value::String(raw) if raw.starts_with(ARTIFACT_FILE_SCHEME) => {
-            let id = raw.trim_start_matches(ARTIFACT_FILE_SCHEME);
-            if !id.is_empty() {
-                out.insert(id.to_string());
-            }
-        }
         Value::Array(items) => {
             for item in items {
                 collect_artifact_file_ids(item, out);
             }
         }
         Value::Object(object) => {
-            if let Some(id) = object
-                .get("llmgateway_artifact_id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-            {
-                out.insert(id.to_string());
+            let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
+            if matches!(kind, "file" | "input_file" | "document") {
+                if let Some(raw) = object
+                    .get("file_id")
+                    .or_else(|| object.get("artifact_id"))
+                    .or_else(|| object.get("file_url"))
+                    .and_then(Value::as_str)
+                {
+                    let id = raw.strip_prefix(ARTIFACT_FILE_SCHEME).unwrap_or(raw);
+                    if id.starts_with("file_") {
+                        out.insert(id.to_string());
+                    }
+                }
+                if let Some(id) = object
+                    .get("llmgateway_artifact_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| id.starts_with("file_"))
+                {
+                    out.insert(id.to_string());
+                }
             }
             for child in object.values() {
                 collect_artifact_file_ids(child, out);
@@ -417,6 +425,19 @@ mod tests {
         assert!(!route_supports_file(&["vision".into()]));
         assert!(is_extractable_text_mime("application/json"));
         assert!(native_file_mime_supported("application/pdf"));
+    }
+
+    #[test]
+    fn file_artifact_collection_does_not_capture_image_uris() {
+        let body = json!({
+            "messages":[{
+                "content":[
+                    {"type":"image_url","image_url":{"url":"llmgateway://artifact/file_image"}},
+                    {"type":"input_file","file_id":"llmgateway://artifact/file_doc"}
+                ]
+            }]
+        });
+        assert_eq!(file_artifact_ids(&body), vec!["file_doc".to_string()]);
     }
 
     #[test]
