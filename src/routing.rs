@@ -215,6 +215,12 @@ impl Router {
             .candidate_routes(config.clone(), &resolved_model)
             .await;
         let apply_execution_policy = config.virtual_models.contains_key(&resolved_model);
+        let group_enabled = config
+            .virtual_models
+            .get(&resolved_model)
+            .map(|group| group.enabled)
+            .unwrap_or(true);
+        let catalog_snapshot = self.catalog.models().await.ok();
         let now = Utc::now();
         let health_snapshot = self.health.read().await.clone();
         let adaptive_snapshot = self.adaptive.read().await.clone();
@@ -283,9 +289,29 @@ impl Router {
             let task_adjustment = task_fit.snapshot.adjustment;
             let mut exclusion_reasons = Vec::new();
             let mut warnings = Vec::new();
+            let model_enabled = catalog_snapshot
+                .as_ref()
+                .and_then(|models| {
+                    let account = config.account(&route.account)?;
+                    let model = models.iter().find(|model| {
+                        model.provider == account.provider && model.external_id == route.model
+                    })?;
+                    model
+                        .accounts
+                        .iter()
+                        .find(|binding| binding.account_id == route.account)
+                        .map(|binding| binding.enabled)
+                })
+                .unwrap_or(true);
 
+            if !group_enabled {
+                push_unique(&mut exclusion_reasons, "group_disabled");
+            }
             if !route.enabled {
                 push_unique(&mut exclusion_reasons, "route_disabled");
+            }
+            if !model_enabled {
+                push_unique(&mut exclusion_reasons, "model_disabled");
             }
             if transport == "browser"
                 && browser_provider_runtime::get()
