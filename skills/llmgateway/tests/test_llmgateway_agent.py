@@ -90,7 +90,7 @@ class AgentHelperTests(unittest.TestCase):
         )
         request = Handler.requests[-1]
         self.assertEqual(request["path"], "/_llmgateway/routes/explain")
-        self.assertEqual(request["headers"]["Authorization"], "Bearer admin-secret")
+        self.assertEqual(request["headers"]["authorization"], "Bearer admin-secret")
         self.assertEqual(request["body"]["client_id"], "codex")
         self.assertEqual(
             request["body"]["body"]["messages"][0]["content"], "debug Rust"
