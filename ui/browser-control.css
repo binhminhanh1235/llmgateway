@@ -49,6 +49,73 @@
   font-weight: 750;
 }
 
+.browser-runtime-settings {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 14px;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--panel-soft));
+}
+
+.browser-runtime-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.browser-runtime-copy strong {
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.browser-runtime-copy span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.browser-runtime-copy code {
+  max-width: 720px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-runtime-picker {
+  min-width: 240px;
+  display: grid;
+  gap: 5px;
+}
+
+.browser-runtime-picker > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.browser-runtime-picker select {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 32px 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.browser-runtime-picker select:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  outline-offset: 1px;
+}
+
 .browser-session-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(285px, 1fr));
@@ -270,6 +337,8 @@
 @media (max-width: 780px) {
   .browser-control-panel { padding: 14px; }
   .browser-control-head { flex-direction: column; gap: 10px; }
+  .browser-runtime-settings { flex-direction: column; align-items: stretch; }
+  .browser-runtime-picker { min-width: 0; }
   .browser-session-grid { grid-template-columns: 1fr; }
   .browser-status { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 }
