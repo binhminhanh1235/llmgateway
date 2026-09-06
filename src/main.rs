@@ -123,7 +123,7 @@ use tracing_subscriber::EnvFilter;
 use ui::{
     account_control_css, account_control_js, account_intelligence_css, account_intelligence_js,
     app_css, app_js, browser_control_css, browser_control_js, index as ui_index, model_groups_css,
-    model_groups_js, trace_console_css, trace_console_js,
+    model_groups_js, trace_console_css, trace_console_js, voice_js,
 };
 use usage_api::{get_account_usage, get_usage, reset_account_quota};
 
@@ -354,6 +354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui", get(ui_index))
         .route("/ui/app.css", get(app_css))
         .route("/ui/app.js", get(app_js))
+        .route("/ui/voice.js", get(voice_js))
         .route("/ui/account-control.css", get(account_control_css))
         .route("/ui/account-control.js", get(account_control_js))
         .route(
