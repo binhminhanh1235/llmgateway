@@ -440,14 +440,19 @@ Smoke nhanh:
 ```bash
 python3 skills/llmgateway/scripts/llmgateway_agent.py health
 python3 skills/llmgateway/scripts/llmgateway_agent.py models
-python3 skills/llmgateway/scripts/llmgateway_agent.py responses llmgateway-auto "hello"
-python3 skills/llmgateway/scripts/llmgateway_agent.py explain llmgateway-auto --prompt "coding task"
+# P1-P3 feature branch:
+python3 skills/llmgateway/scripts/llmgateway_agent.py capabilities
+python3 skills/llmgateway/scripts/llmgateway_agent.py resolve --model llmgateway-auto --capability coding --prompt "coding task"
+python3 skills/llmgateway/scripts/llmgateway_agent.py responses llmgateway-auto "hello" --capability coding
+python3 skills/llmgateway/scripts/llmgateway_agent.py diagnostics --model llmgateway-auto --capability coding
 ```
 
 Test helper/bundle:
 
 ```bash
-python3 -m unittest skills/llmgateway/tests/test_llmgateway_agent.py
+python3 -m unittest \
+  skills/llmgateway/tests/test_llmgateway_agent.py \
+  skills/llmgateway/tests/test_llmgateway_mcp.py
 ```
 
 Helper chỉ expose READ + EXECUTE. Enable/disable/delete và các mutation quản trị vẫn phải đi qua UI/admin API với đúng authorization.
@@ -524,6 +529,7 @@ bash scripts/smoke-model-groups.sh
 bash scripts/smoke-execution-trace.sh
 bash scripts/smoke-adaptive-routing.sh
 bash scripts/smoke-task-aware-routing.sh
+bash scripts/smoke-agent-control.sh
 bash scripts/smoke-client-policies.sh
 ```
 
