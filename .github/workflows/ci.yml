@@ -20,6 +20,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: node --check ui/app.js
       - run: node scripts/test-vision-ui.mjs
+      - run: node scripts/test-file-ui.mjs
       - run: node scripts/test-account-transport-ui.mjs
       - run: node --check ui/account-control.js
       - run: node --check ui/account-intelligence.js
@@ -34,6 +35,7 @@ jobs:
       - run: bash -n scripts/live-browserless-acceptance.sh
       - run: bash -n scripts/live-gemini-model-selection.sh
       - run: bash -n scripts/live-vision-acceptance.sh
+      - run: bash -n scripts/smoke-file-attachments.sh
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
       - run: bash -n scripts/smoke-gemini-recovery.sh
       - run: RUSTFLAGS="-D warnings" cargo check --all-targets
