@@ -26,7 +26,7 @@ Default base URL:
 
 Override with `LLMGATEWAY_BASE_URL`.
 
-For ordinary execution, prefer a scoped client key in `LLMGATEWAY_CLIENT_API_KEY`. If it is absent, the helper may use `LLMGATEWAY_API_KEY`.
+For ordinary execution, prefer a scoped client key in `LLMGATEWAY_CLIENT_API_KEY`. If it is absent, the native CLI may use `LLMGATEWAY_API_KEY`.
 
 Use the global `LLMGATEWAY_API_KEY` only for admin diagnostics and operations.
 
@@ -35,15 +35,15 @@ Never print, echo, serialize, commit, or return credential values.
 ## First-use workflow
 
 1. Run health:
-   `python3 skills/llmgateway/scripts/llmgateway_agent.py health`
+   `llmgateway agent health`
 2. Discover client-visible capability/model metadata:
-   `python3 skills/llmgateway/scripts/llmgateway_agent.py capabilities`
+   `llmgateway agent capabilities`
 3. Resolve semantic requirements through the gateway Router:
-   `python3 skills/llmgateway/scripts/llmgateway_agent.py resolve --model llmgateway-auto --capability coding --capability reasoning --prompt "task summary"`
+   `llmgateway agent resolve --model llmgateway-auto --capability coding --capability reasoning --prompt "task summary"`
 4. Execute with the **same requirements**, for example:
-   `python3 skills/llmgateway/scripts/llmgateway_agent.py responses llmgateway-auto "task" --capability coding --capability reasoning`
+   `llmgateway agent responses llmgateway-auto "task" --capability coding --capability reasoning`
 5. If resolution is blocked, use client-scoped diagnostics:
-   `python3 skills/llmgateway/scripts/llmgateway_agent.py diagnostics --model llmgateway-auto --capability coding`
+   `llmgateway agent diagnostics --model llmgateway-auto --capability coding`
 6. Use admin route explain/account/browser diagnostics only when deeper operator evidence is needed.
 
 Read [references/routing.md](references/routing.md) before making model-selection decisions.
@@ -78,7 +78,7 @@ Read [references/diagnostics.md](references/diagnostics.md) for the full decisio
 
 ## Safety boundary
 
-The bundled helper intentionally exposes only READ and EXECUTE operations.
+The native `llmgateway agent` CLI intentionally exposes only READ and EXECUTE operations plus non-mutating admin diagnostics.
 
 Permission levels:
 
