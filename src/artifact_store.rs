@@ -812,6 +812,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_bindings_are_reused_only_within_provider_account_affinity() {
+        let (root, url) = temp_paths("artifact-provider-bindings");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = ArtifactStore::connect_parts(&url, config(&root)).await.unwrap();
+        let artifact = store
+            .store_bytes(None, "report.pdf", Some("application/pdf"), "assistants", "test", b"%PDF-1.7\n")
+            .await
+            .unwrap();
+
+        store
+            .upsert_provider_binding(
+                &artifact.id,
+                "chatgpt-web",
+                "account-a",
+                "provider-file-a1",
+                Some(r#"{"strategy":"native"}"#),
+            )
+            .await
+            .unwrap();
+        let first = store
+            .provider_binding(&artifact.id, "chatgpt-web", "account-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.provider_file_id, "provider-file-a1");
+
+        store
+            .upsert_provider_binding(
+                &artifact.id,
+                "chatgpt-web",
+                "account-a",
+                "provider-file-a2",
+                Some(r#"{"strategy":"native","refreshed":true}"#),
+            )
+            .await
+            .unwrap();
+        let reused = store
+            .provider_binding(&artifact.id, "chatgpt-web", "account-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reused.provider_file_id, "provider-file-a2");
+
+        assert!(store
+            .provider_binding(&artifact.id, "chatgpt-web", "account-b")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .provider_binding(&artifact.id, "gemini-web", "account-a")
+            .await
+            .unwrap()
+            .is_none());
+
+        store
+            .upsert_provider_binding(
+                &artifact.id,
+                "gemini-web",
+                "account-a",
+                "gemini-file-a1",
+                None,
+            )
+            .await
+            .unwrap();
+        let gemini = store
+            .provider_binding(&artifact.id, "gemini-web", "account-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(gemini.provider_file_id, "gemini-file-a1");
+        assert_eq!(reused.provider, "chatgpt-web");
+        assert_eq!(gemini.provider, "gemini-web");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn rejects_oversize_mismatch_and_executable_content_before_metadata_persistence() {
         let (root, url) = temp_paths("artifact-validation");
         std::fs::create_dir_all(&root).unwrap();
