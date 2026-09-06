@@ -219,8 +219,9 @@ mod tests {
 
     #[tokio::test]
     async fn set_account_model_and_model_enabled_sync_both_directions() {
-        let temp_db = std::env::temp_dir().join(format!("llm-test-{}.db", Uuid::new_v4().simple()));
-        let db_url = format!("sqlite://{}", temp_db.display());
+        let temp_db_name = format!("llm-test-{}.db", Uuid::new_v4().simple());
+        let temp_db = std::env::current_dir().unwrap().join(&temp_db_name);
+        let db_url = format!("sqlite://{temp_db_name}");
 
         let config_toml = format!(
             r#"
@@ -330,8 +331,9 @@ database_url = "{db_url}"
 
     #[tokio::test]
     async fn set_account_all_models_enabled_syncs_models() {
-        let temp_db = std::env::temp_dir().join(format!("llm-test-{}.db", Uuid::new_v4().simple()));
-        let db_url = format!("sqlite://{}", temp_db.display());
+        let temp_db_name = format!("llm-test-{}.db", Uuid::new_v4().simple());
+        let temp_db = std::env::current_dir().unwrap().join(&temp_db_name);
+        let db_url = format!("sqlite://{temp_db_name}");
 
         let config_toml = format!(
             r#"
