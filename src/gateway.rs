@@ -1511,13 +1511,6 @@ fn route_failure_policy(error: &GatewayError) -> Option<(i64, bool)> {
     route_failure_policy_for_failure(&failure)
 }
 
-fn is_retryable_status(status: StatusCode) -> bool {
-    matches!(
-        status.as_u16(),
-        401 | 403 | 408 | 409 | 429 | 500 | 502 | 503 | 504
-    )
-}
-
 fn cooldown_for(status: StatusCode) -> i64 {
     match status.as_u16() {
         401 | 403 => 300,
@@ -1579,9 +1572,110 @@ mod client_policy_tests {
 #[cfg(test)]
 mod stream_trace_tests {
     use super::{
-        is_retryable_attempt_error, observe_terminal_sse_completion, route_failure_policy,
-        stream_error_message, upstream_stream_error_sse, GatewayError,
+        is_retryable_attempt_error, normalized_gateway_failure, normalized_status_failure,
+        observe_terminal_sse_completion, route_failure_policy, stream_error_message,
+        upstream_stream_error_sse, GatewayError,
     };
+    use crate::execution::{ExecutionPhase, FailureClass, FailureScope, ReplaySafety};
+    use reqwest::StatusCode;
+
+    #[test]
+    fn typed_status_failures_preserve_existing_retry_semantics() {
+        let rate_limited = normalized_status_failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            "slow down",
+            "gemini-web",
+            "account-a",
+            "gemini-pro",
+            "direct-http",
+            true,
+        );
+        assert_eq!(rate_limited.class, FailureClass::RateLimited);
+        assert_eq!(rate_limited.phase, ExecutionPhase::Submitted);
+        assert_eq!(rate_limited.replay_safety, ReplaySafety::Safe);
+        assert!(rate_limited.retryable);
+
+        let overloaded = normalized_status_failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily unavailable",
+            "gemini-web",
+            "account-a",
+            "gemini-pro",
+            "direct-http",
+            false,
+        );
+        assert_eq!(overloaded.class, FailureClass::UpstreamOverloaded);
+        assert_eq!(overloaded.replay_safety, ReplaySafety::ProbablySafe);
+        assert!(overloaded.retryable);
+
+        let not_implemented = normalized_status_failure(
+            StatusCode::NOT_IMPLEMENTED,
+            "unsupported",
+            "api-provider",
+            "account-a",
+            "model-a",
+            "direct-http",
+            false,
+        );
+        assert_eq!(not_implemented.class, FailureClass::Upstream5xx);
+        assert!(!not_implemented.retryable);
+    }
+
+    #[test]
+    fn browser_error_strings_are_normalized_at_the_adapter_boundary() {
+        let waf = normalized_gateway_failure(
+            &GatewayError::BrowserTransport(
+                "upstream_waf_rejected: classification=waf body=aliyun_waf_aa".into(),
+            ),
+            "qwen-web",
+            "account-a",
+            "qwen-max",
+            "browser_runtime",
+        );
+        assert_eq!(waf.class, FailureClass::WafRejected);
+        assert_eq!(waf.scope, FailureScope::Transport);
+        assert_eq!(waf.replay_safety, ReplaySafety::Safe);
+        assert!(waf.allows_silent_fallback(false));
+
+        let cdp = normalized_gateway_failure(
+            &GatewayError::BrowserTransport(
+                "WebSocket protocol error: Connection reset without closing handshake".into(),
+            ),
+            "qwen-web",
+            "account-a",
+            "qwen-max",
+            "browser_runtime",
+        );
+        assert_eq!(cdp.class, FailureClass::CdpDisconnected);
+        assert_eq!(cdp.scope, FailureScope::Session);
+
+        let empty_stream = normalized_gateway_failure(
+            &GatewayError::BrowserTransport("provider returned empty stream".into()),
+            "deepseek-web",
+            "account-a",
+            "deepseek-chat",
+            "browser_runtime",
+        );
+        assert_eq!(empty_stream.class, FailureClass::StreamEmpty);
+        assert_eq!(empty_stream.scope, FailureScope::Conversation);
+    }
+
+    #[test]
+    fn browser_auth_failure_records_human_action_without_leaking_credentials() {
+        let failure = normalized_status_failure(
+            StatusCode::UNAUTHORIZED,
+            "authentication required",
+            "gemini-web",
+            "account-a",
+            "gemini-pro",
+            "browser_runtime",
+            true,
+        );
+        assert_eq!(failure.class, FailureClass::AuthExpired);
+        assert!(failure.human_action_required);
+        assert!(!failure.diagnostic.contains("cookie"));
+        assert!(!failure.diagnostic.contains("token"));
+    }
 
     #[test]
     fn stale_model_recipe_is_not_retryable_after_submit() {
