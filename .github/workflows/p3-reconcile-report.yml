@@ -148,29 +148,12 @@ jobs:
           # AppState or the test.
           api_path = Path("src/api.rs")
           api_text = api_path.read_text()
-          state_block = """        let state = AppState {
-            gateway,
-            catalog,
-            conversations,
-            gateway_api_key,
-            client_policies,
-        };
-"""
+          state_block = "        let state = AppState {\\n            gateway,\\n            catalog,\\n            conversations,\\n            gateway_api_key,\\n            client_policies,\\n        };\\n"
           if api_text.count(state_block) != 1:
               raise SystemExit(f"expected exactly one new-main AppState test initializer, found {api_text.count(state_block)}")
-          artifact_setup = """        let artifacts =
-            Arc::new(ArtifactStore::connect(config.clone()).await.unwrap());
-
-"""
-          api_text = api_text.replace(state_block, artifact_setup + """        let state = AppState {
-            gateway,
-            catalog,
-            conversations,
-            artifacts,
-            gateway_api_key,
-            client_policies,
-        };
-""")
+          artifact_setup = "        let artifacts =\\n            Arc::new(ArtifactStore::connect(config.clone()).await.unwrap());\\n\\n"
+          patched_state = "        let state = AppState {\\n            gateway,\\n            catalog,\\n            conversations,\\n            artifacts,\\n            gateway_api_key,\\n            client_policies,\\n        };\\n"
+          api_text = api_text.replace(state_block, artifact_setup + patched_state)
           api_path.write_text(api_text)
           PY
 
