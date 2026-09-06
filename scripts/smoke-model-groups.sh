@@ -129,6 +129,8 @@ assert g["tiers"][0]["models"] == ["fake/model-primary","fake/model-fallback"], 
 assert g["ignored_models"] == ["fake/model-primary"], g
 m=next(m for m in x["models"] if m["id"]=="fake/model-primary")
 assert m["enabled"] is False and m["fallback_eligible"] is False, m
+binding=next(b for b in m["active_accounts"] if b=="group-account")
+assert binding == "group-account", m
 '
 
 EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain "${AUTH[@]}" "${JSON[@]}" \
