@@ -42,6 +42,7 @@ pub struct ExecutionTraceSummary {
     pub preferred_route: Option<String>,
     pub status: String,
     pub selected_route: Option<String>,
+    pub attachment_strategy: Option<String>,
     pub attempt_count: i64,
     pub final_error: Option<String>,
     pub started_at: String,
@@ -111,6 +112,7 @@ impl ExecutionTraceStore {
                 preferred_route TEXT,
                 status TEXT NOT NULL DEFAULT 'running',
                 selected_route TEXT,
+                attachment_strategy TEXT,
                 final_error TEXT,
                 started_at TEXT NOT NULL,
                 completed_at TEXT
@@ -118,6 +120,18 @@ impl ExecutionTraceStore {
         )
         .execute(&self.pool)
         .await?;
+        let request_columns = sqlx::query("PRAGMA table_info(execution_requests)")
+            .fetch_all(&self.pool)
+            .await?;
+        let has_attachment_strategy = request_columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "attachment_strategy")
+        });
+        if !has_attachment_strategy {
+            sqlx::query("ALTER TABLE execution_requests ADD COLUMN attachment_strategy TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS execution_attempts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,6 +206,23 @@ impl ExecutionTraceStore {
         .execute(&self.pool)
         .await?;
         Ok(request_id)
+    }
+
+    pub async fn set_attachment_strategy(
+        &self,
+        request_id: &str,
+        strategy: &str,
+    ) -> Result<(), ExecutionTraceError> {
+        sqlx::query(
+            "UPDATE execution_requests
+             SET attachment_strategy = ?
+             WHERE request_id = ?",
+        )
+        .bind(strategy)
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn record_attempt(&self, record: AttemptRecord<'_>) -> Result<(), ExecutionTraceError> {
@@ -424,7 +455,7 @@ impl ExecutionTraceStore {
     pub async fn list(&self, limit: usize) -> Result<Vec<ExecutionTraceSummary>, ExecutionTraceError> {
         let rows = sqlx::query(
             "SELECT r.request_id, r.requested_model, r.preferred_route, r.status,
-                    r.selected_route, r.final_error, r.started_at, r.completed_at,
+                    r.selected_route, r.attachment_strategy, r.final_error, r.started_at, r.completed_at,
                     COUNT(a.id) AS attempt_count
              FROM execution_requests r
              LEFT JOIN execution_attempts a ON a.request_id = r.request_id
@@ -441,7 +472,7 @@ impl ExecutionTraceStore {
     async fn summary(&self, request_id: &str) -> Result<ExecutionTraceSummary, ExecutionTraceError> {
         let row = sqlx::query(
             "SELECT r.request_id, r.requested_model, r.preferred_route, r.status,
-                    r.selected_route, r.final_error, r.started_at, r.completed_at,
+                    r.selected_route, r.attachment_strategy, r.final_error, r.started_at, r.completed_at,
                     COUNT(a.id) AS attempt_count
              FROM execution_requests r
              LEFT JOIN execution_attempts a ON a.request_id = r.request_id
@@ -463,6 +494,7 @@ fn summary_from_row(row: sqlx::sqlite::SqliteRow) -> ExecutionTraceSummary {
         preferred_route: row.get("preferred_route"),
         status: row.get("status"),
         selected_route: row.get("selected_route"),
+        attachment_strategy: row.get("attachment_strategy"),
         attempt_count: row.get("attempt_count"),
         final_error: row.get("final_error"),
         started_at: row.get("started_at"),
