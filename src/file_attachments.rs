@@ -97,77 +97,78 @@ pub async fn materialize_file_inputs(
     owner_client_id: Option<&str>,
     admin: bool,
 ) -> Result<Value, FileAttachmentError> {
+    let mut ids = BTreeSet::new();
+    collect_artifact_file_ids(body, &mut ids);
+    let mut replacements = BTreeMap::new();
+
+    for id in ids {
+        let (record, bytes) = store.read_content(&id, owner_client_id, admin).await?;
+        ensure_supported_document(&record)?;
+        let replacement = if is_extractable_text_mime(&record.mime_type) {
+            let extracted = extract_text(&record, &bytes)?;
+            json!({
+                "type":"text",
+                "text":format!(
+                    "[Attached file: {} | {} | {} bytes]\n{}",
+                    record.filename,
+                    record.mime_type,
+                    record.size_bytes,
+                    extracted
+                )
+            })
+        } else if native_file_mime_supported(&record.mime_type) {
+            json!({
+                "type":"input_file",
+                "file_data":format!(
+                    "data:{};base64,{}",
+                    record.mime_type,
+                    STANDARD.encode(bytes)
+                ),
+                "filename":record.filename,
+                "mime_type":record.mime_type,
+                "llmgateway_artifact_id":record.id
+            })
+        } else {
+            return Err(FileAttachmentError::UnsupportedMime(record.mime_type));
+        };
+        replacements.insert(format!("{ARTIFACT_FILE_SCHEME}{id}"), replacement);
+    }
+
     let mut materialized = body.clone();
-    materialize_value(&mut materialized, store, owner_client_id, admin).await?;
+    rewrite_materialized_file_inputs(&mut materialized, &replacements);
     Ok(materialized)
 }
 
-async fn materialize_value(
+fn rewrite_materialized_file_inputs(
     value: &mut Value,
-    store: &ArtifactStore,
-    owner_client_id: Option<&str>,
-    admin: bool,
-) -> Result<(), FileAttachmentError> {
+    replacements: &BTreeMap<String, Value>,
+) {
     match value {
         Value::Array(items) => {
             for item in items {
-                materialize_value(item, store, owner_client_id, admin).await?;
+                rewrite_materialized_file_inputs(item, replacements);
             }
         }
         Value::Object(object) => {
             let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
             if matches!(kind, "file" | "input_file" | "document") {
-                let artifact_uri = object
+                let uri = object
                     .get("file_id")
                     .or_else(|| object.get("artifact_id"))
                     .or_else(|| object.get("file_url"))
                     .and_then(Value::as_str)
-                    .filter(|raw| raw.starts_with(ARTIFACT_FILE_SCHEME))
                     .map(str::to_string);
-
-                if let Some(uri) = artifact_uri {
-                    let id = uri.trim_start_matches(ARTIFACT_FILE_SCHEME);
-                    let (record, bytes) = store.read_content(id, owner_client_id, admin).await?;
-                    ensure_supported_document(&record)?;
-                    if is_extractable_text_mime(&record.mime_type) {
-                        let extracted = extract_text(&record, &bytes)?;
-                        *value = json!({
-                            "type":"text",
-                            "text":format!(
-                                "[Attached file: {} | {} | {} bytes]\n{}",
-                                record.filename,
-                                record.mime_type,
-                                record.size_bytes,
-                                extracted
-                            )
-                        });
-                        return Ok(());
-                    }
-                    if native_file_mime_supported(&record.mime_type) {
-                        *value = json!({
-                            "type":"input_file",
-                            "file_data":format!(
-                                "data:{};base64,{}",
-                                record.mime_type,
-                                STANDARD.encode(bytes)
-                            ),
-                            "filename":record.filename,
-                            "mime_type":record.mime_type,
-                            "llmgateway_artifact_id":record.id
-                        });
-                        return Ok(());
-                    }
-                    return Err(FileAttachmentError::UnsupportedMime(record.mime_type));
+                if let Some(replacement) = uri.and_then(|uri| replacements.get(&uri)).cloned() {
+                    *value = replacement;
+                    return;
                 }
             }
-
             for child in object.values_mut() {
-                materialize_value(child, store, owner_client_id, admin).await?;
+                rewrite_materialized_file_inputs(child, replacements);
             }
         }
         _ => {}
     }
-    Ok(())
 }
 
 pub fn file_artifact_ids(body: &Value) -> Vec<String> {
