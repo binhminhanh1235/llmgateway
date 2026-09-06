@@ -483,10 +483,12 @@ skills/llmgateway/
 ├── references/
 │   ├── api.md
 │   ├── diagnostics.md
+│   ├── mcp.md
 │   ├── operations.md
 │   └── routing.md
+├── mcp/llmgateway_mcp.py
 ├── scripts/llmgateway_agent.py
-└── tests/test_llmgateway_agent.py
+└── tests/
 ```
 
 Mục tiêu là để Codex/ChatGPT/Claude-style agent dùng llmgateway như **model runtime**, còn Router của llmgateway tiếp tục là nơi duy nhất quyết định readiness, policy, quota, tier, health và fallback.
@@ -579,6 +581,35 @@ Import/copy **toàn bộ folder `skills/llmgateway`**, không chỉ riêng `SKIL
 Skill không tự quản credential, không lấy raw cookie/token, không bypass CAPTCHA/2FA/passkey và không tạo một routing engine thứ hai.
 
 Chi tiết: [docs/agent-native-gateway.md](docs/agent-native-gateway.md).
+
+
+### P1-P3 preview trên feature branch
+
+Branch `feat/agent-native-runtime` / issue #92 đang phát triển phần runtime tiếp theo, **chưa ship trên main**:
+
+```bash
+python3 skills/llmgateway/scripts/llmgateway_agent.py capabilities
+
+python3 skills/llmgateway/scripts/llmgateway_agent.py resolve \
+  --model llmgateway-auto \
+  --capability coding \
+  --capability reasoning \
+  --min-context-window 32000 \
+  --prompt "implement retry"
+
+python3 skills/llmgateway/scripts/llmgateway_agent.py chat \
+  llmgateway-auto "implement retry" \
+  --capability coding \
+  --min-context-window 32000
+```
+
+MCP stdio preview:
+
+```bash
+python3 skills/llmgateway/mcp/llmgateway_mcp.py
+```
+
+P1-P3 dùng chính Router hiện có. Capability requirements là hard eligibility constraints và không thể mở rộng client policy/model-group boundary.
 
 ---
 
