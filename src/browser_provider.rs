@@ -4,6 +4,7 @@ use crate::{
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
     deepseek_web_transport::DeepSeekWebHttpAdapter,
     gemini_web_transport::GeminiWebHttpAdapter,
+    mimo_web_transport::MimoWebHttpAdapter,
     qwen_web_transport::QwenWebHttpAdapter,
 };
 use async_trait::async_trait;
@@ -39,6 +40,7 @@ const GEMINI_WEB_ADAPTER: &str = include_str!("../adapters/gemini-web.js");
 const CHATGPT_WEB_ADAPTER: &str = include_str!("../adapters/chatgpt-web.js");
 const QWEN_WEB_ADAPTER: &str = include_str!("../adapters/qwen-web.js");
 const DEEPSEEK_WEB_ADAPTER: &str = include_str!("../adapters/deepseek-web.js");
+const MIMO_WEB_ADAPTER: &str = include_str!("../adapters/mimo-web.js");
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct BrowserProviderConfig {
@@ -473,10 +475,12 @@ impl BrowserProviderRegistry {
         let chatgpt = Arc::new(CdpBrowserAdapter::chatgpt()?);
         let qwen = Arc::new(CdpBrowserAdapter::qwen()?);
         let deepseek = Arc::new(CdpBrowserAdapter::deepseek()?);
+        let mimo = Arc::new(CdpBrowserAdapter::mimo()?);
         let gemini_http = Arc::new(GeminiWebHttpAdapter::new()?);
         let chatgpt_http = Arc::new(ChatGptWebHttpAdapter::new()?);
         let qwen_http = Arc::new(QwenWebHttpAdapter::new()?);
         let deepseek_http = Arc::new(DeepSeekWebHttpAdapter::new()?);
+        let mimo_http = Arc::new(MimoWebHttpAdapter::new()?);
         let mut adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> = BTreeMap::new();
         adapters.insert(http.kind().to_string(), http);
         adapters.insert(cdp.kind().to_string(), cdp);
@@ -484,6 +488,7 @@ impl BrowserProviderRegistry {
         adapters.insert(chatgpt.kind().to_string(), chatgpt);
         adapters.insert(qwen.kind().to_string(), qwen);
         adapters.insert(deepseek.kind().to_string(), deepseek);
+        adapters.insert(mimo.kind().to_string(), mimo);
 
         let mut direct_adapters: BTreeMap<String, Arc<dyn BrowserProviderAdapter>> =
             BTreeMap::new();
@@ -491,6 +496,7 @@ impl BrowserProviderRegistry {
         direct_adapters.insert("browser-chatgpt".into(), chatgpt_http);
         direct_adapters.insert("browser-qwen".into(), qwen_http);
         direct_adapters.insert("browser-deepseek".into(), deepseek_http);
+        direct_adapters.insert("browser-mimo".into(), mimo_http);
         Ok(Self {
             config: Arc::new(StdRwLock::new(config)),
             adapters,
@@ -1824,6 +1830,19 @@ impl CdpBrowserAdapter {
         })
     }
 
+    fn mimo() -> Result<Self, BrowserProviderError> {
+        Self::new(CdpAdapterSpec {
+            kind: "browser-mimo",
+            adapter_id: "mimo-web",
+            provider: "mimo",
+            builtin_script: Some(MIMO_WEB_ADAPTER),
+            default_target_url_prefix: Some("https://aistudio.xiaomimimo.com/"),
+            new_chat_url: Some("https://aistudio.xiaomimimo.com/#/c"),
+            ephemeral_default: true,
+            native_conversation_affinity: false,
+        })
+    }
+
     fn new(spec: CdpAdapterSpec) -> Result<Self, BrowserProviderError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(2))
@@ -3143,6 +3162,7 @@ fn effective_target_url_prefix(
             "browser-chatgpt" => Some("https://chatgpt.com/".into()),
             "browser-qwen" => Some("https://chat.qwen.ai/".into()),
             "browser-deepseek" => Some("https://chat.deepseek.com/".into()),
+            "browser-mimo" => Some("https://aistudio.xiaomimimo.com/".into()),
             _ => None,
         })
 }
