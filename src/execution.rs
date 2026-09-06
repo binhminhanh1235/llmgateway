@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureClass {
@@ -97,20 +98,6 @@ pub enum FailureScope {
     Account,
     Model,
     Provider,
-}
-
-impl FailureScope {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Request => "request",
-            Self::Conversation => "conversation",
-            Self::Session => "session",
-            Self::Transport => "transport",
-            Self::Account => "account",
-            Self::Model => "model",
-            Self::Provider => "provider",
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -242,7 +229,8 @@ impl ExecutionBudgetTracker {
         true
     }
 
-    pub fn record_transport_switch(&mut self) -> bool {
+    #[allow(dead_code)]
+pub fn record_transport_switch(&mut self) -> bool {
         if self.transport_switches >= self.budget.max_transport_switches {
             return false;
         }
@@ -250,7 +238,8 @@ impl ExecutionBudgetTracker {
         true
     }
 
-    pub fn record_account_switch(&mut self) -> bool {
+    #[allow(dead_code)]
+pub fn record_account_switch(&mut self) -> bool {
         if self.account_switches >= self.budget.max_account_switches {
             return false;
         }
@@ -258,7 +247,8 @@ impl ExecutionBudgetTracker {
         true
     }
 
-    pub fn record_provider_switch(&mut self) -> bool {
+    #[allow(dead_code)]
+pub fn record_provider_switch(&mut self) -> bool {
         if self.provider_switches >= self.budget.max_provider_switches {
             return false;
         }
@@ -266,11 +256,13 @@ impl ExecutionBudgetTracker {
         true
     }
 
-    pub fn queue_wait_allowed(&self, waited: Duration) -> bool {
+    #[allow(dead_code)]
+pub fn queue_wait_allowed(&self, waited: Duration) -> bool {
         waited <= self.budget.max_queue_wait && self.started_at.elapsed() < self.budget.overall_deadline
     }
 
-    pub fn attempts(&self) -> usize {
+    #[allow(dead_code)]
+pub fn attempts(&self) -> usize {
         self.attempts
     }
 }
@@ -320,7 +312,8 @@ impl StreamCommitBarrier {
         }
     }
 
-    pub fn allows_silent_fallback(&self, replay_safety: ReplaySafety) -> bool {
+    #[allow(dead_code)]
+pub fn allows_silent_fallback(&self, replay_safety: ReplaySafety) -> bool {
         !self.committed && replay_safety != ReplaySafety::Unsafe
     }
 }

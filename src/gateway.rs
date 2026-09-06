@@ -1241,7 +1241,7 @@ fn normalized_status_failure(
             ),
             500..=599 => ExecutionFailure::new(
                 FailureClass::Upstream5xx,
-                true,
+                matches!(status.as_u16(), 500 | 502 | 503 | 504),
                 ReplaySafety::ProbablySafe,
                 ExecutionPhase::Submitted,
                 FailureScope::Provider,
@@ -1478,7 +1478,7 @@ fn route_failure_policy_for_failure(failure: &ExecutionFailure) -> Option<(i64, 
     Some((route_cooldown_secs, failure_is_adaptive(failure)))
 }
 
-fn failure_outcome<'a>(error: &GatewayError, failure: &ExecutionFailure) -> &'a str {
+fn failure_outcome(error: &GatewayError, failure: &ExecutionFailure) -> &'static str {
     match failure.class {
         FailureClass::RateLimited => "rate_limited",
         FailureClass::AuthExpired
