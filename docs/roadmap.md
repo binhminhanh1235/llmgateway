@@ -368,39 +368,45 @@ Different local tools can safely share one llmgateway process without sharing id
 
 ---
 
-## Active initiative - Agent-Native llmgateway
+## Agent-Native llmgateway
 
 Tracking: issue #90.
 
 Goal: let AI agents use llmgateway as a model runtime through stable abstractions instead of provider-specific prompt logic.
 
-### P0 - Portable Agent Skill
+### P0 - Portable Agent Skill ✅
 
-Working branch:
+**Status: shipped on `main`**
 
-`feat/agent-native-skill`
+Merged via PR #91 as `777c7cf3fa8b9d25a4d49ea46c2e5822e88548d3`.
 
-Scope:
+Shipped scope:
 
 - Agent Skills-compatible `skills/llmgateway/SKILL.md`;
 - progressive-disclosure API/routing/diagnostics/operations references;
 - stdlib-only READ + EXECUTE helper CLI;
 - client-policy-aware model discovery;
 - logical model/group-first selection;
-- deterministic offline tests;
+- deterministic offline tests in CI;
 - explicit READ / EXECUTE / OPERATE / ADMIN safety boundary.
 
-The skill must reuse the existing Router, model groups, client policies, readiness, quota, route explain and execution trace. It must not become a second routing engine.
+The skill reuses the existing Router, model groups, client policies, readiness, quota, route explain and execution trace. It is not a second routing engine.
 
 ### P1 - Agent Control API
 
-Only add compact agent-facing status/capability views where the existing admin API is too verbose. Candidate surfaces: capability summary, normalized diagnostics and safe probe.
+**Status: planned**
+
+Add compact agent-facing status/capability views only where the existing admin API is too verbose. Candidate surfaces: capability summary, normalized diagnostics and safe probe.
 
 ### P2 - MCP server
+
+**Status: planned**
 
 Expose selected llmgateway operations as narrow MCP tools with separate read/execute/mutation permissions.
 
 ### P3 - Capability-based Agent Routing
+
+**Status: planned**
 
 Allow agents to express task/capability requirements without provider-brand coupling, extending current Model Catalog/Router contracts.
 
