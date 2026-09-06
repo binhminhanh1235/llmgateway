@@ -986,6 +986,10 @@ routes = ["route-a", "route-b"]
             parsed.virtual_models["my-group"].tier_priority("route-a"),
             Some(10)
         );
+        assert!(parsed.virtual_models["my-group"].enabled);
+
+        apply_model_group_enabled(&path, "my-group", false).unwrap();
+        assert!(!AppConfig::load(&path).unwrap().virtual_models["my-group"].enabled);
 
         apply_model_group(
             &path,
@@ -998,10 +1002,18 @@ routes = ["route-a", "route-b"]
             true,
         )
         .unwrap();
+        let updated = AppConfig::load(&path).unwrap();
         assert_eq!(
-            AppConfig::load(&path).unwrap().virtual_models["my-group"].route_ids(),
+            updated.virtual_models["my-group"].route_ids(),
             vec!["route-b"]
         );
+        assert!(
+            !updated.virtual_models["my-group"].enabled,
+            "editing tiers must preserve the group enabled state"
+        );
+
+        apply_model_group_enabled(&path, "my-group", true).unwrap();
+        assert!(AppConfig::load(&path).unwrap().virtual_models["my-group"].enabled);
 
         remove_model_group(&path, "my-group").unwrap();
         assert!(
