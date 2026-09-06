@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 pub const ARTIFACT_FILE_SCHEME: &str = "llmgateway://artifact/";
+pub const ATTACHMENT_STRATEGY_FIELD: &str = "llmgateway_attachment_strategy";
 const MAX_EXTRACTED_FILE_BYTES: usize = 256 * 1024;
 const MAX_EXTRACTED_CHARS: usize = 96 * 1024;
 
@@ -100,11 +101,14 @@ pub async fn materialize_file_inputs(
     let mut ids = BTreeSet::new();
     collect_artifact_file_ids(body, &mut ids);
     let mut replacements = BTreeMap::new();
+    let mut saw_extracted = false;
+    let mut saw_native = false;
 
     for id in ids {
         let (record, bytes) = store.read_content(&id, owner_client_id, admin).await?;
         ensure_supported_document(&record)?;
         let replacement = if is_extractable_text_mime(&record.mime_type) {
+            saw_extracted = true;
             let extracted = extract_text(&record, &bytes)?;
             json!({
                 "type":"text",
@@ -117,6 +121,7 @@ pub async fn materialize_file_inputs(
                 )
             })
         } else if native_file_mime_supported(&record.mime_type) {
+            saw_native = true;
             json!({
                 "type":"input_file",
                 "file_data":format!(
@@ -136,7 +141,28 @@ pub async fn materialize_file_inputs(
 
     let mut materialized = body.clone();
     rewrite_materialized_file_inputs(&mut materialized, &replacements);
+    if let Some(object) = materialized.as_object_mut() {
+        object.remove(ATTACHMENT_STRATEGY_FIELD);
+        let strategy = match (saw_extracted, saw_native) {
+            (true, true) => Some("mixed"),
+            (true, false) => Some("extracted_fallback"),
+            (false, true) => Some("native_upload"),
+            (false, false) => None,
+        };
+        if let Some(strategy) = strategy {
+            object.insert(
+                ATTACHMENT_STRATEGY_FIELD.into(),
+                Value::String(strategy.into()),
+            );
+        }
+    }
     Ok(materialized)
+}
+
+pub fn execution_strategy(body: &Value) -> Option<&str> {
+    body.get(ATTACHMENT_STRATEGY_FIELD)
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "native_upload" | "extracted_fallback" | "mixed"))
 }
 
 fn rewrite_materialized_file_inputs(
@@ -438,6 +464,18 @@ mod tests {
             }]
         });
         assert_eq!(file_artifact_ids(&body), vec!["file_doc".to_string()]);
+    }
+
+    #[test]
+    fn execution_strategy_is_bounded_to_known_values() {
+        assert_eq!(
+            execution_strategy(&json!({"llmgateway_attachment_strategy":"native_upload"})),
+            Some("native_upload")
+        );
+        assert_eq!(
+            execution_strategy(&json!({"llmgateway_attachment_strategy":"spoofed"})),
+            None
+        );
     }
 
     #[test]
