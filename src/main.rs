@@ -242,20 +242,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Vec<_>>();
 
     if !enabled_accounts.is_empty() {
-        let has_available_models = match catalog.models().await {
-            Ok(models) => models.iter().any(|m| {
-                m.fallback_eligible
-                    || (m.enabled
-                        && m.accounts
-                            .iter()
-                            .any(|a| a.enabled && a.availability == "available"))
-            }),
-            Err(_) => false,
-        };
+        for account in enabled_accounts {
+            let models = catalog
+                .account_models(&account.id)
+                .await
+                .unwrap_or_default();
+            let has_real_models = models.iter().any(|m| {
+                !m.external_id.ends_with("-default")
+                    && !m.external_id.ends_with("/default")
+                    && m.external_id != "default"
+            });
 
-        if !has_available_models {
-            info!("no available models found on startup; refreshing enabled accounts");
-            for account in enabled_accounts {
+            if !has_real_models {
+                info!(
+                    account_id = %account.id,
+                    "account has only default models or no models; refreshing on startup"
+                );
                 match catalog.refresh_account(&account.id).await {
                     Ok(result) => {
                         info!(
