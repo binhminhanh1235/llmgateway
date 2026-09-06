@@ -40,6 +40,11 @@ pub struct UpdateModelGroupRequest {
     pub tiers: Vec<ModelGroupTierInput>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ModelGroupEnabledRequest {
+    pub enabled: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelGroupTierView {
     pub priority: i32,
@@ -52,6 +57,8 @@ pub struct ModelGroupView {
     pub id: String,
     pub mode: &'static str,
     pub is_default: bool,
+    pub enabled: bool,
+    pub ignored_models: Vec<String>,
     pub models: Vec<String>,
     pub routes: Vec<String>,
     pub tiers: Vec<ModelGroupTierView>,
@@ -65,6 +72,8 @@ pub struct ModelGroupModelView {
     pub display_name: String,
     pub context_window: Option<i64>,
     pub capabilities: Vec<String>,
+    pub enabled: bool,
+    pub fallback_eligible: bool,
     pub active_accounts: Vec<String>,
 }
 
@@ -110,7 +119,7 @@ pub async fn list_model_groups(
         return response;
     }
     let config = state.gateway.config_snapshot();
-    let models = match active_model_views(&state, config.as_ref()).await {
+    let models = match model_views(&state, config.as_ref()).await {
         Ok(models) => models,
         Err(error) => {
             return json_error(
@@ -120,10 +129,15 @@ pub async fn list_model_groups(
             )
         }
     };
+    let fallback_eligible = models
+        .iter()
+        .filter(|model| model.fallback_eligible)
+        .map(|model| model.id.clone())
+        .collect::<HashSet<_>>();
     json_response(
         StatusCode::OK,
         json!({
-            "data": group_views(config.as_ref()),
+            "data": group_views(config.as_ref(), &fallback_eligible),
             "models": models,
             "routes": route_views(config.as_ref()),
             "default_model": config.api.default_model
@@ -205,6 +219,50 @@ pub async fn update_model_group(
     }
 }
 
+pub async fn set_model_group_enabled(
+    State(state): State<AppState>,
+    AxumPath(group_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<ModelGroupEnabledRequest>,
+) -> Response<Body> {
+    if let Err(response) = authorize(&headers, &state.gateway_api_key) {
+        return response;
+    }
+
+    let config_path = gateway_config_path();
+    match apply_model_group_enabled(&config_path, &group_id, body.enabled) {
+        Ok(backup_path) => match activate_model_groups(&state, &config_path) {
+            Ok(config) => {
+                let Some(group) = config.virtual_models.get(group_id.trim()) else {
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "model_group_activation_error",
+                        "model group was not present after hot activation",
+                    );
+                };
+                json_response(
+                    StatusCode::OK,
+                    json!({
+                        "group": group_view(
+                            config.as_ref(),
+                            group_id.trim(),
+                            group,
+                            config.api.default_model == group_id.trim(),
+                            None,
+                        ),
+                        "config_path": config_path,
+                        "backup_path": backup_path.map(|path| path.display().to_string()),
+                        "restart_required": false
+                    }),
+                    None,
+                )
+            }
+            Err(error) => model_group_error_response(error),
+        },
+        Err(error) => model_group_error_response(error),
+    }
+}
+
 pub async fn delete_model_group(
     State(state): State<AppState>,
     AxumPath(group_id): AxumPath<String>,
@@ -257,6 +315,7 @@ fn mutation_response(
                         group_id,
                         group,
                         config.api.default_model == group_id,
+                        None,
                     ),
                     config_path: config_path.to_string(),
                     backup_path: backup_path.map(|path| path.display().to_string()),
@@ -282,12 +341,21 @@ fn activate_model_groups(
     Ok(config)
 }
 
-fn group_views(config: &AppConfig) -> Vec<ModelGroupView> {
+fn group_views(
+    config: &AppConfig,
+    fallback_eligible: &HashSet<String>,
+) -> Vec<ModelGroupView> {
     let mut groups = config
         .virtual_models
         .iter()
         .map(|(id, group)| {
-            group_view(config, id, group, config.api.default_model == *id)
+            group_view(
+                config,
+                id,
+                group,
+                config.api.default_model == *id,
+                Some(fallback_eligible),
+            )
         })
         .collect::<Vec<_>>();
     groups.sort_by(|left, right| {
@@ -304,6 +372,7 @@ fn group_view(
     id: &str,
     group: &VirtualModelConfig,
     is_default: bool,
+    fallback_eligible: Option<&HashSet<String>>,
 ) -> ModelGroupView {
     let mut tiers = group
         .tiers
@@ -333,10 +402,32 @@ fn group_view(
         "flat"
     };
 
+    let mut member_models = if group.is_tiered() {
+        tiers
+            .iter()
+            .flat_map(|tier| tier.models.iter().cloned())
+            .collect::<Vec<_>>()
+    } else {
+        models.clone()
+    };
+    let mut seen = HashSet::new();
+    member_models.retain(|model| seen.insert(model.clone()));
+    let ignored_models = fallback_eligible
+        .map(|eligible| {
+            member_models
+                .iter()
+                .filter(|model| !eligible.contains(*model))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     ModelGroupView {
         id: id.to_string(),
         mode,
         is_default,
+        enabled: group.enabled,
+        ignored_models,
         models,
         routes: group.routes.clone(),
         tiers,
@@ -365,12 +456,12 @@ fn models_for_routes(config: &AppConfig, route_ids: &[String]) -> Vec<String> {
     models
 }
 
-async fn active_model_views(
+async fn model_views(
     state: &AppState,
     config: &AppConfig,
 ) -> Result<Vec<ModelGroupModelView>, crate::catalog::CatalogError> {
     let mut result = Vec::new();
-    for model in state.catalog.selectable_models().await? {
+    for model in state.catalog.models().await? {
         let active_accounts = model
             .accounts
             .iter()
@@ -385,9 +476,6 @@ async fn active_model_views(
             })
             .map(|binding| binding.account_id.clone())
             .collect::<Vec<_>>();
-        if active_accounts.is_empty() {
-            continue;
-        }
 
         result.push(ModelGroupModelView {
             id: model.id,
@@ -396,6 +484,8 @@ async fn active_model_views(
             display_name: model.display_name,
             context_window: model.context_window,
             capabilities: model.capabilities,
+            enabled: model.enabled,
+            fallback_eligible: !active_accounts.is_empty(),
             active_accounts,
         });
     }
@@ -412,9 +502,10 @@ async fn active_model_ids(
     state: &AppState,
     config: &AppConfig,
 ) -> Result<HashSet<String>, crate::catalog::CatalogError> {
-    Ok(active_model_views(state, config)
+    Ok(model_views(state, config)
         .await?
         .into_iter()
+        .filter(|model| model.fallback_eligible)
         .map(|model| model.id)
         .collect())
 }
@@ -480,6 +571,11 @@ pub fn apply_model_group(
     }
 
     let tiers = validate_tiers(&current, tiers)?;
+    let enabled = current
+        .virtual_models
+        .get(group_id)
+        .map(|group| group.enabled)
+        .unwrap_or(true);
     let mut doc = raw.parse::<DocumentMut>()?;
     let root_key = model_group_root_key(&doc);
     let groups = ensure_table(doc.as_table_mut(), root_key)?;
@@ -499,8 +595,40 @@ pub fn apply_model_group(
         }
         tier_tables.push(table);
     }
+    group["enabled"] = value(enabled);
     group["tiers"] = Item::ArrayOfTables(tier_tables);
     groups.insert(group_id, Item::Table(group));
+
+    let rendered = doc.to_string();
+    AppConfig::parse(&rendered)?;
+    write_validated_config(path, &rendered)
+}
+
+pub fn apply_model_group_enabled(
+    path: impl AsRef<Path>,
+    group_id: &str,
+    enabled: bool,
+) -> Result<Option<PathBuf>, ModelGroupError> {
+    let group_id = group_id.trim();
+    validate_group_id(group_id)?;
+    let path = path.as_ref();
+    let raw = fs::read_to_string(path)?;
+    let current = AppConfig::parse(&raw)?;
+    if !current.virtual_models.contains_key(group_id) {
+        return Err(ModelGroupError::NotFound(group_id.to_string()));
+    }
+
+    let mut doc = raw.parse::<DocumentMut>()?;
+    let root_key = model_group_root_key(&doc);
+    let groups = doc
+        .get_mut(root_key)
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| ModelGroupError::NotFound(group_id.to_string()))?;
+    let group = groups
+        .get_mut(group_id)
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| ModelGroupError::NotFound(group_id.to_string()))?;
+    group["enabled"] = value(enabled);
 
     let rendered = doc.to_string();
     AppConfig::parse(&rendered)?;
