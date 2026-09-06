@@ -606,6 +606,7 @@ mod native_affinity_tests {
         assert!(registry.supports_native_conversation_affinity("browser-chatgpt"));
         assert!(registry.supports_native_conversation_affinity("browser-qwen"));
         assert!(registry.supports_native_conversation_affinity("browser-deepseek"));
+        assert!(registry.supports_native_conversation_affinity("browser-mimo"));
         assert!(!registry.supports_native_conversation_affinity("browser-cdp"));
         assert!(!registry.supports_native_conversation_affinity("openai-compatible"));
     }
