@@ -37,11 +37,11 @@ mod files_api;
 mod gateway;
 mod gemini_web_transport;
 mod live_config;
+mod media_api;
 mod memory_api;
 mod memory_backfill;
 mod memory_provenance;
 mod memory_provenance_runtime;
-mod media_api;
 mod mimo_web_transport;
 mod model_group_api;
 pub mod multimodal;
@@ -105,10 +105,10 @@ use execution_trace_api::{get_execution, list_executions};
 use files_api::{delete_file, get_file, get_file_content, upload_file};
 use gateway::Gateway;
 use live_config::LiveConfig;
+use media_api::{audio_transcriptions, image_edits, image_generations};
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
-use media_api::{audio_transcriptions, image_edits, image_generations};
 use model_group_api::{
     create_model_group, delete_model_group, list_model_groups, set_model_group_enabled,
     update_model_group,
