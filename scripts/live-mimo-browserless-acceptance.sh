@@ -221,6 +221,76 @@ PY
   }
 }
 
+verify_discovered_model_thread() {
+  local label="$1"
+  local canonical="$2"
+  local external="$3"
+  local prefix="$4"
+  local thread_body thread_id message_body actual expected
+
+  thread_body="$(python3 - "$label" "$canonical" <<'PY'
+import json, sys
+print(json.dumps({"title": sys.argv[1], "model": sys.argv[2]}))
+PY
+)"
+  api POST "/v1/threads" "$TMP_DIR/$prefix-thread.json" "$thread_body"
+  thread_id="$(json_eval "$TMP_DIR/$prefix-thread.json" "x.get('id','')")"
+  [[ -n "$thread_id" ]] || { echo "ACCEPTANCE FAILED: $label thread creation returned no id" >&2; exit 1; }
+  THREADS+=("$thread_id")
+
+  message_body="$(python3 - "$canonical" "$label" <<'PY'
+import json, sys
+print(json.dumps({
+    "model": sys.argv[1],
+    "stream": False,
+    "content": "Reply briefly and identify this as " + sys.argv[2]
+}))
+PY
+)"
+  curl -fsS -D "$TMP_DIR/$prefix.headers" -o "$TMP_DIR/$prefix.json"     -X POST     -H "Authorization: Bearer $API_KEY"     -H "Content-Type: application/json"     --data-binary "$message_body"     "$BASE_URL/v1/threads/$thread_id/messages"
+
+  actual="$(python3 - "$TMP_DIR/$prefix.headers" <<'PY'
+import sys
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    if line.lower().startswith("x-llmgateway-route:"):
+        print(line.split(":", 1)[1].strip())
+        break
+PY
+)"
+  expected="discovered:$ACCOUNT_ID:$external"
+  [[ "$actual" == "$expected" ]] || {
+    echo "ACCEPTANCE FAILED: $label routed through '$actual' instead of '$expected'" >&2
+    exit 1
+  }
+  assert_python "$TMP_DIR/$prefix.json" "bool((x.get('choices') or [{}])[0].get('message',{}).get('content'))" "$label returned no assistant content"
+  assert_direct_execution "$label"
+
+  runtime_file "$TMP_DIR/$prefix-runtime.json"
+  python3 - "$TMP_DIR/$prefix-runtime.json" "$external" "$label" <<'PY'
+import json, sys
+runtime=json.load(open(sys.argv[1], encoding="utf-8"))
+expected,label=sys.argv[2:4]
+last=runtime.get("last_execution") or {}
+if last.get("model") != expected:
+    raise SystemExit(f"ACCEPTANCE FAILED: {label} executed model {last.get('model')!r}, expected {expected!r}")
+PY
+
+  affinity_file "$thread_id" "$TMP_DIR/$prefix-affinity.json"
+  python3 - "$TMP_DIR/$prefix-affinity.json" "$external" "$label" <<'PY'
+import json, sys
+x=json.load(open(sys.argv[1], encoding="utf-8"))
+expected,label=sys.argv[2:4]
+state=x.get("state") or {}
+chain=state.get("native_chain") or {}
+if state.get("transport") != "mimo-http":
+    raise SystemExit(f"ACCEPTANCE FAILED: {label} affinity transport is {state.get('transport')!r}")
+if chain.get("model_external_id") != expected:
+    raise SystemExit(f"ACCEPTANCE FAILED: {label} native model is {chain.get('model_external_id')!r}, expected {expected!r}")
+if not chain.get("conversation_id") or not chain.get("response_id"):
+    raise SystemExit(f"ACCEPTANCE FAILED: {label} missing native conversation/response ids: {chain}")
+PY
+}
+
 step "Checking gateway health"
 api GET "/_llmgateway/health" "$TMP_DIR/health.json"
 assert_python "$TMP_DIR/health.json" "x.get('status') == 'ok'" "gateway health is not ok"
@@ -350,6 +420,60 @@ PY
   grep -Fq '"type":"content_block_delta"' "$TMP_DIR/public-messages.sse" || { echo "ACCEPTANCE FAILED: messages stream has no content delta" >&2; exit 1; }
   grep -Fq '"type":"message_stop"' "$TMP_DIR/public-messages.sse" || { echo "ACCEPTANCE FAILED: messages stream has no message_stop event" >&2; exit 1; }
   assert_direct_execution "messages streaming"
+fi
+
+step "Checking discovered MiMo model selection"
+api GET "/_llmgateway/accounts/$ACCOUNT_ID/models" "$TMP_DIR/account-models.json"
+python3 - "$TMP_DIR/account-models.json" "$ACCOUNT_ID" "$TMP_DIR/selected-models.json" <<'PY'
+import json, sys
+payload=json.load(open(sys.argv[1], encoding="utf-8"))
+account=sys.argv[2]
+models=[]
+for model in payload.get("data", []):
+    bindings=model.get("accounts") or []
+    if any(
+        binding.get("account_id") == account
+        and binding.get("enabled")
+        and binding.get("availability") == "available"
+        and binding.get("discovered")
+        for binding in bindings
+    ):
+        models.append(model)
+json.dump({"count": len(models), "models": models[:2]}, open(sys.argv[3], "w", encoding="utf-8"))
+print(f"[mimo-browserless-live] discovered selectable models: {len(models)}")
+PY
+MODEL_COUNT="$(json_eval "$TMP_DIR/selected-models.json" "int(x.get('count',0))")"
+if (( MODEL_COUNT >= 2 )); then
+  MODEL_A_ID="$(json_eval "$TMP_DIR/selected-models.json" "x['models'][0]['id']")"
+  MODEL_A_EXTERNAL="$(json_eval "$TMP_DIR/selected-models.json" "x['models'][0]['external_id']")"
+  MODEL_B_ID="$(json_eval "$TMP_DIR/selected-models.json" "x['models'][1]['id']")"
+  MODEL_B_EXTERNAL="$(json_eval "$TMP_DIR/selected-models.json" "x['models'][1]['external_id']")"
+
+  api GET "/v1/models" "$TMP_DIR/public-models.json"
+  python3 - "$TMP_DIR/public-models.json" "$MODEL_A_ID" "$MODEL_B_ID" <<'PY'
+import json, sys
+ids={str(model.get("id") or "") for model in json.load(open(sys.argv[1], encoding="utf-8")).get("data", [])}
+for model_id in sys.argv[2:]:
+    if model_id not in ids:
+        raise SystemExit(f"ACCEPTANCE FAILED: /v1/models does not expose discovered MiMo model {model_id!r}")
+PY
+
+  step "Model A actual-selection evidence: $MODEL_A_EXTERNAL"
+  verify_discovered_model_thread "MiMo model A" "$MODEL_A_ID" "$MODEL_A_EXTERNAL" "model-a"
+  step "Model B actual-selection evidence: $MODEL_B_EXTERNAL"
+  verify_discovered_model_thread "MiMo model B" "$MODEL_B_ID" "$MODEL_B_EXTERNAL" "model-b"
+
+  python3 - "$TMP_DIR/model-a-affinity.json" "$TMP_DIR/model-b-affinity.json" <<'PY'
+import json, sys
+def conversation(path):
+    x=json.load(open(path, encoding="utf-8"))
+    return ((x.get("state") or {}).get("native_chain") or {}).get("conversation_id")
+a,b=map(conversation,sys.argv[1:3])
+if not a or not b or a == b:
+    raise SystemExit(f"ACCEPTANCE FAILED: model A/B threads did not get isolated MiMo conversations: {a!r}, {b!r}")
+PY
+else
+  step "Account exposes fewer than two selectable MiMo models; multi-model scenario is not applicable"
 fi
 
 step "Scenario 1/4: fresh native conversation"
