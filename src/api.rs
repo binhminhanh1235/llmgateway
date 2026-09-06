@@ -7,6 +7,7 @@ use crate::{
     conversation::{ConversationError, ConversationStore},
     file_attachments::{self, FileAttachmentError},
     gateway::{Gateway, GatewayError},
+    media_api,
     multimodal::{
         canonical_input_modalities, canonical_output_modalities, AdapterCapabilities,
         ModelCapabilities, MultimodalError, MULTIMODAL_SCHEMA_VERSION,
@@ -201,6 +202,10 @@ pub async fn openai_responses(
     headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Response<Body> {
+    if media_api::response_requests_image_output(&body) {
+        return media_api::responses_image_output(State(state), headers, Json(body)).await;
+    }
+
     let access = match authorize_client(&headers, &state) {
         Ok(access) => access,
         Err(response) => return response,
@@ -1018,7 +1023,7 @@ pub async fn capabilities(State(state): State<AppState>, headers: HeaderMap) -> 
                 "input":canonical_input_modalities(),
                 "output":canonical_output_modalities()
             },
-            "gateway_execution":ModelCapabilities::attachment_execution()
+            "gateway_execution":ModelCapabilities::multimodal_execution()
                 .with_file_attachment_metadata(
                     state.artifacts.config().max_files_per_request,
                     state.artifacts.config().max_file_size_bytes,
