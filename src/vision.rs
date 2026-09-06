@@ -263,18 +263,43 @@ fn rewrite_image_sources(value: &mut Value, replacements: &BTreeMap<String, Stri
 
 fn collect_artifact_image_ids(value: &Value, out: &mut BTreeSet<String>) {
     match value {
-        Value::String(raw) if raw.starts_with(ARTIFACT_IMAGE_SCHEME) => {
-            let id = raw.trim_start_matches(ARTIFACT_IMAGE_SCHEME);
-            if !id.is_empty() {
-                out.insert(id.to_string());
-            }
-        }
         Value::Array(items) => {
             for item in items {
                 collect_artifact_image_ids(item, out);
             }
         }
         Value::Object(object) => {
+            let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
+            if matches!(kind, "image_url" | "input_image" | "image") {
+                let mut collect_uri = |raw: &str| {
+                    if let Some(id) = raw.strip_prefix(ARTIFACT_IMAGE_SCHEME) {
+                        if !id.is_empty() {
+                            out.insert(id.to_string());
+                        }
+                    }
+                };
+
+                if let Some(raw) = object
+                    .get("file_id")
+                    .or_else(|| object.get("artifact_id"))
+                    .and_then(Value::as_str)
+                {
+                    collect_uri(raw);
+                }
+                if let Some(image_url) = object.get("image_url") {
+                    if let Some(raw) = image_url.as_str() {
+                        collect_uri(raw);
+                    } else if let Some(raw) =
+                        image_url.get("url").and_then(Value::as_str)
+                    {
+                        collect_uri(raw);
+                    }
+                }
+                if let Some(raw) = object.get("url").and_then(Value::as_str) {
+                    collect_uri(raw);
+                }
+            }
+
             for child in object.values() {
                 collect_artifact_image_ids(child, out);
             }
@@ -388,6 +413,31 @@ mod tests {
         assert!(route_supports_image(&["chat".into(), "vision".into()]));
         assert!(route_supports_image(&["image-input".into()]));
         assert!(!route_supports_image(&["chat".into(), "streaming".into()]));
+    }
+
+    #[test]
+    fn image_artifact_collection_ignores_file_attachment_uris() {
+        let body = json!({
+            "messages":[{
+                "role":"user",
+                "content":[
+                    {
+                        "type":"input_file",
+                        "file_id":"llmgateway://artifact/file_document"
+                    },
+                    {
+                        "type":"image_url",
+                        "image_url":{
+                            "url":"llmgateway://artifact/file_image"
+                        }
+                    }
+                ]
+            }]
+        });
+        assert_eq!(
+            image_artifact_ids(&body),
+            vec!["file_image".to_string()]
+        );
     }
 
     #[test]
