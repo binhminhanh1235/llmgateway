@@ -20,7 +20,10 @@ use axum::{
 };
 use futures_util::TryStreamExt;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::oneshot;
 
 #[derive(Clone)]
@@ -420,8 +423,66 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
     };
     let mut data: BTreeMap<String, Value> = BTreeMap::new();
 
+    let eligible_models: HashSet<&str> = physical.iter().map(|m| m.id.as_str()).collect();
+    let eligible_external_models: HashSet<(&str, &str)> = physical
+        .iter()
+        .map(|m| (m.provider.as_str(), m.external_id.as_str()))
+        .collect();
+
+    let route_is_valid = |route: &crate::config::RouteConfig| -> bool {
+        if !route.enabled {
+            return false;
+        }
+        let Some(account) = config.account(&route.account) else {
+            return false;
+        };
+        if !account.enabled {
+            return false;
+        }
+        physical.iter().any(|model| {
+            model.provider == account.provider
+                && (model.external_id == route.model || model.id == route.model)
+                && model.accounts.iter().any(|binding| {
+                    binding.account_id == route.account
+                        && binding.enabled
+                        && matches!(binding.availability.as_str(), "available" | "unknown")
+                })
+        })
+    };
+
+    let group_has_viable_targets = |group: &crate::config::VirtualModelConfig| -> bool {
+        let member_models = group.model_ids();
+        let member_routes = group.route_ids();
+
+        if member_models.is_empty() && member_routes.is_empty() {
+            return false;
+        }
+
+        let has_viable_model = member_models.iter().any(|model_id| {
+            if eligible_models.contains(model_id) {
+                return true;
+            }
+            if let Some((provider, external)) = model_id.split_once('/') {
+                eligible_external_models.contains(&(provider, external))
+            } else {
+                eligible_external_models
+                    .iter()
+                    .any(|(_, ext)| ext == model_id)
+            }
+        });
+        if has_viable_model {
+            return true;
+        }
+
+        member_routes.iter().any(|route_id| {
+            config
+                .route(route_id)
+                .is_some_and(|route| route_is_valid(route))
+        })
+    };
+
     for (id, group) in &config.virtual_models {
-        if !group.enabled {
+        if !group.enabled || !group_has_viable_targets(group) {
             continue;
         }
         if access
@@ -435,13 +496,14 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             json!({
                 "id":id,
                 "object":"model",
+                "name":id,
                 "owned_by":"llmgateway",
                 "llmgateway":{"kind":"virtual"}
             }),
         );
     }
 
-    for model in physical {
+    for model in &physical {
         if access
             .policy()
             .is_some_and(|policy| !policy.model_allowed(&model.id, &model.id))
@@ -460,6 +522,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             json!({
                 "id":model.id,
                 "object":"model",
+                "name":model.display_name,
                 "owned_by":model.owned_by,
                 "llmgateway":{
                     "kind":"physical",
@@ -473,8 +536,8 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         );
     }
 
-    // Preserve v0.1 route IDs as selectable aliases for existing clients.
-    for route in config.routes.iter().filter(|route| route.enabled) {
+    // Preserve v0.1 route IDs as selectable aliases for existing clients only if the route is valid and active.
+    for route in config.routes.iter().filter(|route| route_is_valid(route)) {
         if access.policy().is_some_and(|policy| {
             !policy.route_allowed(&route.id) || !policy.model_allowed(&route.id, &route.model)
         }) {
@@ -484,6 +547,7 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
             json!({
                 "id":route.id,
                 "object":"model",
+                "name":route.id,
                 "owned_by":"llmgateway-route",
                 "llmgateway":{"kind":"route","upstream_model":route.model,"account":route.account}
             })
@@ -925,4 +989,226 @@ fn openai_assistant_message(openai: &Value) -> Option<Value> {
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::AppConfig, execution_trace::ExecutionTraceStore, live_config::LiveConfig};
+    use axum::body::to_bytes;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::fs;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn models_exposes_only_enabled_models_active_routes_and_viable_groups() {
+        let temp_db = format!("/tmp/llmgateway-test-models-{}.db", Uuid::new_v4());
+        let db_url = format!("sqlite://{}", temp_db);
+
+        let config_toml = format!(
+            r#"
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+key_env = "LLMGATEWAY_API_KEY"
+default_model = "group-viable"
+
+[storage]
+database_url = "{db_url}"
+
+[[providers]]
+id = "p1"
+kind = "openai-compatible"
+base_url = "https://api.p1.com"
+
+[[accounts]]
+id = "acc-enabled"
+provider = "p1"
+api_key_env = "API_KEY"
+enabled = true
+
+[[accounts]]
+id = "acc-disabled"
+provider = "p1"
+api_key_env = "API_KEY"
+enabled = false
+
+[[routes]]
+id = "route-active"
+account = "acc-enabled"
+model = "model-enabled"
+enabled = true
+
+[[routes]]
+id = "route-for-disabled-acc"
+account = "acc-disabled"
+model = "model-enabled"
+enabled = true
+
+[[routes]]
+id = "route-for-disabled-model"
+account = "acc-enabled"
+model = "model-disabled"
+enabled = true
+
+[[routes]]
+id = "route-disabled"
+account = "acc-enabled"
+model = "model-enabled"
+enabled = false
+
+[virtual_models.group-viable]
+enabled = true
+
+[[virtual_models.group-viable.tiers]]
+priority = 1
+models = ["p1/model-enabled"]
+
+[virtual_models.group-disabled]
+enabled = false
+
+[[virtual_models.group-disabled.tiers]]
+priority = 1
+models = ["p1/model-enabled"]
+
+[virtual_models.group-no-viable-models]
+enabled = true
+
+[[virtual_models.group-no-viable-models.tiers]]
+priority = 1
+models = ["p1/model-disabled"]
+"#
+        );
+
+        let config = Arc::new(AppConfig::parse(&config_toml).unwrap());
+        let live_config = LiveConfig::new(config.clone());
+        let catalog = Arc::new(ModelCatalog::connect(live_config.clone()).await.unwrap());
+        let conversations = Arc::new(ConversationStore::connect(config.clone()).await.unwrap());
+        let execution_traces =
+            Arc::new(ExecutionTraceStore::connect(config.clone()).await.unwrap());
+        let gateway_api_key = Arc::new("test-key".to_string());
+        let client_policies = Arc::new(
+            ClientPolicyStore::connect(
+                config.clone(),
+                live_config.clone(),
+                gateway_api_key.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+        let gateway = Arc::new(
+            Gateway::new(
+                config.clone(),
+                live_config.clone(),
+                catalog.clone(),
+                execution_traces,
+            )
+            .unwrap(),
+        );
+
+        let state = AppState {
+            gateway,
+            catalog,
+            conversations,
+            gateway_api_key,
+            client_policies,
+        };
+
+        let pool = SqlitePoolOptions::new().connect(&db_url).await.unwrap();
+
+        // Seed model-enabled (enabled=1)
+        sqlx::query(
+            "INSERT INTO models (canonical_id, provider_id, external_id, display_name, owned_by, enabled)
+             VALUES ('p1/model-enabled', 'p1', 'model-enabled', 'Model Enabled', 'p1', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO account_models (account_id, canonical_model_id, availability, enabled, configured, discovered)
+             VALUES ('acc-enabled', 'p1/model-enabled', 'available', 1, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Seed model-disabled (enabled=0)
+        sqlx::query(
+            "INSERT INTO models (canonical_id, provider_id, external_id, display_name, owned_by, enabled)
+             VALUES ('p1/model-disabled', 'p1', 'model-disabled', 'Model Disabled', 'p1', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO account_models (account_id, canonical_model_id, availability, enabled, configured, discovered)
+             VALUES ('acc-enabled', 'p1/model-disabled', 'available', 0, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer test-key"));
+
+        let response = models(State(state), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_val: Value = serde_json::from_slice(&body_bytes).unwrap();
+        let items = json_val["data"].as_array().unwrap();
+        let ids: HashSet<&str> = items
+            .iter()
+            .filter_map(|item| item["id"].as_str())
+            .collect();
+
+        // Physical model: enabled should be present, disabled should NOT
+        assert!(
+            ids.contains("p1/model-enabled"),
+            "p1/model-enabled should be present"
+        );
+        assert!(
+            !ids.contains("p1/model-disabled"),
+            "p1/model-disabled should NOT be present"
+        );
+
+        // Virtual model (group): viable enabled group should be present; disabled group or empty group should NOT
+        assert!(
+            ids.contains("group-viable"),
+            "group-viable should be present"
+        );
+        assert!(
+            !ids.contains("group-disabled"),
+            "group-disabled should NOT be present"
+        );
+        assert!(
+            !ids.contains("group-no-viable-models"),
+            "group-no-viable-models should NOT be present"
+        );
+
+        // Routes: active route on enabled account with enabled model should be present
+        assert!(
+            ids.contains("route-active"),
+            "route-active should be present"
+        );
+        assert!(
+            !ids.contains("route-for-disabled-acc"),
+            "route-for-disabled-acc should NOT be present"
+        );
+        assert!(
+            !ids.contains("route-for-disabled-model"),
+            "route-for-disabled-model should NOT be present"
+        );
+        assert!(
+            !ids.contains("route-disabled"),
+            "route-disabled should NOT be present"
+        );
+
+        pool.close().await;
+        let _ = fs::remove_file(&temp_db);
+    }
 }
