@@ -1560,7 +1560,7 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
             .and_then(Value::as_i64);
 
         let haystack = format!("{slug} {display_name} {description}").to_ascii_lowercase();
-        let mut capabilities = vec!["chat".to_string(), "streaming".to_string()];
+        let mut capabilities = vec!["chat".to_string(), "streaming".to_string(), "vision".to_string()];
         if haystack.contains("think")
             || haystack.contains("reason")
             || haystack.contains("pro")
@@ -1589,7 +1589,7 @@ fn parse_chatgpt_model_catalog(payload: &Value) -> Vec<BrowserDiscoveredModel> {
                 display_name: "ChatGPT Auto".into(),
                 owned_by: "OpenAI".into(),
                 context_window: None,
-                capabilities: vec!["chat".into(), "streaming".into()],
+                capabilities: vec!["chat".into(), "streaming".into(), "vision".into()],
             },
         );
     }
@@ -2159,6 +2159,7 @@ mod tests {
         assert_eq!(thinking.context_window, Some(196000));
         assert!(thinking.capabilities.contains(&"reasoning".to_string()));
         assert!(thinking.capabilities.contains(&"coding".to_string()));
+        assert!(models.iter().all(|model| model.capabilities.contains(&"vision".to_string())));
     }
 
     #[test]
