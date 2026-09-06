@@ -117,6 +117,42 @@ class GatewayClient:
             path += "/" + urllib.parse.quote(request_id, safe="")
         return self._request("GET", path, auth="admin")
 
+    def agent_capabilities(self) -> Any:
+        return self._request(
+            "GET", "/_llmgateway/agent/capabilities", auth="execution"
+        )
+
+    def agent_resolve(
+        self,
+        *,
+        model: str | None = None,
+        task: str | None = None,
+        capabilities: list[str] | None = None,
+        min_context_window: int | None = None,
+        prompt: str | None = None,
+        diagnostics: bool = False,
+    ) -> Any:
+        body: dict[str, Any] = {
+            "requirements": {
+                "capabilities": capabilities or [],
+                "min_context_window": min_context_window,
+            }
+        }
+        if model:
+            body["model"] = model
+        if task:
+            body["task"] = task
+        if prompt:
+            body["body"] = {
+                "messages": [{"role": "user", "content": prompt}]
+            }
+        endpoint = (
+            "/_llmgateway/agent/diagnostics"
+            if diagnostics
+            else "/_llmgateway/agent/resolve"
+        )
+        return self._request("POST", endpoint, body=body, auth="execution")
+
     def explain(
         self,
         model: str,
@@ -185,6 +221,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("health")
     sub.add_parser("models")
+    sub.add_parser("capabilities")
+
+    resolve = sub.add_parser("resolve")
+    resolve.add_argument("--model")
+    resolve.add_argument("--task")
+    resolve.add_argument("--capability", action="append", default=[])
+    resolve.add_argument("--min-context-window", type=int)
+    resolve.add_argument("--prompt")
+
+    diagnostics = sub.add_parser("diagnostics")
+    diagnostics.add_argument("--model")
+    diagnostics.add_argument("--task")
+    diagnostics.add_argument("--capability", action="append", default=[])
+    diagnostics.add_argument("--min-context-window", type=int)
+    diagnostics.add_argument("--prompt")
     sub.add_parser("admin-models")
     sub.add_parser("accounts")
     sub.add_parser("groups")
@@ -225,6 +276,17 @@ def run(args: argparse.Namespace) -> Any:
         return client.health()
     if args.command == "models":
         return client.models()
+    if args.command == "capabilities":
+        return client.agent_capabilities()
+    if args.command in {"resolve", "diagnostics"}:
+        return client.agent_resolve(
+            model=args.model,
+            task=args.task,
+            capabilities=args.capability,
+            min_context_window=args.min_context_window,
+            prompt=args.prompt,
+            diagnostics=args.command == "diagnostics",
+        )
     if args.command == "admin-models":
         return client.admin_models()
     if args.command == "accounts":
