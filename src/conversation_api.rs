@@ -5,6 +5,7 @@ use crate::{
     browser_provider_runtime,
     conversation::{openai_stream_with_capture, ConversationError},
     embedding_runtime,
+    file_attachments,
     gateway::GatewayError,
     memory_provenance::{inject_pinned_memory, MemoryProvenanceError},
     memory_provenance_runtime,
@@ -78,6 +79,16 @@ pub async fn create_thread(
             .await
             {
                 return vision_error(error);
+            }
+            if let Err(error) = file_attachments::resolve_file_inputs(
+                &mut message,
+                &state.artifacts,
+                None,
+                true,
+            )
+            .await
+            {
+                return crate::api::file_attachment_error(error);
             }
             if let Err(error) = state
                 .conversations
@@ -251,6 +262,16 @@ pub async fn send_thread_message(
     {
         return vision_error(error);
     }
+    if let Err(error) = file_attachments::resolve_file_inputs(
+        &mut user_message,
+        &state.artifacts,
+        None,
+        true,
+    )
+    .await
+    {
+        return crate::api::file_attachment_error(error);
+    }
     let mut prepared = match engine
         .prepare_turn(&thread_id, &requested_model, &user_message)
         .await
@@ -377,6 +398,17 @@ pub async fn send_thread_message(
     {
         Ok(request) => request,
         Err(error) => return vision_error(error),
+    };
+    let request = match file_attachments::materialize_file_inputs(
+        &request,
+        &state.artifacts,
+        None,
+        true,
+    )
+    .await
+    {
+        Ok(request) => request,
+        Err(error) => return crate::api::file_attachment_error(error),
     };
 
     let routed = match state
@@ -542,6 +574,7 @@ async fn sync_thread_artifact_references(
     let mut artifact_ids = Vec::new();
     for message in detail.messages {
         artifact_ids.extend(vision::image_artifact_ids(&message.message));
+        artifact_ids.extend(file_attachments::file_artifact_ids(&message.message));
     }
     artifact_ids.sort();
     artifact_ids.dedup();
