@@ -176,6 +176,19 @@ impl BrowserSessionStore {
             .clone()
     }
 
+    pub async fn delete_local_state(&self, id: &str) -> Result<bool, BrowserSessionError> {
+        let profile_dir = self.profile_dir(id);
+        sqlx::query("DELETE FROM browser_session_state WHERE session_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        let profile_existed = profile_dir.exists();
+        if profile_existed {
+            fs::remove_dir_all(&profile_dir)?;
+        }
+        Ok(profile_existed)
+    }
+
     pub async fn summary(&self) -> Result<BrowserSessionSummary, BrowserSessionError> {
         let config = self.config_snapshot();
         let mut sessions = Vec::new();
