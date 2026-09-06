@@ -652,6 +652,20 @@ fn sniff_mime(bytes: &[u8], declared: Option<&str>) -> Option<String> {
     if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
         return Some("audio/wav".into());
     }
+    if bytes.starts_with(b"OggS") {
+        return Some("audio/ogg".into());
+    }
+    if bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
+        && declared.is_some_and(|mime| mime == "audio/webm")
+    {
+        return Some("audio/webm".into());
+    }
+    if bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && declared.is_some_and(|mime| matches!(mime, "audio/mp4" | "audio/x-m4a"))
+    {
+        return Some("audio/mp4".into());
+    }
     if bytes.starts_with(b"ID3")
         || (bytes.len() >= 2 && bytes[0] == 0xff && matches!(bytes[1] & 0xe6, 0xe2 | 0xe4 | 0xe6))
     {
@@ -705,6 +719,8 @@ fn equivalent_mime(left: &str, right: &str) -> bool {
             | ("image/jpeg", "image/jpg")
             | ("audio/x-wav", "audio/wav")
             | ("audio/wav", "audio/x-wav")
+            | ("audio/x-m4a", "audio/mp4")
+            | ("audio/mp4", "audio/x-m4a")
     )
 }
 
@@ -767,6 +783,19 @@ mod tests {
             denied_mime_types: ArtifactConfig::default().denied_mime_types,
             remote_url_ingestion: false,
         }
+    }
+
+    #[test]
+    fn browser_recording_audio_formats_are_sniffed_safely() {
+        assert_eq!(
+            sniff_mime(&[0x1a, 0x45, 0xdf, 0xa3, 0x00], Some("audio/webm")).as_deref(),
+            Some("audio/webm")
+        );
+        assert_eq!(sniff_mime(b"OggSstub", Some("audio/ogg")).as_deref(), Some("audio/ogg"));
+        assert_eq!(
+            sniff_mime(b"\0\0\0\x18ftypM4A stub", Some("audio/mp4")).as_deref(),
+            Some("audio/mp4")
+        );
     }
 
     #[test]
