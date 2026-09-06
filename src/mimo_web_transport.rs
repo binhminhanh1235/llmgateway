@@ -3,8 +3,8 @@ use crate::{
     browser_auth_runtime,
     browser_provider::{
         BrowserAccountBinding, BrowserAdapterDiagnostics, BrowserAdapterRequest,
-        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError,
-        BrowserTransportMode, BrowserlessCapabilities, BROWSER_ADAPTER_CONTRACT_VERSION,
+        BrowserDiscoveredModel, BrowserProviderAdapter, BrowserProviderError, BrowserTransportMode,
+        BrowserlessCapabilities, BROWSER_ADAPTER_CONTRACT_VERSION,
     },
     conversation_runtime,
 };
@@ -26,7 +26,6 @@ const MIMO_HOST: &str = "aistudio.xiaomimimo.com";
 const MIMO_BASE_URL: &str = "https://aistudio.xiaomimimo.com";
 const MIMO_CHAT_URL: &str = "https://aistudio.xiaomimimo.com/open-apis/bot/chat";
 const MIMO_CONFIG_URL: &str = "https://aistudio.xiaomimimo.com/open-apis/bot/config";
-const MIMO_USER_INFO_URL: &str = "https://aistudio.xiaomimimo.com/open-apis/user/info";
 const MIMO_ADAPTER_VERSION: &str = "experimental-1";
 
 #[derive(Clone)]
@@ -192,7 +191,8 @@ impl MimoWebHttpAdapter {
                 &format!("MiMo browserless auth material is unavailable; login with browser again: {error}"),
             ))?;
 
-        let service_token = cookie_value(&material, "serviceToken");
+        let service_token = cookie_value(&material, "xiaomichatbot_serviceToken")
+            .or_else(|| cookie_value(&material, "serviceToken"));
         let user_id = cookie_value(&material, "userId");
         let ph_token = cookie_value(&material, "xiaomichatbot_ph");
 
@@ -215,9 +215,12 @@ impl MimoWebHttpAdapter {
             ));
         }
 
+        let ph_raw = ph_token.expect("validated MiMo ph cookie");
+        let ph_clean = ph_raw.trim_matches('"').to_string();
+
         Ok(MimoCredentials {
             material,
-            ph_token: ph_token.expect("validated MiMo ph cookie"),
+            ph_token: ph_clean,
         })
     }
 
@@ -240,7 +243,15 @@ impl MimoWebHttpAdapter {
         if !material.user_agent.trim().is_empty() {
             builder = builder.header(USER_AGENT, material.user_agent.trim());
         }
-        let cookies = material.cookie_header_for_host(MIMO_HOST);
+        let mut cookies = material.cookie_header_for_host(MIMO_HOST);
+        if !cookies.contains("serviceToken=") {
+            if let Some(token) = cookie_value(material, "xiaomichatbot_serviceToken") {
+                if !cookies.is_empty() {
+                    cookies.push_str("; ");
+                }
+                cookies.push_str(&format!("serviceToken={token}"));
+            }
+        }
         if !cookies.is_empty() {
             builder = builder.header(COOKIE, cookies);
         }
@@ -253,63 +264,7 @@ impl MimoWebHttpAdapter {
         binding: &BrowserAccountBinding,
     ) -> Result<MimoCredentials, BrowserProviderError> {
         let credentials = self.credentials(&binding.session, account_id)?;
-        let response = self
-            .common_headers(
-                self.client.get(MIMO_USER_INFO_URL),
-                &credentials.material,
-                false,
-            )
-            .header(ACCEPT, "application/json, text/plain, */*")
-            .timeout(Duration::from_millis(
-                binding.probe_timeout_ms.unwrap_or(8_000).max(1_000),
-            ))
-            .send()
-            .await
-            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-
-        let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-        if status.as_u16() == 401 {
-            return Err(login_required(
-                account_id,
-                "MiMo /open-apis/user/info rejected the saved Xiaomi session",
-            ));
-        }
-        if status.as_u16() == 403 {
-            return Err(provider_challenge(
-                account_id,
-                "MiMo /open-apis/user/info requires browser re-authentication or a provider challenge",
-            ));
-        }
-        if status.as_u16() == 429 {
-            return Err(BrowserProviderError::Transport(
-                "rate_limited: MiMo /open-apis/user/info returned HTTP 429".into(),
-            ));
-        }
-        if !status.is_success() {
-            return Err(BrowserProviderError::Transport(format!(
-                "MiMo /open-apis/user/info failed: HTTP {} body={}",
-                status.as_u16(),
-                body_preview(&String::from_utf8_lossy(&bytes))
-            )));
-        }
-        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-            if let Some(code) = nonzero_code(&value) {
-                if matches!(code, 401 | 403 | 10001 | 10002) {
-                    return Err(login_required(
-                        account_id,
-                        "MiMo user-info response reported expired authentication",
-                    ));
-                }
-                return Err(BrowserProviderError::Transport(format!(
-                    "MiMo user-info response reported code {code}: {}",
-                    error_message(&value)
-                )));
-            }
-        }
+        let _ = self.model_catalog(account_id, binding).await?;
         Ok(credentials)
     }
 
@@ -415,7 +370,12 @@ impl MimoWebHttpAdapter {
         let reasoning_effort = body
             .get("reasoning_effort")
             .and_then(Value::as_str)
-            .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "none" | "off" | "disabled"));
+            .map(|value| {
+                !matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "none" | "off" | "disabled"
+                )
+            });
         let enable_thinking = explicit_thinking
             .or(reasoning_effort)
             .unwrap_or_else(|| model.external_id.to_ascii_lowercase().contains("pro"));
@@ -450,8 +410,8 @@ impl MimoWebHttpAdapter {
             return Err(BrowserProviderError::AdapterIncompatible {
                 account_id: request.account.id.clone(),
                 code: "direct_state_unsynced".into(),
-                message:
-                    "MiMo direct conversation state requires resync after browser transport".into(),
+                message: "MiMo direct conversation state requires resync after browser transport"
+                    .into(),
             });
         }
 
@@ -560,11 +520,7 @@ impl MimoWebHttpAdapter {
         }
 
         let response = self
-            .common_headers(
-                self.client.post(url),
-                &credentials.material,
-                true,
-            )
+            .common_headers(self.client.post(url), &credentials.material, true)
             .header(ACCEPT, "text/event-stream, */*")
             .timeout(response_timeout(&request.binding))
             .json(&body)
@@ -688,10 +644,7 @@ impl MimoWebHttpAdapter {
                     .map_err(BrowserProviderError::Transport)?;
             }
         }
-        for update in decoder
-            .finish()
-            .map_err(BrowserProviderError::Transport)?
-        {
+        for update in decoder.finish().map_err(BrowserProviderError::Transport)? {
             state
                 .apply(update)
                 .map_err(BrowserProviderError::Transport)?;
@@ -699,13 +652,7 @@ impl MimoWebHttpAdapter {
         state
             .validate_completion()
             .map_err(BrowserProviderError::Transport)?;
-        Self::persist_conversation_state(
-            request,
-            &conversation_id,
-            &state,
-            &model,
-        )
-        .await?;
+        Self::persist_conversation_state(request, &conversation_id, &state, &model).await?;
 
         let mut message = json!({"role": "assistant", "content": state.output});
         if !state.reasoning.is_empty() {
@@ -930,7 +877,7 @@ impl BrowserProviderAdapter for MimoWebHttpAdapter {
         _profile_dir: &str,
         binding: &BrowserAccountBinding,
     ) -> BrowserAdapterDiagnostics {
-        match self.validate_auth(account_id, binding).await {
+        match self.credentials(&binding.session, account_id) {
             Ok(_) => BrowserAdapterDiagnostics {
                 account_id: account_id.to_string(),
                 provider_kind: "browser-mimo".into(),
@@ -1087,11 +1034,7 @@ fn parse_model_catalog(
         {
             default_model = Some(external_id.to_string());
         }
-        let mut capabilities = vec![
-            "chat".into(),
-            "streaming".into(),
-            "coding".into(),
-        ];
+        let mut capabilities = vec!["chat".into(), "streaming".into(), "coding".into()];
         if external_id.to_ascii_lowercase().contains("pro") {
             capabilities.push("reasoning".into());
         }
@@ -1182,9 +1125,7 @@ fn parse_sse_frame(frame: &str) -> Result<Option<MimoFrameUpdate>, String> {
         _ => {}
     }
 
-    if update.text.is_empty()
-        && value.get("type").and_then(Value::as_str) == Some("text")
-    {
+    if update.text.is_empty() && value.get("type").and_then(Value::as_str) == Some("text") {
         update.text = value
             .get("content")
             .and_then(Value::as_str)
@@ -1214,7 +1155,12 @@ fn parse_sse_frame(frame: &str) -> Result<Option<MimoFrameUpdate>, String> {
     if value
         .get("type")
         .and_then(Value::as_str)
-        .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "finish" | "done" | "close"))
+        .is_some_and(|kind| {
+            matches!(
+                kind.to_ascii_lowercase().as_str(),
+                "finish" | "done" | "close"
+            )
+        })
     {
         update.completed = true;
     }
@@ -1225,9 +1171,7 @@ fn split_reasoning(raw: &str) -> (String, String) {
     let text = raw.replace('\0', "");
     let open_start = text.find("<think");
     let Some(open_start) = open_start else {
-        if !text.is_empty()
-            && ("<think>".starts_with(&text) || "<think".starts_with(&text))
-        {
+        if !text.is_empty() && ("<think>".starts_with(&text) || "<think".starts_with(&text)) {
             return (String::new(), String::new());
         }
         return (String::new(), text);
@@ -1242,7 +1186,10 @@ fn split_reasoning(raw: &str) -> (String, String) {
     let close = tail
         .find("</think>")
         .map(|index| (index, "</think>".len()))
-        .or_else(|| tail.find("</thinkgt;>").map(|index| (index, "</thinkgt;>".len())));
+        .or_else(|| {
+            tail.find("</thinkgt;>")
+                .map(|index| (index, "</thinkgt;>".len()))
+        });
     if let Some((close_index, close_len)) = close {
         let reasoning = tail[..close_index].to_string();
         let output = format!("{prefix}{}", &tail[close_index + close_len..]);
@@ -1260,9 +1207,9 @@ fn partial_suffix_len(text: &str, tokens: &[&str]) -> usize {
         .flat_map(|token| 1..token.len())
         .filter(|length| {
             text.len() >= *length
-                && tokens.iter().any(|token| {
-                    token.starts_with(&text[text.len() - *length..])
-                })
+                && tokens
+                    .iter()
+                    .any(|token| token.starts_with(&text[text.len() - *length..]))
         })
         .max()
         .unwrap_or(0)
@@ -1528,9 +1475,15 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
         );
-        assert_eq!(cookie_value(&material, "serviceToken").as_deref(), Some("secret-service"));
+        assert_eq!(
+            cookie_value(&material, "serviceToken").as_deref(),
+            Some("secret-service")
+        );
         assert_eq!(cookie_value(&material, "userId").as_deref(), Some("user-1"));
-        assert_eq!(cookie_value(&material, "xiaomichatbot_ph").as_deref(), Some("ph-secret"));
+        assert_eq!(
+            cookie_value(&material, "xiaomichatbot_ph").as_deref(),
+            Some("ph-secret")
+        );
         assert!(!material.cookie_header_for_host(MIMO_HOST).is_empty());
     }
 
@@ -1549,8 +1502,13 @@ mod tests {
         let catalog = parse_model_catalog("account", &value).unwrap();
         assert_eq!(catalog.default_model, "mimo-v2.5-pro");
         assert_eq!(catalog.models.len(), 2);
-        assert!(catalog.models[0].capabilities.contains(&"reasoning".to_string()));
-        assert!(!catalog.models.iter().any(|model| model.external_id == "mimo-tts"));
+        assert!(catalog.models[0]
+            .capabilities
+            .contains(&"reasoning".to_string()));
+        assert!(!catalog
+            .models
+            .iter()
+            .any(|model| model.external_id == "mimo-tts"));
     }
 
     #[test]
@@ -1594,8 +1552,18 @@ mod tests {
     #[test]
     fn accumulated_text_snapshots_do_not_duplicate_output() {
         let mut state = MimoStreamState::default();
-        state.apply(MimoFrameUpdate { text: "Hel".into(), ..Default::default() }).unwrap();
-        let (delta, _) = state.apply(MimoFrameUpdate { text: "Hello".into(), ..Default::default() }).unwrap();
+        state
+            .apply(MimoFrameUpdate {
+                text: "Hel".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let (delta, _) = state
+            .apply(MimoFrameUpdate {
+                text: "Hello".into(),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(delta, "lo");
         assert_eq!(state.output, "Hello");
     }
@@ -1603,8 +1571,14 @@ mod tests {
     #[test]
     fn split_reasoning_holds_partial_tags_until_safe() {
         assert_eq!(split_reasoning("<thi"), (String::new(), String::new()));
-        assert_eq!(split_reasoning("<think>why</thi"), ("why".into(), "".into()));
-        assert_eq!(split_reasoning("<think>why</think>Hello"), ("why".into(), "Hello".into()));
+        assert_eq!(
+            split_reasoning("<think>why</thi"),
+            ("why".into(), "".into())
+        );
+        assert_eq!(
+            split_reasoning("<think>why</think>Hello"),
+            ("why".into(), "Hello".into())
+        );
     }
 
     #[test]
