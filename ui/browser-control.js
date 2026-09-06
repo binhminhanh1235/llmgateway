@@ -667,6 +667,11 @@
     browserToast.timer = setTimeout(() => node.classList.remove("visible"), 3600);
   }
 
+  document.addEventListener("change", (event) => {
+    const select = event.target.closest?.("[data-browser-runtime-select]");
+    if (select) selectBrowserRuntime(select.value, select);
+  });
+
   document.addEventListener("click", (event) => {
     if (event.target.closest?.("#addBrowserAccountButton") || event.target.closest?.("[data-open-browser-wizard]")) {
       openWizard();
