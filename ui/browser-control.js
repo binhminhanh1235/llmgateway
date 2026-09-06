@@ -14,6 +14,7 @@
   let sessions = [];
   let driverState = new Map();
   let accountState = new Map();
+  let browserRuntime = null;
   let refreshTimer = null;
   let loginPollTimer = null;
   let providerPresets = [];
@@ -55,12 +56,14 @@
     if (!apiKey() || loading || (!force && !isAccountsViewActive())) return;
     loading = true;
     try {
-      const [summary, accounts] = await Promise.all([
+      const [summary, accounts, runtime] = await Promise.all([
         request("/_llmgateway/browser-sessions"),
         request("/_llmgateway/accounts"),
+        request("/_llmgateway/browser-runtime/settings"),
       ]);
       sessions = summary?.sessions || [];
       accountState = new Map((accounts?.data || []).map((account) => [account.id, account]));
+      browserRuntime = runtime || null;
       const states = await Promise.all(sessions.map(async (session) => [session.id, await loadDriverStatus(session.id)]));
       driverState = new Map(states);
       render(summary);
@@ -90,10 +93,11 @@
         <div>
           <div class="browser-eyebrow">Browser accounts</div>
           <div class="browser-control-title">Sign in once. Keep the session local.</div>
-          <div class="browser-control-subtitle">Chromium uses an isolated profile per account. Cookies stay inside that profile and are never returned by llmgateway.</div>
+          <div class="browser-control-subtitle">Choose an installed compatible browser. llmgateway launches it with an isolated profile per account; cookies stay inside that profile.</div>
         </div>
         <div class="browser-security-chip" title="Browser DevTools is loopback-only and page URLs are sanitized before they reach this UI">Local session</div>
       </div>
+      ${browserRuntimeHtml()}
       ${sessions.length
         ? `<div class="browser-session-grid">${sessions.map((session) => browserSessionHtml(session, driverState.get(session.id))).join("")}</div>`
         : browserEmptyHtml(summary)}
