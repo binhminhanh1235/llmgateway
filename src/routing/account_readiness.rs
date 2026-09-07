@@ -125,12 +125,9 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
                     .await;
                 readiness.browser_direct_ready = Some(
                     diagnostics.status == "ready"
-                        && diagnostics
-                            .adapter_id
-                            .as_deref()
-                            .is_some_and(|adapter_id| {
-                                registry.is_direct_http_adapter_id(adapter_id)
-                            }),
+                        && diagnostics.adapter_id.as_deref().is_some_and(|adapter_id| {
+                            registry.is_direct_http_adapter_id(adapter_id)
+                        }),
                 );
                 readiness.browser_adapter_status = Some(diagnostics.status);
                 readiness.browser_adapter_message = Some(diagnostics.message);
