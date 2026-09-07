@@ -9,7 +9,6 @@ FAKE_CHROMIUM="/tmp/llmgateway-reliability-fake-chromium"
 LAUNCH_LOG="/tmp/llmgateway-reliability-launches.log"
 GATEWAY_PID=""
 BROWSER_PID=""
-BRIDGE_PID=""
 FAKE_PID=""
 
 rm -rf "$PROFILE_ROOT"
@@ -20,50 +19,8 @@ mkdir -p data
 cat >"$FAKE_CHROMIUM" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-profile=""
 printf '%s\n' "$*" >>/tmp/llmgateway-reliability-launches.log
-for arg in "$@"; do
-  case "$arg" in
-    --user-data-dir=*) profile="${arg#--user-data-dir=}" ;;
-  esac
-done
-if [ -z "$profile" ]; then
-  exit 2
-fi
-mkdir -p "$profile"
-exec python3 - "$profile" <<'PY'
-import http.server
-import json
-import os
-import socketserver
-import sys
-
-profile = sys.argv[1]
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/json/list":
-            body = json.dumps([
-                {"type": "page", "url": "http://127.0.0.1:18084/ready?token=hidden#fragment"}
-            ]).encode()
-            self.send_response(200)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        self.send_response(404)
-        self.end_headers()
-
-    def log_message(self, *_):
-        pass
-
-with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
-    port = server.server_address[1]
-    with open(os.path.join(profile, "DevToolsActivePort"), "w", encoding="utf-8") as f:
-        f.write(f"{port}\n/devtools/browser/fake\n")
-    server.serve_forever()
-PY
+exec python3 scripts/fake-cdp-chromium.py "$@"
 SH
 chmod 700 "$FAKE_CHROMIUM"
 
@@ -97,20 +54,24 @@ profile_root = "$PROFILE_ROOT"
 [browser.sessions.fake-web]
 provider = "browser-fake"
 label = "Reliable fake browser"
-login_url = "http://127.0.0.1:18084/login"
+login_url = "https://chat.qwen.ai/"
 enabled = true
 
 [browser.sessions.fake-web-2]
 provider = "browser-fake"
 label = "Second cold browser"
-login_url = "http://127.0.0.1:18084/login"
+login_url = "https://chat.qwen.ai/"
 enabled = true
 
 [browser.bindings.browser-account]
 session = "fake-web"
+transport_mode = "browser-only"
+models = ["qwen-web-default"]
 
 [browser.bindings.browser-account-2]
 session = "fake-web-2"
+transport_mode = "browser-only"
+models = ["qwen-web-default"]
 
 [browser_runtime]
 allow_visible_auto_launch = false
@@ -128,11 +89,11 @@ extra_args = []
 
 [chromium.sessions.fake-web]
 enabled = true
-ready_url_prefixes = ["http://127.0.0.1:18084/ready"]
+ready_url_prefixes = ["https://chat.qwen.ai/"]
 
 [chromium.sessions.fake-web-2]
 enabled = true
-ready_url_prefixes = ["http://127.0.0.1:18084/ready"]
+ready_url_prefixes = ["https://chat.qwen.ai/"]
 
 [context]
 enabled = false
@@ -140,8 +101,8 @@ retrieval_enabled = false
 
 [[providers]]
 id = "browser-fake"
-kind = "browser-http"
-base_url = "http://127.0.0.1:18083/v1"
+kind = "browser-qwen"
+base_url = "https://chat.qwen.ai/"
 models_path = "models"
 
 [[providers]]
@@ -173,7 +134,7 @@ discover_models = false
 [[routes]]
 id = "browser-route"
 account = "browser-account"
-model = "browser-model"
+model = "qwen-web-default"
 priority = 100
 enabled = true
 capabilities = ["chat"]
@@ -193,40 +154,6 @@ EOF
 python3 scripts/fake-openai.py >/tmp/llmgateway-browser-reliability-api.log 2>&1 &
 FAKE_PID=$!
 
-python3 - <<'PY' >/tmp/llmgateway-browser-reliability-bridge.log 2>&1 &
-import http.server
-import json
-import socketserver
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        if self.path != "/v1/chat/completions":
-            self.send_response(404)
-            self.end_headers()
-            return
-        length = int(self.headers.get("content-length", "0"))
-        body = json.loads(self.rfile.read(length) or b"{}")
-        assert self.headers.get("x-llmgateway-browser-session") == "fake-web"
-        payload = {
-            "id": "chatcmpl_browser_reliability",
-            "object": "chat.completion",
-            "model": body.get("model"),
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": "browser-reliability-ok"}, "finish_reason": "stop"}],
-        }
-        raw = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
-
-    def log_message(self, *_):
-        pass
-
-with socketserver.TCPServer(("127.0.0.1", 18083), Handler) as server:
-    server.serve_forever()
-PY
-BRIDGE_PID=$!
 
 cargo build --quiet
 
@@ -257,7 +184,7 @@ cleanup() {
   if [ -n "$BROWSER_PID" ]; then
     kill "$BROWSER_PID" 2>/dev/null || true
   fi
-  kill "$FAKE_PID" "$BRIDGE_PID" 2>/dev/null || true
+  kill "$FAKE_PID" 2>/dev/null || true
   rm -rf "$PROFILE_ROOT"
   rm -f "$FAKE_CHROMIUM" "$LLMGATEWAY_CONFIG" "$LAUNCH_LOG"
   rm -f data/llmgateway.db data/llmgateway.db-shm data/llmgateway.db-wal
@@ -312,13 +239,17 @@ INITIAL_READY_AT=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["last_ready_at"])')
 
 # P4: concurrent requests from one cold READY account share exactly one browser cold start.
+REQUEST_PIDS=()
 for i in $(seq 1 8); do
   curl -fsS -D "/tmp/browser-reliability-ready-$i.headers" -o "/tmp/browser-reliability-ready-$i.json" \
     -X POST http://127.0.0.1:7331/v1/chat/completions \
     "${AUTH[@]}" "${JSON[@]}" \
     -d '{"model":"llmgateway-auto","messages":[{"role":"user","content":"concurrent cold start"}]}' &
+  REQUEST_PIDS+=("$!")
 done
-wait
+for request_pid in "${REQUEST_PIDS[@]}"; do
+  wait "$request_pid"
+done
 for i in $(seq 1 8); do
   grep -qi '^x-llmgateway-route: browser-route' "/tmp/browser-reliability-ready-$i.headers"
 done
