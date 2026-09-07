@@ -211,19 +211,9 @@ pub enum AccountLifecycleError {
 
 pub struct AccountAdmissionPermit {
     runtime: Arc<AccountRuntime>,
-    generation: u64,
-    queue_wait: Duration,
 }
 
 impl AccountAdmissionPermit {
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    pub fn queue_wait(&self) -> Duration {
-        self.queue_wait
-    }
-
     pub fn observe_success(&self) {
         self.runtime.observe_success();
     }
@@ -380,7 +370,10 @@ impl AccountRuntime {
         }
     }
 
-    fn try_enter(self: &Arc<Self>, queue_wait: Duration) -> Result<Option<AccountAdmissionPermit>, AdmissionRejection> {
+    fn try_enter(
+        self: &Arc<Self>,
+        queue_wait: Duration,
+    ) -> Result<Option<AccountAdmissionPermit>, AdmissionRejection> {
         if self.state() != AdmissionState::Open {
             return Err(AdmissionRejection::RuntimeUnavailable);
         }
@@ -405,8 +398,6 @@ impl AccountRuntime {
                     .store(duration_millis_u64(queue_wait), Ordering::Release);
                 return Ok(Some(AccountAdmissionPermit {
                     runtime: self.clone(),
-                    generation,
-                    queue_wait,
                 }));
             }
             self.in_flight.fetch_sub(1, Ordering::AcqRel);
@@ -497,7 +488,10 @@ impl AccountRuntime {
     }
 
     fn observe_failure(&self, class: FailureClass) {
-        if !matches!(class, FailureClass::RateLimited | FailureClass::UpstreamOverloaded) {
+        if !matches!(
+            class,
+            FailureClass::RateLimited | FailureClass::UpstreamOverloaded
+        ) {
             return;
         }
         self.overload_events.fetch_add(1, Ordering::AcqRel);
@@ -536,12 +530,7 @@ impl AccountRuntime {
             }
             if self
                 .effective_limit
-                .compare_exchange_weak(
-                    current,
-                    current + 1,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 self.notify.notify_waiters();
@@ -600,11 +589,8 @@ impl AccountRuntimeRegistry {
             .await
     }
 
-    pub fn snapshot(
-        &self,
-        provider: &str,
-        account_id: &str,
-    ) -> Option<AccountRuntimeSnapshot> {
+    #[cfg(test)]
+    pub fn snapshot(&self, provider: &str, account_id: &str) -> Option<AccountRuntimeSnapshot> {
         let key = AccountRuntimeKey::new(provider, account_id);
         self.runtimes
             .read()
@@ -738,11 +724,23 @@ mod tests {
         let registry = Arc::new(AccountRuntimeRegistry::default());
         let p = policy(2, 2, 2);
         let first = registry
-            .acquire("provider", "account-a", p, Duration::from_secs(1), Duration::from_secs(1))
+            .acquire(
+                "provider",
+                "account-a",
+                p,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         let second = registry
-            .acquire("provider", "account-a", p, Duration::from_secs(1), Duration::from_secs(1))
+            .acquire(
+                "provider",
+                "account-a",
+                p,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
 
@@ -785,7 +783,13 @@ mod tests {
         let registry = Arc::new(AccountRuntimeRegistry::default());
         let p = policy(1, 1, 1);
         let first = registry
-            .acquire("provider", "account-a", p, Duration::from_secs(1), Duration::from_secs(1))
+            .acquire(
+                "provider",
+                "account-a",
+                p,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
 
@@ -803,7 +807,7 @@ mod tests {
         });
         wait_for_queue(&registry, "provider", "account-a", 1).await;
 
-        let overflow = registry
+        let overflow = match registry
             .acquire(
                 "provider",
                 "account-a",
@@ -812,7 +816,10 @@ mod tests {
                 Duration::from_secs(1),
             )
             .await
-            .unwrap_err();
+        {
+            Err(error) => error,
+            Ok(_) => panic!("queue overflow unexpectedly admitted a request"),
+        };
         assert_eq!(overflow.reason, AdmissionRejection::QueueFull);
         assert_eq!(
             overflow
@@ -831,11 +838,17 @@ mod tests {
         let registry = AccountRuntimeRegistry::default();
         let p = policy(1, 1, 2);
         let first = registry
-            .acquire("provider", "account-a", p, Duration::from_secs(1), Duration::from_secs(1))
+            .acquire(
+                "provider",
+                "account-a",
+                p,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
 
-        let rejected = registry
+        let rejected = match registry
             .acquire(
                 "provider",
                 "account-a",
@@ -844,7 +857,10 @@ mod tests {
                 Duration::from_millis(25),
             )
             .await
-            .unwrap_err();
+        {
+            Err(error) => error,
+            Ok(_) => panic!("deadline-limited queue wait unexpectedly admitted a request"),
+        };
         assert_eq!(rejected.reason, AdmissionRejection::QueueTimeout);
         assert!(
             rejected.waited >= Duration::from_millis(20),
@@ -859,7 +875,13 @@ mod tests {
         let registry = AccountRuntimeRegistry::default();
         let p = policy(4, 4, 4);
         let permit = registry
-            .acquire("provider", "account-a", p, Duration::from_secs(1), Duration::from_secs(1))
+            .acquire(
+                "provider",
+                "account-a",
+                p,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         permit.observe_failure(FailureClass::RateLimited);
@@ -896,11 +918,23 @@ mod tests {
         let registry = AccountRuntimeRegistry::default();
         let p = policy(4, 4, 4);
         let a = registry
-            .acquire("provider", "account-a", p, Duration::from_secs(1), Duration::from_secs(1))
+            .acquire(
+                "provider",
+                "account-a",
+                p,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         let b = registry
-            .acquire("provider", "account-b", p, Duration::from_secs(1), Duration::from_secs(1))
+            .acquire(
+                "provider",
+                "account-b",
+                p,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         a.observe_failure(FailureClass::UpstreamOverloaded);
@@ -927,7 +961,13 @@ mod tests {
         let registry = Arc::new(AccountRuntimeRegistry::default());
         let p = policy(1, 1, 2);
         let first = registry
-            .acquire("provider", "account-a", p, Duration::from_secs(1), Duration::from_secs(1))
+            .acquire(
+                "provider",
+                "account-a",
+                p,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
 
