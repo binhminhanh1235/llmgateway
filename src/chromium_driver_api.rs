@@ -24,6 +24,7 @@ pub async fn launch_chromium_login(
     let Some(driver) = driver() else {
         return unavailable();
     };
+    invalidate_session_lifecycle(&session_id);
     match driver.launch(&session_id).await {
         Ok(launch) => json_response(
             StatusCode::OK,
@@ -113,6 +114,7 @@ pub(crate) async fn release_session_browser_if_direct_ready(
         return None;
     }
     let driver = driver()?;
+    invalidate_session_lifecycle(session_id);
     driver.stop(session_id).await.ok()
 }
 
@@ -158,6 +160,7 @@ pub async fn stop_chromium(
     let Some(driver) = driver() else {
         return unavailable();
     };
+    invalidate_session_lifecycle(&session_id);
     match driver.stop(&session_id).await {
         Ok(status) => json_response(
             StatusCode::OK,
@@ -170,6 +173,12 @@ pub async fn stop_chromium(
 
 fn driver() -> Option<&'static Arc<ChromiumDriver>> {
     chromium_driver_runtime::get()
+}
+
+fn invalidate_session_lifecycle(session_id: &str) {
+    if let Some(registry) = browser_provider_runtime::get() {
+        registry.invalidate_session_lifecycle(session_id);
+    }
 }
 
 fn unavailable() -> Response<Body> {

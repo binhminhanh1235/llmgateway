@@ -1,5 +1,6 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
+    browser_provider_runtime,
     browser_session::{BrowserSessionError, BrowserSessionStore},
     browser_session_runtime,
 };
@@ -62,6 +63,7 @@ pub async fn begin_browser_login(
     let Some(store) = store() else {
         return unavailable();
     };
+    invalidate_session_lifecycle(&session_id);
     match store.begin_login(&session_id).await {
         Ok(login) => json_response(StatusCode::OK, json!(login), None),
         Err(error) => browser_error(error),
@@ -129,6 +131,7 @@ pub async fn require_browser_attention(
     let Some(store) = store() else {
         return unavailable();
     };
+    invalidate_session_lifecycle(&session_id);
     match store
         .require_attention(&session_id, body.error.trim())
         .await
@@ -153,6 +156,7 @@ pub async fn reset_browser_session(
     let Some(store) = store() else {
         return unavailable();
     };
+    invalidate_session_lifecycle(&session_id);
     match store.reset(&session_id).await {
         Ok(session) => json_response(
             StatusCode::OK,
@@ -165,6 +169,12 @@ pub async fn reset_browser_session(
 
 fn store() -> Option<&'static Arc<BrowserSessionStore>> {
     browser_session_runtime::get()
+}
+
+fn invalidate_session_lifecycle(session_id: &str) {
+    if let Some(registry) = browser_provider_runtime::get() {
+        registry.invalidate_session_lifecycle(session_id);
+    }
 }
 
 fn unavailable() -> Response<Body> {

@@ -72,8 +72,10 @@ impl ProviderRuntimePolicy {
 
     pub fn browserless_preferred() -> Self {
         Self {
-            safe_concurrency: 2,
-            max_in_flight: 4,
+            // Web-backed provider sessions are conservatively serialized until a
+            // provider explicitly proves a higher safe concurrency contract.
+            safe_concurrency: 1,
+            max_in_flight: 1,
             max_queue_depth: 32,
             max_queue_wait: Duration::from_secs(30),
             recovery_successes_per_step: 4,
@@ -269,6 +271,8 @@ struct AccountRuntime {
     recovery_successes: AtomicUsize,
     notify: Notify,
     lifecycle: Mutex<()>,
+    lifecycle_epoch: AtomicU64,
+    lifecycle_result: AtomicU8,
 }
 
 impl AccountRuntime {
@@ -289,6 +293,8 @@ impl AccountRuntime {
             recovery_successes: AtomicUsize::new(0),
             notify: Notify::new(),
             lifecycle: Mutex::new(()),
+            lifecycle_epoch: AtomicU64::new(0),
+            lifecycle_result: AtomicU8::new(0),
         }
     }
 
@@ -311,12 +317,17 @@ impl AccountRuntime {
         let current = self.effective_limit.load(Ordering::Acquire);
         let next = current.max(1).min(policy.max_in_flight);
         self.effective_limit.store(next, Ordering::Release);
-        self.activate();
         self.notify.notify_waiters();
     }
 
     fn state(&self) -> AdmissionState {
         AdmissionState::from_u8(self.admission_state.load(Ordering::Acquire))
+    }
+
+    fn invalidate_lifecycle(&self) {
+        self.lifecycle_result.store(1, Ordering::Release);
+        self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
     }
 
     fn activate(&self) {
@@ -325,6 +336,7 @@ impl AccountRuntime {
             .swap(AdmissionState::Open.as_u8(), Ordering::AcqRel);
         if AdmissionState::from_u8(previous) != AdmissionState::Open {
             self.generation.fetch_add(1, Ordering::AcqRel);
+            self.invalidate_lifecycle();
         }
     }
 
@@ -334,13 +346,14 @@ impl AccountRuntime {
             .swap(AdmissionState::Stopped.as_u8(), Ordering::AcqRel);
         if AdmissionState::from_u8(previous) != AdmissionState::Stopped {
             self.generation.fetch_add(1, Ordering::AcqRel);
+            self.invalidate_lifecycle();
         }
         self.notify.notify_waiters();
     }
 
     fn bump_generation(&self) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.notify.notify_waiters();
+        self.invalidate_lifecycle();
         generation
     }
 
@@ -620,6 +633,18 @@ impl AccountRuntimeRegistry {
         }
     }
 
+    pub fn activate_account(&self, account_id: &str) {
+        let runtimes = self
+            .runtimes
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (key, runtime) in runtimes.iter() {
+            if key.account_id == account_id {
+                runtime.activate();
+            }
+        }
+    }
+
     pub fn stop_account(&self, account_id: &str) {
         let runtimes = self
             .runtimes
@@ -632,31 +657,45 @@ impl AccountRuntimeRegistry {
         }
     }
 
-    pub async fn serialize_lifecycle<F, Fut, T>(
+    pub async fn single_flight_lifecycle<F, Fut>(
         &self,
         provider: &str,
         account_id: &str,
         policy: ProviderRuntimePolicy,
         operation: F,
-    ) -> Result<T, AccountLifecycleError>
+    ) -> Result<bool, AccountLifecycleError>
     where
         F: FnOnce(u64) -> Fut,
-        Fut: Future<Output = T>,
+        Fut: Future<Output = bool>,
     {
         let runtime = self.ensure_runtime(provider, account_id, policy);
+        let observed_epoch = runtime.lifecycle_epoch.load(Ordering::Acquire);
         let _guard = runtime.lifecycle.lock().await;
         if runtime.state() != AdmissionState::Open {
             return Err(AccountLifecycleError::Unavailable);
         }
+
+        let current_epoch = runtime.lifecycle_epoch.load(Ordering::Acquire);
+        if current_epoch != observed_epoch {
+            return Ok(runtime.lifecycle_result.load(Ordering::Acquire) == 2);
+        }
+
         let generation = runtime.generation.load(Ordering::Acquire);
         let value = operation(generation).await;
         let current = runtime.generation.load(Ordering::Acquire);
         if current != generation || runtime.state() != AdmissionState::Open {
+            runtime.lifecycle_result.store(1, Ordering::Release);
+            runtime.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
             return Err(AccountLifecycleError::StaleGeneration {
                 observed: generation,
                 current,
             });
         }
+
+        runtime
+            .lifecycle_result
+            .store(if value { 2 } else { 1 }, Ordering::Release);
+        runtime.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
         Ok(value)
     }
 
@@ -676,9 +715,9 @@ fn duration_millis_u64(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::atomic::AtomicUsize;
     use tokio::{
-        sync::oneshot,
+        sync::{oneshot, Barrier},
         task::JoinHandle,
         time::{sleep, timeout},
     };
@@ -1012,22 +1051,21 @@ mod tests {
     #[tokio::test]
     async fn concurrent_cold_lifecycle_requests_single_flight_startup() {
         let registry = Arc::new(AccountRuntimeRegistry::default());
-        let started = Arc::new(AtomicBool::new(false));
         let startups = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
         let p = policy(2, 2, 8);
         let mut tasks = Vec::new();
 
         for _ in 0..8 {
             let registry = registry.clone();
-            let started = started.clone();
             let startups = startups.clone();
+            let barrier = barrier.clone();
             tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
                 registry
-                    .serialize_lifecycle("provider", "account-a", p, |_| async move {
-                        if !started.swap(true, Ordering::AcqRel) {
-                            startups.fetch_add(1, Ordering::AcqRel);
-                            sleep(Duration::from_millis(20)).await;
-                        }
+                    .single_flight_lifecycle("provider", "account-a", p, |_| async move {
+                        startups.fetch_add(1, Ordering::AcqRel);
+                        sleep(Duration::from_millis(30)).await;
                         true
                     })
                     .await
@@ -1041,6 +1079,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_failed_lifecycle_waiters_share_one_startup_result() {
+        let registry = Arc::new(AccountRuntimeRegistry::default());
+        let startups = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let p = policy(2, 2, 8);
+        let mut tasks = Vec::new();
+
+        for _ in 0..8 {
+            let registry = registry.clone();
+            let startups = startups.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                registry
+                    .single_flight_lifecycle("provider", "account-a", p, |_| async move {
+                        startups.fetch_add(1, Ordering::AcqRel);
+                        sleep(Duration::from_millis(30)).await;
+                        false
+                    })
+                    .await
+                    .unwrap()
+            }));
+        }
+        for task in tasks {
+            assert!(!task.await.unwrap());
+        }
+        assert_eq!(startups.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
     async fn aborted_lifecycle_operation_does_not_deadlock_future_startup() {
         let registry = Arc::new(AccountRuntimeRegistry::default());
         let p = policy(1, 1, 2);
@@ -1048,7 +1116,7 @@ mod tests {
         let first_registry = registry.clone();
         let first = tokio::spawn(async move {
             first_registry
-                .serialize_lifecycle("provider", "account-a", p, |_| async move {
+                .single_flight_lifecycle("provider", "account-a", p, |_| async move {
                     let _ = entered_tx.send(());
                     sleep(Duration::from_secs(5)).await;
                     false
@@ -1061,7 +1129,7 @@ mod tests {
 
         let next = timeout(
             Duration::from_secs(1),
-            registry.serialize_lifecycle("provider", "account-a", p, |_| async { true }),
+            registry.single_flight_lifecycle("provider", "account-a", p, |_| async { true }),
         )
         .await
         .unwrap()
@@ -1077,7 +1145,7 @@ mod tests {
         let task_registry = registry.clone();
         let task = tokio::spawn(async move {
             task_registry
-                .serialize_lifecycle("provider", "account-a", p, |_| async move {
+                .single_flight_lifecycle("provider", "account-a", p, |_| async move {
                     let _ = entered_tx.send(());
                     sleep(Duration::from_millis(50)).await;
                     true
@@ -1098,6 +1166,13 @@ mod tests {
         let p = policy(1, 1, 2);
         let before = registry.snapshot_or_create("provider", "account-a", p);
         registry.stop_account("account-a");
+        assert_eq!(
+            registry
+                .snapshot_or_create("provider", "account-a", p)
+                .admission_state,
+            AdmissionState::Stopped
+        );
+        registry.activate_account("account-a");
         let after = registry.snapshot_or_create("provider", "account-a", p);
         assert_eq!(registry.runtime_count(), 1);
         assert!(after.generation > before.generation);

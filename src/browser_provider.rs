@@ -819,6 +819,7 @@ impl BrowserProviderRegistry {
             .filter(|account_id| !config.bindings.contains_key(*account_id))
             .cloned()
             .collect::<Vec<_>>();
+        let active = config.bindings.keys().cloned().collect::<Vec<_>>();
         let changed = previous
             .bindings
             .keys()
@@ -835,10 +836,22 @@ impl BrowserProviderRegistry {
         for account_id in changed {
             self.account_runtimes.bump_account_generation(&account_id);
         }
+        for account_id in active {
+            self.account_runtimes.activate_account(&account_id);
+        }
         for account_id in removed {
             self.account_runtimes.stop_account(&account_id);
         }
         Ok(())
+    }
+
+    pub fn invalidate_session_lifecycle(&self, session_id: &str) {
+        let config = self.config_snapshot();
+        for (account_id, binding) in &config.bindings {
+            if binding.session == session_id {
+                self.account_runtimes.bump_account_generation(account_id);
+            }
+        }
     }
 
     pub async fn clear_diagnostics(&self) {
@@ -1512,7 +1525,7 @@ impl BrowserProviderRegistry {
         let browser_was_live = self.cdp_session_live(&session_id).await;
         let result = self
             .account_runtimes
-            .serialize_lifecycle(&provider.id, &account.id, policy, |_| async {
+            .single_flight_lifecycle(&provider.id, &account.id, policy, |_| async {
                 if self.cdp_session_live(&session_id).await {
                     true
                 } else {

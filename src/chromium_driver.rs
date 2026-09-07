@@ -190,6 +190,7 @@ pub struct ChromiumDriver {
     auth_vault: Arc<BrowserAuthVault>,
     client: Client,
     processes: Arc<Mutex<HashMap<String, ManagedProcess>>>,
+    lifecycle_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +246,7 @@ impl ChromiumDriver {
             auth_vault,
             client,
             processes: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle_locks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -273,6 +275,14 @@ impl ChromiumDriver {
             .clone()
     }
 
+    async fn session_lifecycle_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.lifecycle_locks.lock().await;
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     pub async fn launch(
         &self,
         session_id: &str,
@@ -286,6 +296,8 @@ impl ChromiumDriver {
             return Err(ChromiumDriverError::SessionDisabled(session_id.to_string()));
         }
 
+        let lifecycle_lock = self.session_lifecycle_lock(session_id).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
         self.remove_finished_process(session_id).await;
         let existing = self.status(session_id).await?;
         if existing.running {
@@ -723,6 +735,8 @@ impl ChromiumDriver {
 
     pub async fn stop(&self, session_id: &str) -> Result<ChromiumStatusView, ChromiumDriverError> {
         self.driver_session(session_id)?;
+        let lifecycle_lock = self.session_lifecycle_lock(session_id).await;
+        let _lifecycle_guard = lifecycle_lock.lock().await;
         let before = self.status(session_id).await?;
         let mut process = {
             let mut processes = self.processes.lock().await;
