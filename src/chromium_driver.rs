@@ -991,18 +991,18 @@ impl ChromiumDriver {
         };
 
         if status.running {
-            match self.stop(session_id).await {
+            match self.suspend(session_id).await {
                 Ok(_) => ChromiumReconcileView {
                     session_id: session_id.to_string(),
-                    action: "browserless_stopped".into(),
-                    session_status: STATUS_STOPPED.into(),
+                    action: "browserless_suspended".into(),
+                    session_status: session.status,
                     running: false,
                     ready: true,
                     error: None,
                 },
                 Err(error) => ChromiumReconcileView {
                     session_id: session_id.to_string(),
-                    action: "browserless_stop_failed".into(),
+                    action: "browserless_suspend_failed".into(),
                     session_status: session.status,
                     running: true,
                     ready: true,
