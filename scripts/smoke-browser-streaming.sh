@@ -311,6 +311,24 @@ assistants = [
 ]
 assert any("fake reply" in str(message.get("content", "")) for message in assistants), stored_thread
 
+# P4 cold-start latency is lifecycle latency, not streaming TTFB. Warm the
+# authenticated headless runtime once, then retain the original first-byte
+# regression threshold for a ready browser transport.
+warm, _, _, _ = request_stream(
+    "/v1/chat/completions",
+    {
+        "model": "llmgateway-auto",
+        "stream": True,
+        "messages": [{"role": "user", "content": "warm headless browser runtime"}],
+    },
+)
+warm_text = "".join(
+    choice.get("delta", {}).get("content", "")
+    for event in warm
+    for choice in event.get("choices", [])
+)
+assert warm_text == "browser-stream-ok", (warm_text, warm)
+
 chat, first, total, chat_request_id = request_stream(
     "/v1/chat/completions",
     {
