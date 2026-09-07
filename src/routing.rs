@@ -310,8 +310,7 @@ impl Router {
                     0
                 };
             let policy_reason = self.policy_reason(config.as_ref(), transport).to_string();
-            let (activation_cost, activation_reason) =
-                route_activation_cost(transport, &readiness);
+            let (activation_cost, activation_reason) = route_activation_cost(transport, &readiness);
             let group_tier_priority = config
                 .virtual_models
                 .get(&resolved_model)
@@ -1011,10 +1010,7 @@ struct RouteEvaluation {
     candidates: Vec<EvaluatedRoute>,
 }
 
-fn route_activation_cost(
-    transport: &str,
-    readiness: &AccountReadiness,
-) -> (i32, &'static str) {
+fn route_activation_cost(transport: &str, readiness: &AccountReadiness) -> (i32, &'static str) {
     match transport {
         "api" => (0, "api_ready"),
         "browser" if !readiness.routable => (100, "browser_unavailable"),
