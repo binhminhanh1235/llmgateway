@@ -1504,9 +1504,9 @@ mod client_policy_tests {
 #[cfg(test)]
 mod stream_trace_tests {
     use super::{
-        is_retryable_attempt_error, normalized_gateway_failure, normalized_status_failure,
-        observe_terminal_sse_completion, route_failure_policy, stream_error_message,
-        upstream_stream_error_sse, GatewayError,
+        is_retryable_attempt_error, map_browser_provider_error, normalized_gateway_failure,
+        normalized_status_failure, observe_terminal_sse_completion, route_failure_policy,
+        stream_error_message, upstream_stream_error_sse, BrowserProviderError, GatewayError,
     };
     use crate::execution::{ExecutionPhase, FailureClass, FailureScope, ReplaySafety};
     use reqwest::StatusCode;
