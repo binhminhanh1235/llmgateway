@@ -1468,11 +1468,13 @@ impl BrowserProviderRegistry {
                 let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
                 return diagnostics.status == "ready";
             }
-            return browser_runtime::get().is_some()
-                && cdp_session_background_recoverable(&session.status);
+            return browser_runtime_available()
+                && browser_session_background_recoverable(&session.status);
         }
 
         session.status == "ready"
+            || (browser_runtime_available()
+                && browser_session_background_recoverable(&session.status))
     }
 
     async fn cdp_session_live(&self, session_id: &str) -> bool {
@@ -1796,8 +1798,8 @@ impl BrowserProviderRegistry {
         let auth_snapshot_ready = (provider.kind == "browser-http"
             && self.auth_material_available(&binding.session))
             || direct_snapshot_ready;
-        let background_recoverable = browser_adapter.is_cdp()
-            && cdp_session_background_recoverable(&session.status);
+        let background_recoverable =
+            browser_runtime_available() && browser_session_background_recoverable(&session.status);
         if !session.enabled
             || (session.status != "ready" && !auth_snapshot_ready && !background_recoverable)
         {
@@ -4103,7 +4105,12 @@ fn cdp_session_status_probeable(status: &str) -> bool {
     )
 }
 
-fn cdp_session_background_recoverable(status: &str) -> bool {
+fn browser_runtime_available() -> bool {
+    browser_runtime::get().is_some()
+        && chromium_driver_runtime::get().is_some_and(|driver| driver.enabled())
+}
+
+fn browser_session_background_recoverable(status: &str) -> bool {
     matches!(status, "ready" | "degraded")
 }
 
@@ -4365,7 +4372,7 @@ mod tests {
     #[test]
     fn only_ready_or_degraded_sessions_can_auto_start_headless() {
         for status in ["ready", "degraded"] {
-            assert!(cdp_session_background_recoverable(status), "{status}");
+            assert!(browser_session_background_recoverable(status), "{status}");
         }
         for status in [
             "starting",
@@ -4374,7 +4381,7 @@ mod tests {
             "requires_attention",
             "login_required",
         ] {
-            assert!(!cdp_session_background_recoverable(status), "{status}");
+            assert!(!browser_session_background_recoverable(status), "{status}");
         }
     }
 
