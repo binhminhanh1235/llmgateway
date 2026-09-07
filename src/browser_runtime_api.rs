@@ -1,6 +1,6 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
-    browser_auth_runtime, browser_provider_runtime, browser_session_runtime,
+    browser_auth_runtime, browser_provider_runtime, browser_runtime, browser_session_runtime,
     chromium_driver_runtime,
 };
 use axum::{
@@ -118,6 +118,7 @@ pub async fn browser_account_runtime_diagnostics(
         None => None,
     };
     let browser_running = browser.as_ref().is_some_and(|status| status.running);
+    let browser_runtime_metrics = browser_runtime::get().map(|runtime| runtime.metrics());
     let direct_ready = adapter.status == "ready"
         && adapter
             .adapter_id
@@ -154,6 +155,7 @@ pub async fn browser_account_runtime_diagnostics(
             "last_execution": last_execution,
             "account_runtime": account_runtime,
             "browser": browser,
+            "browser_runtime_metrics": browser_runtime_metrics,
             "effective_transport": effective_transport,
             "direct_ready": direct_ready,
             "browser_running": browser_running,
