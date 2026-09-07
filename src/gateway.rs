@@ -1,5 +1,8 @@
 use crate::{
-    account_runtime::{AccountAdmissionPermit, AccountRuntimeRegistry, ProviderRuntimePolicy},
+    account_runtime::{
+        AccountAdmissionPermit, AccountRuntimeRegistry, AccountRuntimeSnapshot,
+        ProviderRuntimePolicy,
+    },
     browser_provider::{BrowserProviderError, BrowserProviderRegistry},
     browser_provider_runtime,
     catalog::ModelCatalog,
@@ -345,6 +348,32 @@ impl Gateway {
 
     pub fn config_snapshot(&self) -> Arc<AppConfig> {
         self.live_config.snapshot()
+    }
+
+    pub fn set_account_runtime_enabled(&self, account_id: &str, enabled: bool) {
+        if enabled {
+            self.account_runtimes.activate_account(account_id);
+        } else {
+            self.account_runtimes.stop_account(account_id);
+        }
+    }
+
+    pub fn account_runtime_snapshot(
+        &self,
+        provider: &ProviderConfig,
+        account: &AccountConfig,
+    ) -> AccountRuntimeSnapshot {
+        let policy = self.account_runtime_policy(provider, account);
+        let snapshot =
+            self.account_runtimes
+                .snapshot_or_create(&provider.id, &account.id, policy);
+        if account.enabled {
+            snapshot
+        } else {
+            self.account_runtimes.stop_account(&account.id);
+            self.account_runtimes
+                .snapshot_or_create(&provider.id, &account.id, policy)
+        }
     }
 
     fn account_runtime_policy(

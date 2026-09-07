@@ -59,6 +59,9 @@ pub async fn set_account(
                 );
             }
             state.gateway.live_config.replace(config);
+            state
+                .gateway
+                .set_account_runtime_enabled(&account_id, body.enabled);
             json_response(
                 StatusCode::OK,
                 json!({

@@ -1,4 +1,5 @@
 use crate::{
+    account_runtime::AccountRuntimeSnapshot,
     api::{authorize, json_error, json_response, AppState},
     browser_provider::{
         BrowserAccountTransportState, BrowserAdapterDiagnostics, BrowserProviderConfig,
@@ -40,6 +41,7 @@ struct AccountIntelligence {
     route_ids: Vec<String>,
     routing_state: String,
     readiness: AccountReadiness,
+    account_runtime: AccountRuntimeSnapshot,
     browser_session: Option<BrowserSessionIntelligence>,
     browser_adapter: Option<BrowserAdapterDiagnostics>,
     browser_transport: Option<BrowserAccountTransportState>,
@@ -97,6 +99,7 @@ pub async fn account_intelligence(
         let readiness = state.gateway.router.account_readiness(&account.id).await;
         let credential_required = account.credential_required(provider);
         let credential_configured = readiness.credential_configured;
+        let account_runtime = state.gateway.account_runtime_snapshot(provider, account);
 
         let mut browser_session = None;
         let mut browser_adapter = None;
@@ -143,6 +146,7 @@ pub async fn account_intelligence(
             route_ids,
             routing_state: readiness.effective_status.clone(),
             readiness,
+            account_runtime,
             browser_session,
             browser_adapter,
             browser_transport,
