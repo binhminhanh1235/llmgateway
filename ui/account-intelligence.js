@@ -90,6 +90,11 @@
       const generationText = account.transport === "browser"
         ? `Runtime g${runtimeGeneration} · Auth g${authGeneration}`
         : `Runtime g${runtimeGeneration}`;
+      const activationCost = Number(account.browser_transport?.transport_plan?.activation_cost ?? 0);
+      const activationReason = account.browser_transport?.transport_plan?.activation_reason || "";
+      const activationText = account.transport === "browser"
+        ? `Activation ${activationCost}${activationReason ? ` · ${activationReason}` : ""}`
+        : "";
 
       strip.innerHTML = `
         <span class="account-intel-chip transport-${escapeAttr(directHttp ? "direct-http" : account.transport)}">${escapeHtml(transportLabel)}</span>
@@ -98,6 +103,7 @@
         ${adapterText ? `<span class="account-intel-detail">${escapeHtml(adapterText)}</span>` : ""}
         <span class="account-intel-detail">${escapeHtml(runtimeText)}</span>
         <span class="account-intel-detail">${escapeHtml(generationText)}</span>
+        ${activationText ? `<span class="account-intel-detail">${escapeHtml(activationText)}</span>` : ""}
         <span class="account-intel-detail">${escapeHtml(routeText)}</span>`;
 
       const reasons = Array.isArray(readiness.reasons) ? readiness.reasons.join(", ") : "";
