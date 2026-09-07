@@ -1112,20 +1112,21 @@ impl BrowserProviderRegistry {
                 .map(str::to_string)
         });
         let browser_adapter = self.adapters.get(provider_kind);
-        let transport_plan = self
-            .account_runtimes
-            .plan_browser_transports(BrowserTransportPlanInput {
-                direct_ready: direct_ready_adapter_id.is_some(),
-                browser_fetch_supported: binding.transport_mode != BrowserTransportMode::BrowserOnly
-                    && browser_adapter.is_some_and(|adapter| {
-                        adapter.is_cdp() && adapter.supports_browser_fetch()
-                    }),
-                browser_runtime_available: browser_runtime_available(),
-                browser_runtime_warm: browser_runtime::get()
-                    .is_some_and(|runtime| runtime.is_running(&binding.session)),
-                browser_adapter_is_cdp: browser_adapter.is_some_and(|adapter| adapter.is_cdp()),
-                browser_only: binding.transport_mode == BrowserTransportMode::BrowserOnly,
-            });
+        let transport_plan =
+            self.account_runtimes
+                .plan_browser_transports(BrowserTransportPlanInput {
+                    direct_ready: direct_ready_adapter_id.is_some(),
+                    browser_fetch_supported: binding.transport_mode
+                        != BrowserTransportMode::BrowserOnly
+                        && browser_adapter.is_some_and(|adapter| {
+                            adapter.is_cdp() && adapter.supports_browser_fetch()
+                        }),
+                    browser_runtime_available: browser_runtime_available(),
+                    browser_runtime_warm: browser_runtime::get()
+                        .is_some_and(|runtime| runtime.is_running(&binding.session)),
+                    browser_adapter_is_cdp: browser_adapter.is_some_and(|adapter| adapter.is_cdp()),
+                    browser_only: binding.transport_mode == BrowserTransportMode::BrowserOnly,
+                });
         let last = self.last_transport_execution(account_id).await;
         let (
             effective_transport,
