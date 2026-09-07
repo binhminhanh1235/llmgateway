@@ -1,5 +1,6 @@
 use crate::{
-    browser_provider_runtime, browser_session_runtime, config::AppConfig, quota_usage_runtime,
+    browser_provider_runtime, browser_runtime, browser_session_runtime, config::AppConfig,
+    quota_usage_runtime,
 };
 use serde::Serialize;
 use std::env;
@@ -14,6 +15,8 @@ pub struct AccountReadiness {
     pub reasons: Vec<String>,
     pub credential_configured: Option<bool>,
     pub browser_ready: Option<bool>,
+    pub browser_running: Option<bool>,
+    pub browser_direct_ready: Option<bool>,
     pub browser_session_id: Option<String>,
     pub browser_session_status: Option<String>,
     pub browser_last_error: Option<String>,
@@ -37,6 +40,8 @@ impl AccountReadiness {
             reasons: vec![reason.into()],
             credential_configured: None,
             browser_ready: None,
+            browser_running: None,
+            browser_direct_ready: None,
             browser_session_id: None,
             browser_session_status: None,
             browser_last_error: None,
@@ -77,6 +82,8 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
         reasons: Vec::new(),
         credential_configured: None,
         browser_ready: None,
+        browser_running: None,
+        browser_direct_ready: None,
         browser_session_id: None,
         browser_session_status: None,
         browser_last_error: None,
@@ -101,6 +108,10 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
             Some(registry) => {
                 if let Some(session_id) = registry.session_id_for_account(&account.id) {
                     readiness.browser_session_id = Some(session_id.to_string());
+                    readiness.browser_running = Some(
+                        browser_runtime::get()
+                            .is_some_and(|runtime| runtime.is_running(&session_id)),
+                    );
                     if let Some(store) = browser_session_runtime::get() {
                         if let Ok(session) = store.session(&session_id).await {
                             readiness.browser_session_status = Some(session.status.clone());
@@ -112,6 +123,15 @@ pub async fn evaluate_base(config: &AppConfig, account_id: &str) -> AccountReadi
                 let diagnostics = registry
                     .adapter_diagnostics(&provider.kind, &account.id)
                     .await;
+                readiness.browser_direct_ready = Some(
+                    diagnostics.status == "ready"
+                        && diagnostics
+                            .adapter_id
+                            .as_deref()
+                            .is_some_and(|adapter_id| {
+                                registry.is_direct_http_adapter_id(adapter_id)
+                            }),
+                );
                 readiness.browser_adapter_status = Some(diagnostics.status);
                 readiness.browser_adapter_message = Some(diagnostics.message);
                 available
