@@ -39,6 +39,9 @@ jobs:
       - run: bash -n scripts/live-gemini-model-selection.sh
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
       - run: bash -n scripts/live-mimo-browserless-acceptance.sh
+      - run: bash -n scripts/live-deepseek-provider-runtime.sh
+      - run: bash -n scripts/live-provider-runtime-fabric.sh
+      - run: bash -n scripts/smoke-provider-runtime-fabric.sh
       - run: bash -n scripts/smoke-gemini-recovery.sh
       - run: bash -n scripts/smoke-invisible-browser-runtime.sh
       - run: RUSTFLAGS="-D warnings" cargo check --all-targets
