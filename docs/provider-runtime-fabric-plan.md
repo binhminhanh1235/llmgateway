@@ -7,7 +7,7 @@ Working branch:
 `feat/provider-runtime-fabric`
 
 Status:
-`P0 + P1 DONE / VERIFIED — initiative remains NOT ON MAIN`
+`P0 + P1 + P2 DONE / VERIFIED — initiative remains NOT ON MAIN`
 
 ## 1. Goal
 
@@ -566,7 +566,7 @@ P1 verification — 2026-09-07:
 - Router consumes only provider-neutral runtime-health snapshots and structured failure scopes; production Gateway/Router/runtime-health code does not contain provider-specific Qwen/Gemini/DeepSeek/WAF/CDP parsing;
 - regression coverage locks transport isolation, bounded half-open probes, hysteresis, exponential cooldown+jitter, scoped cooldown compatibility, and route-explain compatibility.
 
-**P1 is DONE / VERIFIED on the working branch only. P2 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
+**P1 is DONE / VERIFIED on the working branch only. P2 verification is recorded below. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
 
 ### P2 — Account Runtime & Admission Control
 
@@ -583,6 +583,24 @@ Acceptance:
 - no duplicate browser startup under concurrent requests;
 - overload is queued/rerouted instead of uncontrolled bursting;
 - runtime shutdown is race-safe.
+
+P2 verification — 2026-09-07:
+
+- verified code head: `c4a663797c015183fa2e4f06f387b119794d212b`;
+- full CI: #1915 / run `34078114968` — SUCCESS;
+- Linux job `101608110226` — SUCCESS, including `cargo fmt --all -- --check`, `RUSTFLAGS="-D warnings" cargo check --all-targets`, `cargo clippy --all-targets`, `cargo test --all-targets`, the full routing/browser/streaming/execution smoke chain, and Docker build;
+- Windows job `101608110289` — SUCCESS, including PowerShell validation, `cargo check --all-targets`, `cargo test --all-targets`, and Chromium-driver Windows smoke;
+- provider-neutral `AccountRuntimeRegistry` now owns per-account admission, in-flight accounting, bounded queues, concurrency limits, adaptive pressure, lifecycle serialization, and structured runtime diagnostics;
+- queue admission is bounded by both runtime policy and the request execution budget, with typed `AdmissionRejected`, `QueueOverflow`, and `QueueTimeout` execution failures for reroute/fail decisions;
+- response/stream lifetime owns the admission permit, so cancellation and terminal stream completion release capacity without permit leaks;
+- throttling/overload reduces effective concurrency immediately while recovery increases capacity only after repeated successes, with independent state per account;
+- browser cold-start lifecycle is single-flight, concurrent failed waiters share one startup result, Chromium launch/stop is serialized per session, and generation invalidation prevents stale callbacks after reload/reset/manual lifecycle changes;
+- browser-backed web accounts use a conservative serialized P2 baseline unless a future explicit provider capability proves higher safe concurrency;
+- account enable/disable is reflected in shared runtime admission state, and `account-intelligence` / browser diagnostics expose queue depth, queue wait, in-flight count, admission state, effective concurrency limit, generation, and last rejection reason;
+- deterministic tests cover concurrent cold start, failed-start single-flight, per-account limits, bounded queue/overflow, deadline-aware queue wait, adaptive reduction/recovery, account isolation, cancellation, aborted startup, stale generation, and shutdown/reload reuse;
+- Router remains provider-neutral and P1 `RuntimeHealthGraph` remains the single breaker/health system rather than introducing a competing P2 health graph.
+
+**P2 is DONE / VERIFIED on the working branch only. P3 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
 
 ### P3 — DeepSeek Deterministic Stream State
 

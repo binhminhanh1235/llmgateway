@@ -404,13 +404,17 @@ Baseline:
 
 - P0 Execution Contract Foundation — DONE / VERIFIED;
 - P1 Runtime Health Graph & Breakers — DONE / VERIFIED tại `9b351c707ed99fc3f3383987dc4f68bcd2eb1164`;
-- exact-head CI #1908 / run `34074083568` — PASS;
-- Linux job `101596735767` — PASS full Rust checks/tests, smoke chain và Docker;
-- Windows job `101596735884` — PASS check/tests/Chromium-driver smoke.
+- P1 exact-head CI #1908 / run `34074083568` — PASS;
+- P2 Account Runtime & Admission Control — DONE / VERIFIED tại `c4a663797c015183fa2e4f06f387b119794d212b`;
+- P2 exact-head CI #1915 / run `34078114968` — PASS;
+- P2 Linux job `101608110226` — PASS full Rust checks/tests, routing/browser/streaming/execution smoke chain và Docker;
+- P2 Windows job `101608110289` — PASS check/tests/Chromium-driver smoke.
 
 P1 hiện có provider-neutral runtime health graph theo account/transport/session, breaker CLOSED/OPEN/HALF_OPEN, bounded half-open probe, exponential cooldown + jitter, hysteresis và transport isolation. Browser-backed account có thể quarantine `direct_http` mà không tự động làm mất `browser_runtime` khỏe. Account-scoped failure vẫn giữ route cooldown compatibility.
 
-P2 Account Runtime & Admission Control **chưa bắt đầu**. Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
+P2 bổ sung provider-neutral per-account runtime ownership: bounded/deadline-aware admission queue, in-flight/concurrency ownership, conservative provider capability policy, adaptive concurrency, response-lifetime permits, single-flight browser lifecycle, per-session Chromium serialization, generation-safe reload/reset/stop và structured account runtime diagnostics. Overload/rejection đi qua typed common failures để Gateway reroute/fail mà Router không cần biết provider-specific transport details. P2 tiếp tục tái sử dụng P1 `RuntimeHealthGraph` thay vì tạo health system cạnh tranh.
+
+**P2 DONE / VERIFIED trên working branch only. P3 chưa bắt đầu.** Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
 
 ## 18. Open work đáng chú ý
 
