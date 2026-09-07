@@ -1606,10 +1606,7 @@ impl BrowserProviderRegistry {
             None => return false,
         };
         let background_recoverable = browser_runtime_available()
-            && browser_session_background_recoverable(
-                &session.status,
-                auth_material_available,
-            );
+            && browser_session_background_recoverable(&session.status, auth_material_available);
         if adapter.is_cdp() {
             if !cdp_session_status_probeable(&session.status) && !background_recoverable {
                 return false;
@@ -4729,10 +4726,7 @@ fn browser_runtime_available() -> bool {
         && chromium_driver_runtime::get().is_some_and(|driver| driver.enabled())
 }
 
-fn browser_session_background_recoverable(
-    status: &str,
-    auth_material_available: bool,
-) -> bool {
+fn browser_session_background_recoverable(status: &str, auth_material_available: bool) -> bool {
     matches!(status, "ready" | "degraded")
         || (status == "stopped" && auth_material_available)
 }
@@ -4995,14 +4989,8 @@ mod tests {
     #[test]
     fn authenticated_stopped_sessions_can_auto_start_headless() {
         for status in ["ready", "degraded"] {
-            assert!(
-                browser_session_background_recoverable(status, false),
-                "{status}"
-            );
-            assert!(
-                browser_session_background_recoverable(status, true),
-                "{status}"
-            );
+            assert!(browser_session_background_recoverable(status, false), "{status}");
+            assert!(browser_session_background_recoverable(status, true), "{status}");
         }
         assert!(browser_session_background_recoverable("stopped", true));
         assert!(!browser_session_background_recoverable("stopped", false));
@@ -5013,14 +5001,8 @@ mod tests {
             "requires_attention",
             "login_required",
         ] {
-            assert!(
-                !browser_session_background_recoverable(status, false),
-                "{status}"
-            );
-            assert!(
-                !browser_session_background_recoverable(status, true),
-                "{status}"
-            );
+            assert!(!browser_session_background_recoverable(status, false), "{status}");
+            assert!(!browser_session_background_recoverable(status, true), "{status}");
         }
     }
 
