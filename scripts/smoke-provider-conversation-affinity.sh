@@ -6,14 +6,18 @@ export FAKE_API_KEY="fake-key"
 export LLMGATEWAY_CONFIG="/tmp/llmgateway-provider-conversation-affinity.toml"
 PROFILE_ROOT="/tmp/llmgateway-provider-conversation-affinity-profiles"
 FAKE_CHROMIUM="/tmp/llmgateway-fake-affinity-chromium"
+LAUNCH_LOG="/tmp/llmgateway-provider-conversation-launches.log"
 BROWSER_PID=""
 
 rm -rf "$PROFILE_ROOT"
+rm -f "$LAUNCH_LOG"
 rm -f data/llmgateway.db data/llmgateway.db-shm data/llmgateway.db-wal
 mkdir -p data
 
 cat >"$FAKE_CHROMIUM" <<'SH'
 #!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>/tmp/llmgateway-provider-conversation-launches.log
 exec python3 scripts/fake-cdp-chromium.py "$@"
 SH
 chmod 700 "$FAKE_CHROMIUM"
@@ -85,7 +89,7 @@ cleanup() {
   if [ -n "$BROWSER_PID" ]; then kill "$BROWSER_PID" 2>/dev/null || true; fi
   kill "$PID" "$FAKE_PID" 2>/dev/null || true
   rm -rf "$PROFILE_ROOT"
-  rm -f "$FAKE_CHROMIUM" "$LLMGATEWAY_CONFIG"
+  rm -f "$FAKE_CHROMIUM" "$LLMGATEWAY_CONFIG" "$LAUNCH_LOG"
   rm -f data/llmgateway.db data/llmgateway.db-shm data/llmgateway.db-wal
 }
 trap cleanup EXIT
@@ -130,6 +134,96 @@ assert runtime["browser_running"] is False, runtime
 assert runtime["effective_transport"] == "unavailable", runtime
 assert runtime["auth_snapshot_available"] is False, runtime
 PY
+
+# P5: ordinary fresh requests use authenticated browser-context fetch before UI.
+# The fake CDP models provider fetch separately from DOM/native conversation actions.
+curl -fsS -D /tmp/browser-fetch-buffered.headers -o /tmp/browser-fetch-buffered.json \
+  -X POST http://127.0.0.1:7331/v1/chat/completions \
+  "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"p5 buffered browser fetch"}]}'
+grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/browser-fetch-buffered.headers
+python3 <<'PY'
+import json
+with open("/tmp/browser-fetch-buffered.json", encoding="utf-8") as f:
+    body = json.load(f)
+assert body["choices"][0]["message"]["content"] == "browser-fetch-ok", body
+PY
+
+curl -fsS \
+  http://127.0.0.1:7331/_llmgateway/browser-accounts/gemini-affinity/runtime \
+  "${AUTH[@]}" >/tmp/llmgateway-browser-fetch-runtime.json
+python3 <<'PY'
+import json
+with open("/tmp/llmgateway-browser-fetch-runtime.json", encoding="utf-8") as f:
+    runtime = json.load(f)
+last = runtime.get("last_execution")
+assert last is not None, runtime
+assert last["transport"] == "browser-fetch", runtime
+assert last["browser_fallback"] is False, runtime
+assert runtime["browser_running"] is True, runtime
+PY
+
+# Automatic P5 execution must reuse P4 invisible runtime policy.
+test "$(wc -l < "$LAUNCH_LOG" | tr -d ' ')" -ge 2
+AUTO_LAUNCH=$(tail -n 1 "$LAUNCH_LOG")
+printf '%s' "$AUTO_LAUNCH" | grep -q -- '--headless'
+if printf '%s' "$AUTO_LAUNCH" | grep -q -- '--new-window'; then
+  echo "browser-fetch background execution unexpectedly launched a visible Chromium window" >&2
+  exit 1
+fi
+
+curl -fsS -N -D /tmp/browser-fetch-stream.headers -o /tmp/browser-fetch-stream.sse \
+  -X POST http://127.0.0.1:7331/v1/chat/completions \
+  "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"model":"llmgateway-auto","stream":true,"messages":[{"role":"user","content":"p5 streaming browser fetch"}]}'
+grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/browser-fetch-stream.headers
+python3 <<'PY'
+import json
+chunks = []
+done = False
+with open("/tmp/browser-fetch-stream.sse", encoding="utf-8") as f:
+    for line in f:
+        if not line.startswith("data: "):
+            continue
+        raw = line[6:].strip()
+        if raw == "[DONE]":
+            done = True
+            continue
+        if not raw:
+            continue
+        event = json.loads(raw)
+        delta = (event.get("choices") or [{}])[0].get("delta") or {}
+        chunks.append(str(delta.get("content") or ""))
+assert "".join(chunks) == "browser-stream-ok", chunks
+assert done is True, chunks
+PY
+
+python3 <<'PY'
+import json
+import os
+profile = os.environ["PROFILE_DIR"]
+with open(os.path.join(profile, "browser-fetch-requests.jsonl"), encoding="utf-8") as f:
+    requests = [json.loads(line) for line in f if line.strip()]
+assert len(requests) >= 2, requests
+assert any(
+    message.get("content") == "p5 buffered browser fetch"
+    for message in requests[-2].get("messages", [])
+), requests[-2]
+assert any(
+    message.get("content") == "p5 streaming browser fetch"
+    for message in requests[-1].get("messages", [])
+), requests[-1]
+ui_path = os.path.join(profile, "browser-requests.jsonl")
+if os.path.exists(ui_path):
+    with open(ui_path, encoding="utf-8") as f:
+        ui_requests = [line for line in f if line.strip()]
+    assert not ui_requests, ui_requests
+PY
+
+curl -fsS -X POST \
+  http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-affinity/driver/stop \
+  "${AUTH[@]}" >/dev/null
+BROWSER_PID=""
 
 THREAD_A=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${JSON[@]}"   -d '{"title":"Affinity A","model":"llmgateway-auto"}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 
