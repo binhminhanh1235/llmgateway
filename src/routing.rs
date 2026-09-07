@@ -1014,11 +1014,12 @@ fn route_activation_cost(transport: &str, readiness: &AccountReadiness) -> (i32,
     match transport {
         "api" => (0, "api_ready"),
         "browser" if !readiness.routable => (100, "browser_unavailable"),
+        "browser" if readiness.browser_direct_ready == Some(true) => (0, "direct_http_ready"),
+        "browser" if readiness.browser_running == Some(true) => (1, "browser_warm"),
         "browser" => match readiness.browser_session_status.as_deref() {
-            Some("stopped") => (3, "browser_cold_start"),
             Some("starting") => (2, "browser_starting"),
             Some("degraded") | Some("requires_attention") => (2, "browser_recovering"),
-            Some("ready") => (1, "browser_ready"),
+            Some("ready") | Some("stopped") => (3, "browser_cold_start"),
             _ => (2, "browser_activation"),
         },
         _ => (0, "transport_neutral"),
@@ -1102,6 +1103,8 @@ mod tests {
             reasons: Vec::new(),
             credential_configured: None,
             browser_ready: Some(routable),
+            browser_running: Some(false),
+            browser_direct_ready: Some(false),
             browser_session_id: Some("session".into()),
             browser_session_status: status.map(str::to_string),
             browser_last_error: None,
@@ -1120,8 +1123,14 @@ mod tests {
         assert_eq!(route_activation_cost("api", &readiness(None, true)).0, 0);
         assert_eq!(
             route_activation_cost("browser", &readiness(Some("ready"), true)).0,
-            1
+            3
         );
+        let mut direct = readiness(Some("ready"), true);
+        direct.browser_direct_ready = Some(true);
+        assert_eq!(route_activation_cost("browser", &direct).0, 0);
+        let mut warm = readiness(Some("ready"), true);
+        warm.browser_running = Some(true);
+        assert_eq!(route_activation_cost("browser", &warm).0, 1);
         assert_eq!(
             route_activation_cost("browser", &readiness(Some("stopped"), true)).0,
             3
