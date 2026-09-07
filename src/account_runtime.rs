@@ -946,9 +946,7 @@ mod tests {
         timeout(Duration::from_secs(1), async {
             loop {
                 let snapshot = registry.snapshot("gemini", "account-a").unwrap();
-                if snapshot.queue_depth == policy.max_queue_depth
-                    && snapshot.rejection_count >= 7
-                {
+                if snapshot.queue_depth == policy.max_queue_depth && snapshot.rejection_count >= 7 {
                     break;
                 }
                 sleep(Duration::from_millis(5)).await;

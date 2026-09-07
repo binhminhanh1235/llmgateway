@@ -381,7 +381,6 @@ fn auth_material_equivalent(left: &BrowserAuthMaterial, right: &BrowserAuthMater
         && left.session_storage == right.session_storage
 }
 
-
 fn load_or_create_key(path: &Path) -> Result<[u8; 32], BrowserAuthVaultError> {
     if path.is_file() {
         let encoded = fs::read_to_string(path)?;
@@ -617,7 +616,9 @@ mod tests {
         refreshed.cookies[0].value = "second".into();
         let refreshed = vault.store_if_current(&refreshed, invalidated).unwrap();
         assert_eq!(refreshed.generation, 3);
-        let stale = vault.store_if_current(&material, first.generation).unwrap_err();
+        let stale = vault
+            .store_if_current(&material, first.generation)
+            .unwrap_err();
         assert!(matches!(
             stale,
             BrowserAuthVaultError::StaleGeneration {
@@ -627,11 +628,7 @@ mod tests {
             }
         ));
         assert_eq!(
-            vault
-                .load("gemini-generation")
-                .unwrap()
-                .cookies[0]
-                .value,
+            vault.load("gemini-generation").unwrap().cookies[0].value,
             "second"
         );
         let _ = fs::remove_dir_all(root);

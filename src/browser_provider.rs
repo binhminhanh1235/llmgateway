@@ -357,9 +357,7 @@ impl BrowserProviderError {
             .with_resource_id(session_id.clone())
             .with_cooldown(2),
             Self::AuthGenerationStale {
-                session_id,
-                phase,
-                ..
+                session_id, phase, ..
             } => ExecutionFailure::new(
                 FailureClass::AuthExpired,
                 true,
@@ -2141,9 +2139,10 @@ impl BrowserProviderRegistry {
                 )
             });
             if initial_auth_failure
-                && direct_result.as_ref().err().is_some_and(|error| {
-                    error.execution_failure().allows_silent_fallback(false)
-                })
+                && direct_result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.execution_failure().allows_silent_fallback(false))
                 && self
                     .recover_auth_generation(
                         provider,
@@ -5984,9 +5983,12 @@ mod browser_transport_policy_tests {
             current: 5,
             phase: ExecutionPhase::Submitted,
         };
-        let failure = error
-            .execution_failure()
-            .with_context("gemini", "account-a", "gemini-web-pro", "direct_http");
+        let failure = error.execution_failure().with_context(
+            "gemini",
+            "account-a",
+            "gemini-web-pro",
+            "direct_http",
+        );
         assert_eq!(failure.class, FailureClass::AuthExpired);
         assert_eq!(failure.scope, FailureScope::Request);
         assert!(RuntimeHealthKey::from_failure(&failure).is_empty());
@@ -6002,9 +6004,12 @@ mod browser_transport_policy_tests {
             code: "rate_limited".into(),
             message: "RATE_LIMITED: provider quota".into(),
         };
-        let failure = error
-            .execution_failure()
-            .with_context("gemini", "account-a", "gemini-web-pro", "browser_fetch");
+        let failure = error.execution_failure().with_context(
+            "gemini",
+            "account-a",
+            "gemini-web-pro",
+            "browser_fetch",
+        );
         assert_eq!(failure.class, FailureClass::RateLimited);
         assert_eq!(failure.scope, FailureScope::Account);
         assert!(!browser_fetch_error_allows_ui_fallback(&error));
@@ -6013,5 +6018,4 @@ mod browser_transport_policy_tests {
             vec![RuntimeHealthKey::account("gemini", "account-a")]
         );
     }
-
 }

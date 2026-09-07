@@ -125,7 +125,9 @@ mod tests {
             Uuid::new_v4().simple()
         ));
         let vault = Arc::new(BrowserAuthVault::open(&root).unwrap());
-        let first = vault.store_if_current(&material("gemini-auth", "first"), 0).unwrap();
+        let first = vault
+            .store_if_current(&material("gemini-auth", "first"), 0)
+            .unwrap();
         assert_eq!(first.generation, 1);
 
         let coordinator = Arc::new(AuthRecoveryCoordinator::default());
@@ -142,10 +144,7 @@ mod tests {
                         recoveries.fetch_add(1, Ordering::AcqRel);
                         let invalidated = recovery_vault.invalidate("gemini-auth").unwrap();
                         recovery_vault
-                            .store_if_current(
-                                &material("gemini-auth", "refreshed"),
-                                invalidated,
-                            )
+                            .store_if_current(&material("gemini-auth", "refreshed"), invalidated)
                             .is_ok()
                     })
                     .await

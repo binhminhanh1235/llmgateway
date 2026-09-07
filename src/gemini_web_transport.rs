@@ -409,12 +409,7 @@ impl GeminiWebHttpAdapter {
             .init_session(&material, account_id, timeout_duration)
             .await?;
         let snapshot = self
-            .fetch_model_catalog(
-                &session,
-                account_id,
-                timeout_duration,
-                material.generation,
-            )
+            .fetch_model_catalog(&session, account_id, timeout_duration, material.generation)
             .await?;
         self.model_catalogs
             .write()
@@ -1175,7 +1170,9 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
                 if matches!(
                     error.execution_failure().class,
                     FailureClass::AuthExpired | FailureClass::AuthIncomplete
-                ) => BrowserAdapterDiagnostics {
+                ) =>
+            {
+                BrowserAdapterDiagnostics {
                     account_id: account_id.to_string(),
                     provider_kind: "browser-gemini".into(),
                     adapter_id: Some(self.adapter_id().into()),
@@ -1187,7 +1184,8 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
                     page_signature: None,
                     target_url_prefix: Some(GEMINI_INIT_URL.into()),
                     configured_models: binding.models.clone(),
-                },
+                }
+            }
             Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
                 BrowserAdapterDiagnostics {
                     account_id: account_id.to_string(),
@@ -1436,7 +1434,9 @@ fn generation_error(error_code: i64, account_id: &str, model: &str) -> BrowserPr
 fn is_gemini_transient_error(error: &BrowserProviderError) -> bool {
     matches!(
         error.execution_failure().class,
-        FailureClass::UpstreamOverloaded | FailureClass::Upstream5xx | FailureClass::NetworkTransient
+        FailureClass::UpstreamOverloaded
+            | FailureClass::Upstream5xx
+            | FailureClass::NetworkTransient
     )
 }
 
@@ -2362,5 +2362,4 @@ mod tests {
         assert_eq!(failure.scope, FailureScope::Account);
         assert!(!failure.human_action_required);
     }
-
 }
