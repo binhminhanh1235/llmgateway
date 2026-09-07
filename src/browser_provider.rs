@@ -620,7 +620,8 @@ pub trait BrowserProviderAdapter: Send + Sync {
         Err(BrowserProviderError::AdapterIncompatible {
             account_id: request.account.id,
             code: "browser_fetch_unsupported".into(),
-            message: "provider adapter does not implement authenticated browser-context fetch".into(),
+            message: "provider adapter does not implement authenticated browser-context fetch"
+                .into(),
         })
     }
 
@@ -1820,7 +1821,10 @@ impl BrowserProviderRegistry {
         execution_guard: BrowserExecutionGuard,
         allow_browser_fetch: bool,
         mark_direct_unsynced: bool,
-    ) -> (Result<reqwest::Response, BrowserProviderError>, &'static str) {
+    ) -> (
+        Result<reqwest::Response, BrowserProviderError>,
+        &'static str,
+    ) {
         if mark_direct_unsynced {
             if let Err(error) = self.mark_direct_state_unsynced(&request).await {
                 return (Err(error), "browser_fetch");
@@ -1966,10 +1970,9 @@ impl BrowserProviderRegistry {
         } else {
             "browser_http"
         };
-        let allow_browser_fetch =
-            binding.transport_mode != BrowserTransportMode::BrowserOnly
-                && browser_adapter.is_cdp()
-                && browser_adapter.supports_browser_fetch();
+        let allow_browser_fetch = binding.transport_mode != BrowserTransportMode::BrowserOnly
+            && browser_adapter.is_cdp()
+            && browser_adapter.supports_browser_fetch();
 
         let result = if direct_snapshot_ready {
             let direct = direct_adapter.expect("direct adapter checked above");
@@ -3518,8 +3521,7 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
             context.insert(
                 "ephemeral_chat".into(),
                 Value::Bool(
-                    request.binding.ephemeral_chat.unwrap_or(false)
-                        && request.thread_id.is_none(),
+                    request.binding.ephemeral_chat.unwrap_or(false) && request.thread_id.is_none(),
                 ),
             );
         }
@@ -4418,8 +4420,10 @@ fn direct_error_allows_browser_fallback(
 
 fn browser_fetch_error_allows_ui_fallback(error: &BrowserProviderError) -> bool {
     let failure = error.execution_failure();
-    !matches!(failure.phase, ExecutionPhase::Committed | ExecutionPhase::Terminal)
-        && failure.allows_silent_fallback(false)
+    !matches!(
+        failure.phase,
+        ExecutionPhase::Committed | ExecutionPhase::Terminal
+    ) && failure.allows_silent_fallback(false)
 }
 
 fn cdp_session_status_probeable(status: &str) -> bool {
