@@ -420,7 +420,16 @@ Baseline:
 - P5 Browser Fetch Transport — DONE / VERIFIED tại `46e979644e89c09157c2732511a00c9fe0cda078`, tree `190c5ee173f318cdd3670bc44a6d87004948fa2e`;
 - P5 exact-head CI #1948 / run `34096872023` — PASS;
 - P5 Linux job `101662375329` — PASS adapter fixtures, Rust fmt/check/clippy/tests, complete P0-P4 regression smokes, P5 fake-CDP buffered/streaming acceptance và Docker;
-- P5 Windows job `101662374960` — PASS check/tests/Chromium-driver smoke.
+- P5 Windows job `101662374960` — PASS check/tests/Chromium-driver smoke;
+- P6 Auth Generations & Gemini Hardening — DONE / VERIFIED tại `7a4592385141b3ad046f376995878813495c71a8`, tree `e83f96fe4311849b78b036b1fea4a46719c5de56`;
+- P6 exact-head CI #1954 / run `34104368716` — PASS;
+- P6 Linux job `101685910340` — PASS; Windows job `101685910051` — PASS;
+- P7 Logical Route / Transport Separation & Virtual-Model Continuity — DONE / VERIFIED tại `1f78c424501ae90c8fb817ee3b99ddc88359b16b`, tree `c36ecd4102094692ff6214b0620c739e31338059`;
+- P7/P8 deterministic exact-head CI #2004 / run `34120630383` — PASS;
+- Linux job `101737725328` — PASS full fmt/check/clippy/tests, provider/browser/routing/execution regression chain, P7 virtual-model/canonical failover gates và Docker;
+- Windows job `101737725090` — PASS check/tests/Chromium-driver smoke;
+- P8 Chaos & Resource deterministic implementation — DONE / VERIFIED trên code-head #2004;
+- P8 authenticated Gemini/Qwen/DeepSeek live gate — runner READY, execution PENDING trên real local authenticated sessions.
 
 P1 hiện có provider-neutral runtime health graph theo account/transport/session, breaker CLOSED/OPEN/HALF_OPEN, bounded half-open probe, exponential cooldown + jitter, hysteresis và transport isolation. Browser-backed account có thể quarantine `direct_http` mà không tự động làm mất `browser_runtime` khỏe. Account-scoped failure vẫn giữ route cooldown compatibility.
 
@@ -432,7 +441,13 @@ P4 bổ sung provider-neutral invisible browser supervisor: normal execution dù
 
 P5 bổ sung provider-neutral browser-fetch transport nằm giữa direct HTTP và headless UI cho các browserless-capable account. Transport này dùng cùng P4 BrowserRuntime/CDP lifecycle, có health resource riêng và reuse stream commit/cancellation semantics. Qwen chạy fetch/SSE trong authenticated browser origin mà không bypass WAF/CAPTCHA; Gemini chỉ dùng browser-fetch ở feasibility subset giữ được semantics, còn selected-model/native-thread/tool/multimodal trường hợp chưa verified sẽ typed-fallback trước commit sang headless UI. Deterministic fake-CDP acceptance kiểm buffered, incremental stream, cancellation, invisible launch, adapter isolation và compatibility với UI streaming cũ.
 
-**P5 DONE / VERIFIED trên working branch only. P6 chưa bắt đầu.** Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
+P6 đưa auth snapshot thành generation/fingerprint rõ ràng, chỉ thay thế generation sau verified re-auth, giữ valid auth khi re-auth chưa hoàn tất, kiểm auth readiness trước execution và harden Gemini 429/503/throttling bằng bounded account admission. Deterministic 40-request stress được chặn bởi queue/concurrency policy thay vì burst mù lên provider.
+
+P7 tách logical routing khỏi physical transport ownership: Router chọn provider/account/model, AccountRuntime chọn `direct_http -> browser_fetch -> browser_runtime`, route scoring dùng activation cost direct/warm/cold, và canonical local thread tiếp tục được dùng khi provider-native affinity bị bỏ qua do failover. CI khóa `llmgateway-best` qua Gemini→API fallback, `llmgateway-coding` qua Qwen→API fallback và all-candidates-unavailable termination.
+
+P8 deterministic/resource gate tổng hợp WAF, 429/503, auth missing, transport/CDP/page/browser failure, DeepSeek empty/dropped stream, committed partial stream, cancellation, concurrent cold start, idle/LRU reclaim và route exhaustion. Runtime diagnostics/UI có browser running/lease/launch/reclaim metrics, account in-flight/queue/concurrency/generation và activation cost. Live runner cho Gemini/Qwen/DeepSeek đã sẵn sàng và được CI syntax-check, nhưng chưa được tuyên bố PASS vì cần real local authenticated sessions.
+
+**P0-P7 và P8 deterministic/resource đã DONE / VERIFIED trên working branch. Final P8 authenticated live acceptance vẫn PENDING. Initiative vì vậy chưa final DONE / VERIFIED và vẫn chưa có trên `main`. Không merge branch vào `main` nếu chưa có explicit approval.**
 
 ## 18. Open work đáng chú ý
 
