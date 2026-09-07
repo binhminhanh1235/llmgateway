@@ -349,4 +349,31 @@ assert all(row[2] > 0 for row in rows), rows
 db.close()
 PY
 
+# P7: canonical local thread context must survive a provider/account switch.
+# Start on Gemini, disable that logical candidate, then continue the same thread
+# through the API fallback. The fake API encodes the number of received messages
+# in its answer, which proves the fallback received reconstructed local history.
+THREAD_C=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${JSON[@]}"   -d '{"title":"Canonical failover","model":"llmgateway-auto"}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+curl -fsS -D /tmp/affinity-c1.headers -o /tmp/affinity-c1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_C/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"canonical-before-failover","stream":false}'
+grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-c1.headers
+
+DISABLE_GEMINI=$(curl -fsS -X PATCH   http://127.0.0.1:7331/_llmgateway/browser-account-setup/gemini-affinity   "${AUTH[@]}" "${JSON[@]}" -d '{"enabled":false}')
+printf '%s' "$DISABLE_GEMINI" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["enabled"] is False, x'
+
+curl -fsS -D /tmp/affinity-c2.headers -o /tmp/affinity-c2.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_C/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"canonical-after-failover","stream":false}'
+grep -qi '^x-llmgateway-route: api-route' /tmp/affinity-c2.headers
+python3 <<'PY'
+import json
+with open("/tmp/affinity-c2.json", encoding="utf-8") as f:
+    body = json.load(f)
+content = body["choices"][0]["message"]["content"]
+assert content.startswith("fake reply messages="), body
+count = int(content.rsplit("=", 1)[1])
+assert count >= 3, body
+PY
+
+ENABLE_GEMINI=$(curl -fsS -X PATCH   http://127.0.0.1:7331/_llmgateway/browser-account-setup/gemini-affinity   "${AUTH[@]}" "${JSON[@]}" -d '{"enabled":true}')
+printf '%s' "$ENABLE_GEMINI" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["enabled"] is True, x'
+
 echo "provider conversation affinity smoke passed"
