@@ -31,7 +31,7 @@ database_url = "sqlite://data/llmgateway.db"
 enabled = false
 profile_root = "$PROFILE_ROOT"
 [chromium]
-enabled = false
+enabled = true
 executable = "$FAKE_CHROMIUM"
 startup_timeout_seconds = 5
 auto_recover = true
@@ -300,7 +300,10 @@ import json,sys
 x=json.load(sys.stdin)
 assert x["authenticated"] is True, x
 assert x["ready_match"] == "https://chat.qwen.ai/", x
+assert x["browser_closed_after_capture"] is True, x
+assert x["status"]["running"] is False, x
 '
+BROWSER_PID=""
 
 READY_ROUTE=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain   "${AUTH[@]}" "${JSON[@]}"   -d '{"model":"llmgateway-auto","body":{"messages":[{"role":"user","content":"after login"}]}}')
 printf '%s' "$READY_ROUTE" | python3 -c '
@@ -309,7 +312,8 @@ x=json.load(sys.stdin)
 assert x["selected_route"] == "qwen-ci-route", x
 b=next(c for c in x["candidates"] if c["route_id"] == "qwen-ci-route")
 assert b["eligible"] is True, b
-assert b["readiness"]["browser_adapter_status"] == "ready", b
+assert b["readiness"]["browser_ready"] is True, b
+assert b["readiness"]["browser_session_status"] == "ready", b
 '
 
 curl -fsS -D /tmp/llmgateway-browser-account-ux-browser.headers   -o /tmp/llmgateway-browser-account-ux-browser.json   -X POST http://127.0.0.1:7331/v1/chat/completions   "${AUTH[@]}" "${JSON[@]}"   -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"browser hot route"}]}'
@@ -319,6 +323,15 @@ import json,sys
 with open(sys.argv[1], encoding="utf-8") as f: x=json.load(f)
 assert x["choices"][0]["message"]["content"] == "browser-hot-ok", x
 PY
+
+STATUS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/qwen-ci/driver/status "${AUTH[@]}")
+printf '%s' "$STATUS" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["running"] is True, x
+assert x["debugger_reachable"] is True, x
+'
+BROWSER_PID=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"] or "")')
 
 DISABLE=$(curl -fsS -X PATCH   http://127.0.0.1:7331/_llmgateway/browser-account-setup/qwen-ci   "${AUTH[@]}" "${JSON[@]}" -d '{"enabled":false}')
 printf '%s' "$DISABLE" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["enabled"] is False and x["restart_required"] is False, x'
