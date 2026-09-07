@@ -7,7 +7,7 @@ Working branch:
 `feat/provider-runtime-fabric`
 
 Status:
-`P0 DONE / VERIFIED — initiative remains NOT ON MAIN`
+`P0 + P1 DONE / VERIFIED — initiative remains NOT ON MAIN`
 
 ## 1. Goal
 
@@ -535,7 +535,7 @@ P0 verification — 2026-09-07:
 - legacy outward semantics remain preserved through the typed `GatewayError::Classified { failure, source }` compatibility wrapper, including `model_binding_conflict` HTTP 409, browser session/transport/adapter/model errors, and `model_recipe_stale`;
 - regression coverage verifies safe pre-commit fallback, no silent fallback after client-visible commit, cancellation after commit, bounded execution budget, non-retry stale recipes, and non-retry/no-health-mutation model-binding conflicts.
 
-**P0 is DONE / VERIFIED on the working branch only. P1 has not started. The Provider Runtime Fabric initiative is still NOT ON MAIN and must not be described as shipped.**
+**P0 is DONE / VERIFIED on the working branch only. The Provider Runtime Fabric initiative is still NOT ON MAIN and must not be described as shipped.**
 
 ### P1 — Runtime Health Graph & Breakers
 
@@ -552,6 +552,21 @@ Acceptance:
 - direct transport failure can be excluded while same logical account/model remains usable through another transport;
 - half-open probe concurrency is bounded;
 - recovery cannot flap immediately to top priority.
+
+P1 verification — 2026-09-07:
+
+- verified code head: `9b351c707ed99fc3f3383987dc4f68bcd2eb1164`;
+- full CI: run #1908 / `34074083568` — SUCCESS;
+- Linux job `101596735767` — SUCCESS, including `cargo fmt --all -- --check`, `RUSTFLAGS="-D warnings" cargo check --all-targets`, `cargo clippy --all-targets`, `cargo test --all-targets`, the full routing/browser/streaming/execution-trace smoke chain, and Docker build;
+- Windows job `101596735884` — SUCCESS, including PowerShell validation, `cargo check --all-targets`, `cargo test --all-targets`, and Chromium-driver Windows smoke;
+- shared provider-neutral `RuntimeHealthGraph` now tracks account/transport/session health with CLOSED/OPEN/HALF_OPEN breaker state;
+- breaker recovery uses bounded HALF_OPEN concurrency, exponential cooldown with deterministic jitter, and two-success hysteresis before returning to CLOSED;
+- browser-backed accounts isolate `direct_http` health from `browser_runtime`, so a broken direct transport does not automatically disable the same logical account/model while browser transport remains healthy;
+- account-scoped failures such as 429 continue to preserve existing route-cooldown semantics, while transport/session/provider-scoped failures no longer unnecessarily lock the whole logical route;
+- Router consumes only provider-neutral runtime-health snapshots and structured failure scopes; production Gateway/Router/runtime-health code does not contain provider-specific Qwen/Gemini/DeepSeek/WAF/CDP parsing;
+- regression coverage locks transport isolation, bounded half-open probes, hysteresis, exponential cooldown+jitter, scoped cooldown compatibility, and route-explain compatibility.
+
+**P1 is DONE / VERIFIED on the working branch only. P2 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
 
 ### P2 — Account Runtime & Admission Control
 

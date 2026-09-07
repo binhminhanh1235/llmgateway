@@ -392,7 +392,27 @@ Main hiện có:
 
 P1 Agent Control API, P2 MCP server và P3 capability-based Agent Routing vẫn là **planned**, chưa được mô tả là shipped.
 
-## 17. Open work đáng chú ý
+## 17. Provider Runtime Fabric
+
+Provider Runtime Fabric đang được phát triển trên branch `feat/provider-runtime-fabric` và **chưa có trên `main`**.
+
+Baseline:
+
+- `f85e54b8741a8a184bdc84b142c8b770adee29c0`.
+
+Đã verified trên working branch:
+
+- P0 Execution Contract Foundation — DONE / VERIFIED;
+- P1 Runtime Health Graph & Breakers — DONE / VERIFIED tại `9b351c707ed99fc3f3383987dc4f68bcd2eb1164`;
+- exact-head CI #1908 / run `34074083568` — PASS;
+- Linux job `101596735767` — PASS full Rust checks/tests, smoke chain và Docker;
+- Windows job `101596735884` — PASS check/tests/Chromium-driver smoke.
+
+P1 hiện có provider-neutral runtime health graph theo account/transport/session, breaker CLOSED/OPEN/HALF_OPEN, bounded half-open probe, exponential cooldown + jitter, hysteresis và transport isolation. Browser-backed account có thể quarantine `direct_http` mà không tự động làm mất `browser_runtime` khỏe. Account-scoped failure vẫn giữ route cooldown compatibility.
+
+P2 Account Runtime & Admission Control **chưa bắt đầu**. Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
+
+## 18. Open work đáng chú ý
 
 Tại thời điểm audit repository còn các tracking/PR mở liên quan tới:
 
@@ -403,7 +423,7 @@ Tại thời điểm audit repository còn các tracking/PR mở liên quan tớ
 
 Trạng thái issue/PR là tracking signal, không luôn đồng nghĩa code chưa tồn tại. Một số thay đổi có thể đã cherry-pick/merge theo commit khác trong khi PR cũ vẫn còn mở.
 
-## 18. Điểm cần tiếp tục chuẩn hóa
+## 19. Điểm cần tiếp tục chuẩn hóa
 
 Các điểm tài liệu/versioning nên tiếp tục xử lý ở release kế tiếp:
 
@@ -414,7 +434,7 @@ Các điểm tài liệu/versioning nên tiếp tục xử lý ở release kế 
 5. cập nhật roadmap theo release number thực tế sau khi các gate trên hoàn tất;
 6. thêm release artifacts/installation policy khi bước production distribution bắt đầu.
 
-## 19. Source of truth
+## 20. Source of truth
 
 Ưu tiên theo thứ tự:
 
