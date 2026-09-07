@@ -28,11 +28,13 @@ impl AnthropicProtocolContext {
         Self { version, betas }
     }
 
+    #[cfg(test)]
     pub fn beta_enabled(&self, beta: &str) -> bool {
         self.betas.iter().any(|value| value == beta)
     }
 }
 
+#[cfg(test)]
 pub fn to_openai_request(body: &Value) -> Result<(String, Value), String> {
     to_openai_request_with_protocol(body, None, &[])
 }
