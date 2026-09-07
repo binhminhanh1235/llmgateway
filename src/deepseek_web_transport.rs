@@ -2365,9 +2365,8 @@ mod tests {
                         response_message_id: Some(1),
                         ..Default::default()
                     };
-                    let failure = DeepSeekAttemptFailure::Retryable(
-                        empty.validate_completion().unwrap_err(),
-                    );
+                    let failure =
+                        DeepSeekAttemptFailure::Retryable(empty.validate_completion().unwrap_err());
                     assert!(should_retry_fresh_session(false, false, &failure));
                     lease.mark_dirty();
                     let stale_epoch = lease.epoch();
