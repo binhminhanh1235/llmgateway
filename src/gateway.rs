@@ -1083,7 +1083,7 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
             let rendered = format!(
                 "browser adapter incompatible for account '{account_id}' ({code}): {message}"
             );
-            if code == "model_binding_conflict" {
+            if failure.class == FailureClass::SessionStateDesync {
                 GatewayError::ModelBindingConflict(rendered)
             } else {
                 GatewayError::BrowserAdapterIncompatible(rendered)
@@ -1414,7 +1414,9 @@ fn failure_outcome(error: &GatewayError, failure: &ExecutionFailure) -> &'static
         | FailureClass::HumanActionRequired => "authentication_error",
         FailureClass::SessionBusy => "browser_session_unavailable",
         FailureClass::ModelRecipeStale => "model_recipe_stale",
-        FailureClass::SessionStateDesync if is_model_binding_conflict(error) => {
+        FailureClass::SessionStateDesync
+            if matches!(error, GatewayError::ModelBindingConflict(_)) =>
+        {
             "model_binding_conflict"
         }
         FailureClass::ModelUnavailable => match error {
