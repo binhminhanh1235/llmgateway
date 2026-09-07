@@ -57,17 +57,6 @@ pub enum RuntimeTransport {
     BrowserHttp,
 }
 
-impl RuntimeTransport {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::DirectHttp => "direct_http",
-            Self::BrowserFetch => "browser_fetch",
-            Self::BrowserRuntime => "browser_runtime",
-            Self::BrowserHttp => "browser_http",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BrowserTransportPlanInput {
     pub direct_ready: bool,
