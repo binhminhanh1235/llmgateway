@@ -2136,17 +2136,17 @@ impl BrowserProviderRegistry {
         let allow_browser_fetch = binding.transport_mode != BrowserTransportMode::BrowserOnly
             && browser_adapter.is_cdp()
             && browser_adapter.supports_browser_fetch();
-        let transport_plan = self
-            .account_runtimes
-            .plan_browser_transports(BrowserTransportPlanInput {
-                direct_ready: direct_snapshot_ready,
-                browser_fetch_supported: allow_browser_fetch,
-                browser_runtime_available: browser_runtime_available(),
-                browser_runtime_warm: browser_runtime::get()
-                    .is_some_and(|runtime| runtime.is_running(&binding.session)),
-                browser_adapter_is_cdp: browser_adapter.is_cdp(),
-                browser_only: binding.transport_mode == BrowserTransportMode::BrowserOnly,
-            });
+        let transport_plan =
+            self.account_runtimes
+                .plan_browser_transports(BrowserTransportPlanInput {
+                    direct_ready: direct_snapshot_ready,
+                    browser_fetch_supported: allow_browser_fetch,
+                    browser_runtime_available: browser_runtime_available(),
+                    browser_runtime_warm: browser_runtime::get()
+                        .is_some_and(|runtime| runtime.is_running(&binding.session)),
+                    browser_adapter_is_cdp: browser_adapter.is_cdp(),
+                    browser_only: binding.transport_mode == BrowserTransportMode::BrowserOnly,
+                });
         let primary_transport = transport_plan.ordered.first().copied();
 
         let result = if primary_transport == Some(RuntimeTransport::DirectHttp) {
