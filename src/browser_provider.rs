@@ -1,5 +1,8 @@
 use crate::{
-    account_runtime::{AccountRuntimeRegistry, AccountRuntimeSnapshot, ProviderRuntimePolicy},
+    account_runtime::{
+        AccountRuntimeRegistry, AccountRuntimeSnapshot, BrowserTransportPlanInput,
+        ProviderRuntimePolicy, RuntimeTransport,
+    },
     browser_auth_runtime, browser_runtime, browser_session_runtime,
     chatgpt_web_transport::ChatGptWebHttpAdapter,
     chromium_driver_runtime,
@@ -2133,8 +2136,20 @@ impl BrowserProviderRegistry {
         let allow_browser_fetch = binding.transport_mode != BrowserTransportMode::BrowserOnly
             && browser_adapter.is_cdp()
             && browser_adapter.supports_browser_fetch();
+        let transport_plan = self
+            .account_runtimes
+            .plan_browser_transports(BrowserTransportPlanInput {
+                direct_ready: direct_snapshot_ready,
+                browser_fetch_supported: allow_browser_fetch,
+                browser_runtime_available: browser_runtime_available(),
+                browser_runtime_warm: browser_runtime::get()
+                    .is_some_and(|runtime| runtime.is_running(&binding.session)),
+                browser_adapter_is_cdp: browser_adapter.is_cdp(),
+                browser_only: binding.transport_mode == BrowserTransportMode::BrowserOnly,
+            });
+        let primary_transport = transport_plan.ordered.first().copied();
 
-        let result = if direct_snapshot_ready {
+        let result = if primary_transport == Some(RuntimeTransport::DirectHttp) {
             let direct = direct_adapter.expect("direct adapter checked above");
             used_adapter = direct.clone();
             used_transport = "direct_http";
@@ -2241,7 +2256,10 @@ impl BrowserProviderRegistry {
             } else {
                 direct_result
             }
-        } else if browser_adapter.is_cdp() {
+        } else if matches!(
+            primary_transport,
+            Some(RuntimeTransport::BrowserFetch) | Some(RuntimeTransport::BrowserRuntime)
+        ) {
             if let Some(execution_guard) = self
                 .ensure_account_cdp_session_ready(provider, account, &binding)
                 .await
@@ -2267,10 +2285,11 @@ impl BrowserProviderRegistry {
                     session_id: binding.session.clone(),
                 })
             }
-        } else {
+        } else if primary_transport == Some(RuntimeTransport::BrowserHttp) {
             // Non-CDP browser bridges do not own a managed Chromium process.
             // Preserve the pre-P4 compatibility boundary and execute them without
             // acquiring a browser-runtime lease.
+            used_transport = "browser_http";
             self.execute_transport(
                 provider,
                 account,
@@ -2282,6 +2301,11 @@ impl BrowserProviderRegistry {
                 BrowserAdapterOperation::Chat,
             )
             .await
+        } else {
+            Err(BrowserProviderError::SessionUnavailable {
+                account_id: account.id.clone(),
+                session_id: binding.session.clone(),
+            })
         };
 
         match &result {
