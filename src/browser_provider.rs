@@ -2067,7 +2067,11 @@ fn wrap_response_with_browser_guard(
             match chunk {
                 Ok(bytes) => yield Ok::<Bytes, std::io::Error>(bytes),
                 Err(error) => {
-                    yield Err(std::io::Error::other(error.to_string()));
+                    // Preserve the reqwest error as the I/O error source. The Gateway's
+                    // provider-neutral stream tracer walks the source chain so browser
+                    // adapter failures remain actionable instead of collapsing to
+                    // "error decoding response body" after this lease wrapper.
+                    yield Err(std::io::Error::other(error));
                     break;
                 }
             }
