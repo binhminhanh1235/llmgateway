@@ -331,7 +331,20 @@ pub async fn anthropic_messages(
         Ok(access) => access,
         Err(response) => return response,
     };
-    let (requested_model, mut openai_body) = match anthropic::to_openai_request(&body) {
+    let anthropic_version = headers
+        .get("anthropic-version")
+        .and_then(|value| value.to_str().ok());
+    let anthropic_beta_values = headers
+        .get_all("anthropic-beta")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let (requested_model, mut openai_body) = match anthropic::to_openai_request_with_protocol(
+        &body,
+        anthropic_version,
+        &anthropic_beta_values,
+    ) {
         Ok(value) => value,
         Err(message) => {
             return json_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message)
