@@ -369,11 +369,33 @@ impl BrowserAuthVault {
 fn auth_material_equivalent(left: &BrowserAuthMaterial, right: &BrowserAuthMaterial) -> bool {
     left.session_id == right.session_id
         && left.provider == right.provider
-        && left.source_url == right.source_url
         && left.user_agent == right.user_agent
-        && left.cookies == right.cookies
+        && normalized_auth_cookies(left) == normalized_auth_cookies(right)
         && left.local_storage == right.local_storage
         && left.session_storage == right.session_storage
+}
+
+fn normalized_auth_cookies(
+    material: &BrowserAuthMaterial,
+) -> Vec<(String, String, String, String, u64, bool, bool, Option<String>)> {
+    let mut cookies = material
+        .cookies
+        .iter()
+        .map(|cookie| {
+            (
+                cookie.name.clone(),
+                cookie.value.clone(),
+                cookie.domain.clone(),
+                cookie.path.clone(),
+                cookie.expires.to_bits(),
+                cookie.http_only,
+                cookie.secure,
+                cookie.same_site.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    cookies.sort();
+    cookies
 }
 
 fn load_or_create_key(path: &Path) -> Result<[u8; 32], BrowserAuthVaultError> {
@@ -555,21 +577,35 @@ mod tests {
             "gemini-web",
             "https://gemini.google.com/app",
             "test-agent",
-            vec![BrowserAuthCookie {
-                name: "__Secure-1PSID".into(),
-                value: "same".into(),
-                domain: ".google.com".into(),
-                path: "/".into(),
-                expires: 0.0,
-                http_only: true,
-                secure: true,
-                same_site: None,
-            }],
+            vec![
+                BrowserAuthCookie {
+                    name: "session-primary".into(),
+                    value: "same".into(),
+                    domain: ".google.com".into(),
+                    path: "/".into(),
+                    expires: 0.0,
+                    http_only: true,
+                    secure: true,
+                    same_site: None,
+                },
+                BrowserAuthCookie {
+                    name: "session-secondary".into(),
+                    value: "stable".into(),
+                    domain: ".google.com".into(),
+                    path: "/".into(),
+                    expires: 1234.0,
+                    http_only: false,
+                    secure: true,
+                    same_site: Some("Lax".into()),
+                },
+            ],
             BTreeMap::new(),
             BTreeMap::new(),
         );
         let first = vault.store_if_current(&material, 0).unwrap();
         let mut recaptured = material.clone();
+        recaptured.source_url = "https://gemini.google.com/app/another-page".into();
+        recaptured.cookies.reverse();
         recaptured.captured_at = "2099-01-01T00:00:00Z".into();
         let second = vault
             .store_if_current(&recaptured, first.generation)

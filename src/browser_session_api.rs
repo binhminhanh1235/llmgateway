@@ -63,13 +63,6 @@ pub async fn begin_browser_login(
     let Some(store) = store() else {
         return unavailable();
     };
-    if let Some(Err(error)) = browser_auth_runtime::invalidate(&session_id) {
-        return json_error(
-            StatusCode::CONFLICT,
-            "browser_auth_generation_error",
-            &error.to_string(),
-        );
-    }
     invalidate_session_lifecycle(&session_id);
     match store.begin_login(&session_id).await {
         Ok(login) => json_response(StatusCode::OK, json!(login), None),
