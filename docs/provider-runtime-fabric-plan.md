@@ -819,7 +819,17 @@ Acceptance runners:
 - `scripts/smoke-provider-runtime-fabric.sh` composes deterministic fault/resource suites into one local gate;
 - `scripts/live-deepseek-provider-runtime.sh` provides conservative authenticated DeepSeek acceptance;
 - `scripts/live-provider-runtime-fabric.sh` composes authenticated Gemini, Qwen and DeepSeek acceptance and verifies no leaked browser processes, browser leases, account in-flight work or queued work at completion;
+- omitted account ids are auto-discovered only when exactly one enabled authenticated ready/degraded account exists for the corresponding provider kind; ambiguous or missing accounts fail closed and require an explicit id;
+- `--evidence <path>` writes a credential-free JSON PASS record containing the selected accounts, browser runtime metrics and final account admission state;
 - all new live runners are syntax-validated in CI and intentionally do not bypass CAPTCHA, WAF, provider throttling or other anti-abuse controls.
+
+Final local command when the three provider sessions are already authenticated:
+
+```bash
+LLMGATEWAY_API_KEY=llmgateway \
+  bash scripts/live-provider-runtime-fabric.sh \
+  --evidence provider-runtime-live-evidence.json
+```
 
 The final authenticated live run requires real local provider sessions and therefore is **not claimed as executed by CI**. Until that gate passes with real Gemini/Qwen/DeepSeek accounts, P8 is not final-live VERIFIED and the overall initiative must not be described as fully DONE / VERIFIED or shipped.
 
