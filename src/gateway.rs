@@ -1189,25 +1189,14 @@ fn selected_transport_label(provider: &ProviderConfig) -> &'static str {
 
 fn normalized_status_failure(
     status: StatusCode,
-    body: &str,
+    _body: &str,
     provider: &str,
     account_id: &str,
     model: &str,
     transport: &str,
     browser_provider: bool,
 ) -> ExecutionFailure {
-    let lower = body.to_ascii_lowercase();
-    let failure = if lower.contains("aliyun_waf_aa") || lower.contains("upstream_waf_rejected") {
-        ExecutionFailure::new(
-            FailureClass::WafRejected,
-            true,
-            ReplaySafety::Safe,
-            ExecutionPhase::Submitted,
-            FailureScope::Transport,
-            "upstream rejected the selected transport",
-        )
-    } else {
-        match status.as_u16() {
+    let mut failure = match status.as_u16() {
             401 | 403 => ExecutionFailure::new(
                 FailureClass::AuthExpired,
                 true,
@@ -1264,10 +1253,9 @@ fn normalized_status_failure(
                 FailureScope::Request,
                 "upstream rejected the request",
             ),
-        }
-    };
+        };
 
-    let mut failure = failure
+    failure = failure
         .with_context(provider, account_id, model, transport)
         .with_cooldown(cooldown_for(status));
     if browser_provider && matches!(status.as_u16(), 401 | 403) {
