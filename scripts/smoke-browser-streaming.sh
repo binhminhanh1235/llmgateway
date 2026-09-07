@@ -35,7 +35,7 @@ enabled = false
 profile_root = "$PROFILE_ROOT"
 
 [chromium]
-enabled = false
+enabled = true
 executable = "$FAKE_CHROMIUM"
 startup_timeout_seconds = 5
 auto_recover = true
@@ -108,6 +108,15 @@ PROFILE_DIR=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.lo
 export PROFILE_DIR
 
 curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/qwen-stream/driver/verify   "${AUTH[@]}" >/tmp/llmgateway-browser-streaming-verify.json
+python3 - /tmp/llmgateway-browser-streaming-verify.json <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    verify=json.load(f)
+assert verify["authenticated"] is True, verify
+assert verify["browser_closed_after_capture"] is True, verify
+assert verify["status"]["running"] is False, verify
+PY
+BROWSER_PID=""
 
 python3 <<'PY'
 import http.client
