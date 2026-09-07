@@ -4,7 +4,47 @@ use serde_json::{json, Map, Value};
 use std::{collections::BTreeMap, convert::Infallible};
 use uuid::Uuid;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnthropicProtocolContext {
+    pub version: Option<String>,
+    pub betas: Vec<String>,
+}
+
+impl AnthropicProtocolContext {
+    pub fn from_headers(version: Option<&str>, beta_values: &[String]) -> Self {
+        let version = version
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let mut betas = Vec::new();
+        for value in beta_values {
+            for beta in value.split(',') {
+                let beta = beta.trim();
+                if !beta.is_empty() && !betas.iter().any(|existing| existing == beta) {
+                    betas.push(beta.to_string());
+                }
+            }
+        }
+        Self { version, betas }
+    }
+
+    pub fn beta_enabled(&self, beta: &str) -> bool {
+        self.betas.iter().any(|value| value == beta)
+    }
+}
+
 pub fn to_openai_request(body: &Value) -> Result<(String, Value), String> {
+    to_openai_request_with_protocol(body, None, &[])
+}
+
+pub fn to_openai_request_with_protocol(
+    body: &Value,
+    anthropic_version: Option<&str>,
+    anthropic_beta_values: &[String],
+) -> Result<(String, Value), String> {
+    let _protocol =
+        AnthropicProtocolContext::from_headers(anthropic_version, anthropic_beta_values);
+
     let requested_model = body
         .get("model")
         .and_then(Value::as_str)
@@ -20,8 +60,11 @@ pub fn to_openai_request(body: &Value) -> Result<(String, Value), String> {
     }
 
     if let Some(input_messages) = body.get("messages").and_then(Value::as_array) {
-        for message in input_messages {
-            translate_message(message, &mut messages)?;
+        for (index, message) in input_messages.iter().enumerate() {
+            let has_later_user = input_messages[index + 1..]
+                .iter()
+                .any(|later| later.get("role").and_then(Value::as_str) == Some("user"));
+            translate_message(message, &mut messages, has_later_user)?;
         }
     }
 
@@ -64,8 +107,19 @@ pub fn to_openai_request(body: &Value) -> Result<(String, Value), String> {
         if let Some(mapped) = translate_tool_choice(choice) {
             out.insert("tool_choice".into(), mapped);
         }
+        if choice
+            .get("disable_parallel_tool_use")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            out.insert("parallel_tool_calls".into(), Value::Bool(false));
+        }
     }
 
+    // Anthropic-only advisory/request-extension fields such as thinking,
+    // cache_control, metadata, output_config and unknown beta fields are
+    // intentionally consumed/ignored at this boundary instead of forwarded
+    // to providers that do not implement Anthropic protocol extensions.
     Ok((requested_model, Value::Object(out)))
 }
 
@@ -342,12 +396,30 @@ fn event(name: &str, data: Value) -> Bytes {
     Bytes::from(format!("event: {name}\ndata: {}\n\n", data))
 }
 
-fn translate_message(message: &Value, out: &mut Vec<Value>) -> Result<(), String> {
+fn translate_message(
+    message: &Value,
+    out: &mut Vec<Value>,
+    has_later_user: bool,
+) -> Result<(), String> {
     let role = message
         .get("role")
         .and_then(Value::as_str)
         .ok_or("message is missing role")?;
     let content = message.get("content").unwrap_or(&Value::Null);
+
+    if role == "system" {
+        let cleared = message
+            .get("clear_at")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "next_user_message" && has_later_user);
+        let text = if cleared {
+            String::new()
+        } else {
+            content_to_text(content)
+        };
+        out.push(json!({"role":"system","content":text}));
+        return Ok(());
+    }
 
     if role == "assistant" {
         let blocks = content
@@ -459,6 +531,7 @@ fn translate_tool_choice(choice: &Value) -> Option<Value> {
             "type":"function",
             "function":{"name":choice.get("name")?.clone()}
         })),
+        Some("none") => Some(Value::String("none".into())),
         _ => None,
     }
 }
@@ -526,4 +599,170 @@ mod tests {
         );
         assert_eq!(openai["messages"][1]["role"], "tool");
     }
+
+    #[test]
+    fn translates_top_level_system_before_user() {
+        let request = json!({
+            "model":"deepseek-web/deepseek-web-default",
+            "system":"You are Claude Code.",
+            "messages":[{"role":"user","content":"hello"}]
+        });
+        let (_, openai) = to_openai_request(&request).unwrap();
+        assert_eq!(openai["messages"][0], json!({"role":"system","content":"You are Claude Code."}));
+        assert_eq!(openai["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn preserves_mid_conversation_system_order() {
+        let request = json!({
+            "model":"gemini-web/gemini-web-flash",
+            "messages":[
+                {"role":"user","content":"first"},
+                {"role":"system","content":"new operator instruction"},
+                {"role":"user","content":"second"}
+            ]
+        });
+        let (_, openai) = to_openai_request(&request).unwrap();
+        let roles = openai["messages"].as_array().unwrap().iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, vec!["user", "system", "user"]);
+        assert_eq!(openai["messages"][1]["content"], "new operator instruction");
+    }
+
+    #[test]
+    fn translates_system_content_block_array_and_ignores_cache_control() {
+        let request = json!({
+            "model":"llmgateway-coding",
+            "messages":[{
+                "role":"system",
+                "content":[
+                    {"type":"text","text":"first","cache_control":{"type":"ephemeral"}},
+                    {"type":"text","text":"second"}
+                ]
+            }]
+        });
+        let (_, openai) = to_openai_request(&request).unwrap();
+        assert_eq!(openai["messages"][0], json!({"role":"system","content":"first\nsecond"}));
+    }
+
+    #[test]
+    fn clears_turn_scoped_system_after_later_user_without_reordering() {
+        let request = json!({
+            "model":"llmgateway-coding",
+            "messages":[
+                {"role":"user","content":"turn one"},
+                {"role":"system","clear_at":"next_user_message","content":"only next turn"},
+                {"role":"user","content":"turn two"}
+            ]
+        });
+        let (_, openai) = to_openai_request(&request).unwrap();
+        assert_eq!(openai["messages"][1], json!({"role":"system","content":""}));
+        assert_eq!(openai["messages"][2]["content"][0]["text"], "turn two");
+    }
+
+    #[test]
+    fn keeps_active_turn_scoped_system_when_no_later_user_exists() {
+        let request = json!({
+            "model":"llmgateway-coding",
+            "messages":[
+                {"role":"user","content":"turn one"},
+                {"role":"system","clear_at":"next_user_message","content":"apply now"}
+            ]
+        });
+        let (_, openai) = to_openai_request(&request).unwrap();
+        assert_eq!(openai["messages"][1], json!({"role":"system","content":"apply now"}));
+    }
+
+    #[test]
+    fn accepts_effort_only_system_and_optional_beta_fields() {
+        let request = json!({
+            "model":"llmgateway-coding",
+            "thinking":{"type":"adaptive"},
+            "output_config":{"effort":"high"},
+            "cache_control":{"type":"ephemeral"},
+            "metadata":{"user_id":"claude-code"},
+            "future_beta":{"enabled":true},
+            "messages":[
+                {"role":"user","content":"plan"},
+                {"role":"system","content":[],"output_config":{"effort":"low"}},
+                {"role":"user","content":"summarize"}
+            ]
+        });
+        let (_, openai) = to_openai_request(&request).unwrap();
+        assert_eq!(openai["messages"][1], json!({"role":"system","content":""}));
+        assert!(openai.get("thinking").is_none());
+        assert!(openai.get("output_config").is_none());
+        assert!(openai.get("future_beta").is_none());
+    }
+
+    #[test]
+    fn system_tools_tool_result_and_tool_choice_normalize_together() {
+        let request = json!({
+            "model":"llmgateway-coding",
+            "messages":[
+                {"role":"system","content":"Use tools when needed."},
+                {"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{"path":"a.rs"}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"hello"}]}]}
+            ],
+            "tools":[{"name":"read_file","input_schema":{"type":"object"}}],
+            "tool_choice":{"type":"auto","disable_parallel_tool_use":true}
+        });
+        let (_, openai) = to_openai_request(&request).unwrap();
+        assert_eq!(openai["messages"][0]["role"], "system");
+        assert_eq!(openai["messages"][1]["tool_calls"][0]["function"]["name"], "read_file");
+        assert_eq!(openai["messages"][2]["role"], "tool");
+        assert_eq!(openai["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn streaming_system_request_is_accepted() {
+        let request = json!({
+            "model":"llmgateway-coding",
+            "stream":true,
+            "system":[{"type":"text","text":"stream safely"}],
+            "messages":[{"role":"user","content":"hello"}]
+        });
+        let (_, openai) = to_openai_request(&request).unwrap();
+        assert_eq!(openai["stream"], true);
+        assert_eq!(openai["messages"][0]["role"], "system");
+    }
+
+    #[test]
+    fn parses_anthropic_protocol_headers_without_rejecting_unknown_betas() {
+        let betas = vec![
+            "mid-conversation-output-config-2026-07-01, future-beta-2099-01-01".to_string(),
+            "mid-conversation-system-clear-at-2026-08-21".to_string(),
+        ];
+        let protocol = AnthropicProtocolContext::from_headers(Some("2023-06-01"), &betas);
+        assert_eq!(protocol.version.as_deref(), Some("2023-06-01"));
+        assert!(protocol.beta_enabled("mid-conversation-output-config-2026-07-01"));
+        assert!(protocol.beta_enabled("mid-conversation-system-clear-at-2026-08-21"));
+        assert!(protocol.beta_enabled("future-beta-2099-01-01"));
+    }
+
+    #[test]
+    fn accepts_claude_code_like_fixture() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../fixtures/claude-code-messages.json")).unwrap();
+        let headers = fixture["headers"].as_object().unwrap();
+        let version = headers.get("anthropic-version").and_then(Value::as_str);
+        let beta_values = headers.get("anthropic-beta").and_then(Value::as_array).unwrap().iter()
+            .filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+        let (_, openai) =
+            to_openai_request_with_protocol(&fixture["body"], version, &beta_values).unwrap();
+        assert_eq!(openai["stream"], true);
+        assert_eq!(openai["tool_choice"], "auto");
+        assert_eq!(openai["parallel_tool_calls"], false);
+        let roles = openai["messages"].as_array().unwrap().iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            roles,
+            vec!["system", "user", "assistant", "tool", "system", "system", "user"]
+        );
+        assert_eq!(openai["messages"][4]["content"], "");
+        assert_eq!(openai["messages"][5]["content"], "");
+    }
+
 }
