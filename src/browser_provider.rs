@@ -564,13 +564,11 @@ fn request_requires_tool_calls(body: &Value) -> bool {
         .get("tools")
         .and_then(Value::as_array)
         .is_some_and(|tools| !tools.is_empty());
-    let tools_disabled = body
-        .get("tool_choice")
-        .is_some_and(|choice| match choice {
-            Value::String(value) => value == "none",
-            Value::Object(object) => object.get("type").and_then(Value::as_str) == Some("none"),
-            _ => false,
-        });
+    let tools_disabled = body.get("tool_choice").is_some_and(|choice| match choice {
+        Value::String(value) => value == "none",
+        Value::Object(object) => object.get("type").and_then(Value::as_str) == Some("none"),
+        _ => false,
+    });
     has_tools && !tools_disabled
 }
 
