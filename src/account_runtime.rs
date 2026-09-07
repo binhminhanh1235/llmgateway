@@ -48,6 +48,43 @@ pub enum BurstBehavior {
     RateSensitive,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeTransport {
+    DirectHttp,
+    BrowserFetch,
+    BrowserRuntime,
+    BrowserHttp,
+}
+
+impl RuntimeTransport {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectHttp => "direct_http",
+            Self::BrowserFetch => "browser_fetch",
+            Self::BrowserRuntime => "browser_runtime",
+            Self::BrowserHttp => "browser_http",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BrowserTransportPlanInput {
+    pub direct_ready: bool,
+    pub browser_fetch_supported: bool,
+    pub browser_runtime_available: bool,
+    pub browser_runtime_warm: bool,
+    pub browser_adapter_is_cdp: bool,
+    pub browser_only: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AccountTransportPlan {
+    pub ordered: Vec<RuntimeTransport>,
+    pub activation_cost: i32,
+    pub activation_reason: &'static str,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderRuntimePolicy {
     pub safe_concurrency: usize,
@@ -657,6 +694,53 @@ impl AccountRuntimeRegistry {
         }
     }
 
+    pub fn plan_browser_transports(
+        &self,
+        input: BrowserTransportPlanInput,
+    ) -> AccountTransportPlan {
+        let mut ordered = Vec::with_capacity(3);
+
+        if input.browser_only {
+            if input.browser_adapter_is_cdp && input.browser_runtime_available {
+                ordered.push(RuntimeTransport::BrowserRuntime);
+            } else if !input.browser_adapter_is_cdp {
+                ordered.push(RuntimeTransport::BrowserHttp);
+            }
+        } else {
+            if input.direct_ready {
+                ordered.push(RuntimeTransport::DirectHttp);
+            }
+            if input.browser_adapter_is_cdp && input.browser_runtime_available {
+                if input.browser_fetch_supported {
+                    ordered.push(RuntimeTransport::BrowserFetch);
+                }
+                ordered.push(RuntimeTransport::BrowserRuntime);
+            } else if !input.browser_adapter_is_cdp {
+                ordered.push(RuntimeTransport::BrowserHttp);
+            }
+        }
+
+        let (activation_cost, activation_reason) = match ordered.first().copied() {
+            Some(RuntimeTransport::DirectHttp) => (0, "direct_http_ready"),
+            Some(RuntimeTransport::BrowserFetch) if input.browser_runtime_warm => {
+                (1, "warm_browser_fetch")
+            }
+            Some(RuntimeTransport::BrowserFetch) => (3, "cold_browser_fetch"),
+            Some(RuntimeTransport::BrowserRuntime) if input.browser_runtime_warm => {
+                (2, "warm_browser_runtime")
+            }
+            Some(RuntimeTransport::BrowserRuntime) => (4, "cold_browser_runtime"),
+            Some(RuntimeTransport::BrowserHttp) => (1, "browser_http_bridge"),
+            None => (100, "no_transport_available"),
+        };
+
+        AccountTransportPlan {
+            ordered,
+            activation_cost,
+            activation_reason,
+        }
+    }
+
     pub async fn single_flight_lifecycle<F, Fut>(
         &self,
         provider: &str,
@@ -721,6 +805,85 @@ mod tests {
         task::JoinHandle,
         time::{sleep, timeout},
     };
+
+    #[test]
+    fn transport_plan_prefers_direct_then_fetch_then_ui() {
+        let registry = AccountRuntimeRegistry::default();
+        let plan = registry.plan_browser_transports(BrowserTransportPlanInput {
+            direct_ready: true,
+            browser_fetch_supported: true,
+            browser_runtime_available: true,
+            browser_runtime_warm: false,
+            browser_adapter_is_cdp: true,
+            browser_only: false,
+        });
+        assert_eq!(
+            plan.ordered,
+            vec![
+                RuntimeTransport::DirectHttp,
+                RuntimeTransport::BrowserFetch,
+                RuntimeTransport::BrowserRuntime,
+            ]
+        );
+        assert_eq!(plan.activation_cost, 0);
+        assert_eq!(plan.activation_reason, "direct_http_ready");
+    }
+
+    #[test]
+    fn browser_only_plan_excludes_direct_and_browser_fetch() {
+        let registry = AccountRuntimeRegistry::default();
+        let plan = registry.plan_browser_transports(BrowserTransportPlanInput {
+            direct_ready: true,
+            browser_fetch_supported: true,
+            browser_runtime_available: true,
+            browser_runtime_warm: true,
+            browser_adapter_is_cdp: true,
+            browser_only: true,
+        });
+        assert_eq!(plan.ordered, vec![RuntimeTransport::BrowserRuntime]);
+        assert_eq!(plan.activation_reason, "warm_browser_runtime");
+    }
+
+    #[test]
+    fn cold_browser_activation_cost_is_higher_than_warm() {
+        let registry = AccountRuntimeRegistry::default();
+        let warm = registry.plan_browser_transports(BrowserTransportPlanInput {
+            direct_ready: false,
+            browser_fetch_supported: true,
+            browser_runtime_available: true,
+            browser_runtime_warm: true,
+            browser_adapter_is_cdp: true,
+            browser_only: false,
+        });
+        let cold = registry.plan_browser_transports(BrowserTransportPlanInput {
+            browser_runtime_warm: false,
+            ..BrowserTransportPlanInput {
+                direct_ready: false,
+                browser_fetch_supported: true,
+                browser_runtime_available: true,
+                browser_runtime_warm: true,
+                browser_adapter_is_cdp: true,
+                browser_only: false,
+            }
+        });
+        assert!(cold.activation_cost > warm.activation_cost);
+    }
+
+    #[test]
+    fn missing_runtime_produces_explicit_empty_plan() {
+        let registry = AccountRuntimeRegistry::default();
+        let plan = registry.plan_browser_transports(BrowserTransportPlanInput {
+            direct_ready: false,
+            browser_fetch_supported: true,
+            browser_runtime_available: false,
+            browser_runtime_warm: false,
+            browser_adapter_is_cdp: true,
+            browser_only: false,
+        });
+        assert!(plan.ordered.is_empty());
+        assert_eq!(plan.activation_cost, 100);
+        assert_eq!(plan.activation_reason, "no_transport_available");
+    }
 
     fn policy(
         safe_concurrency: usize,
