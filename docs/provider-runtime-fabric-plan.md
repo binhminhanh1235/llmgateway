@@ -669,7 +669,7 @@ P4 verification — 2026-09-07:
 - legacy non-CDP `browser-http` bridges remain outside Chromium lifecycle ownership, preserving the pre-P4 compatibility boundary;
 - deterministic smoke coverage verifies invisible post-login closure, headless cold start, conversation affinity, ChatGPT recovery, browser streaming/cancellation, account UX, CDP reliability/restart reuse, routing intelligence and the complete regression chain.
 
-**P4 and P5 are DONE / VERIFIED on the working branch only. P6 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
+**P4 and P5 are DONE / VERIFIED on the working branch only. Later P6-P8 status is recorded in the phase sections below. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
 
 ### P5 — Browser Fetch Transport
 
