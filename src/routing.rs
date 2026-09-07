@@ -910,13 +910,7 @@ impl Router {
             self.runtime_health.release(permit).await;
         } else {
             self.runtime_health
-                .record_failure(
-                    permit,
-                    &affected,
-                    failure.class,
-                    base_cooldown_secs,
-                    error,
-                )
+                .record_failure(permit, &affected, failure.class, base_cooldown_secs, error)
                 .await;
         }
     }

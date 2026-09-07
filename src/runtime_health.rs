@@ -42,12 +42,7 @@ impl RuntimeHealthKey {
         }
     }
 
-    pub fn session(
-        provider: &str,
-        account_id: &str,
-        transport: &str,
-        resource_id: &str,
-    ) -> Self {
+    pub fn session(provider: &str, account_id: &str, transport: &str, resource_id: &str) -> Self {
         Self {
             scope: RuntimeHealthScope::Session,
             provider: provider.to_string(),
@@ -375,7 +370,10 @@ fn unique_keys(keys: &[RuntimeHealthKey]) -> Vec<RuntimeHealthKey> {
 
 fn effective_state(entry: &RuntimeHealthEntry, now: DateTime<Utc>) -> BreakerState {
     if entry.state == BreakerState::Open
-        && entry.retry_at.as_ref().is_some_and(|retry_at| retry_at <= &now)
+        && entry
+            .retry_at
+            .as_ref()
+            .is_some_and(|retry_at| retry_at <= &now)
     {
         BreakerState::HalfOpen
     } else {
@@ -430,7 +428,9 @@ fn exponential_cooldown_with_jitter(
     ));
     let width = span.saturating_mul(2).saturating_add(1) as u64;
     let offset = (hash % width) as i64 - span;
-    capped.saturating_add(offset).clamp(1, max_cooldown_secs.max(1))
+    capped
+        .saturating_add(offset)
+        .clamp(1, max_cooldown_secs.max(1))
 }
 
 fn stable_hash(value: &str) -> u64 {
@@ -457,8 +457,7 @@ mod tests {
     async fn transport_breakers_are_isolated_for_same_logical_account() {
         let graph = RuntimeHealthGraph::default();
         let direct = RuntimeHealthKey::transport("browser-qwen", "account-a", "direct_http");
-        let browser =
-            RuntimeHealthKey::transport("browser-qwen", "account-a", "browser_runtime");
+        let browser = RuntimeHealthKey::transport("browser-qwen", "account-a", "browser_runtime");
         let permit = graph
             .try_acquire_all_at(&[direct.clone()], now())
             .await

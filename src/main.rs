@@ -97,7 +97,6 @@ use execution_trace::ExecutionTraceStore;
 use execution_trace_api::{get_execution, list_executions};
 use gateway::Gateway;
 use live_config::LiveConfig;
-use runtime_health::RuntimeHealthGraph;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
@@ -108,6 +107,7 @@ use model_group_api::{
 use quota_usage::{QuotaUsageStore, UsageConfig};
 use retrieval_api::inspect_thread_retrieval;
 use routing_api::explain_routes;
+use runtime_health::RuntimeHealthGraph;
 use std::{env, net::SocketAddr, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, warn};

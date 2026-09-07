@@ -283,8 +283,12 @@ impl Gateway {
             .timeout(Duration::from_secs(600))
             .build()
             .map_err(|error| GatewayError::Transport(error.to_string()))?;
-        let router =
-            Router::with_runtime_health(config.clone(), live_config.clone(), catalog, runtime_health);
+        let router = Router::with_runtime_health(
+            config.clone(),
+            live_config.clone(),
+            catalog,
+            runtime_health,
+        );
         Ok(Self {
             config,
             live_config,
@@ -566,7 +570,9 @@ impl Gateway {
                 }
             };
             if !budget_tracker.try_begin_attempt() {
-                self.router.release_runtime_health(runtime_health_permit).await;
+                self.router
+                    .release_runtime_health(runtime_health_permit)
+                    .await;
                 last_error = Some(GatewayError::Transport(
                     "execution recovery budget exhausted".into(),
                 ));
@@ -1124,6 +1130,7 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
     while let BrowserProviderError::Classified { source, .. } = legacy {
         legacy = *source;
     }
+    let legacy_text = legacy.to_string();
     let source = match legacy {
         BrowserProviderError::InvalidConfig(_)
         | BrowserProviderError::UnsupportedAdapter(_)
@@ -1131,9 +1138,9 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
         | BrowserProviderError::InvalidTransportPolicy(_)
         | BrowserProviderError::MissingBinding(_)
         | BrowserProviderError::Io(_)
-        | BrowserProviderError::Toml(_) => GatewayError::InvalidConfig(legacy.to_string()),
+        | BrowserProviderError::Toml(_) => GatewayError::InvalidConfig(legacy_text.clone()),
         BrowserProviderError::SessionUnavailable { .. } => {
-            GatewayError::BrowserSessionUnavailable(legacy.to_string())
+            GatewayError::BrowserSessionUnavailable(legacy_text.clone())
         }
         BrowserProviderError::AdapterIncompatible {
             account_id,
@@ -1150,14 +1157,13 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
             }
         }
         BrowserProviderError::ModelUnavailable { .. } => {
-            GatewayError::BrowserModelUnavailable(legacy.to_string())
+            GatewayError::BrowserModelUnavailable(legacy_text.clone())
         }
         BrowserProviderError::ModelRecipeStale { .. } => {
-            GatewayError::BrowserModelRecipeStale(legacy.to_string())
+            GatewayError::BrowserModelRecipeStale(legacy_text.clone())
         }
-        BrowserProviderError::Transport(_)
-        | BrowserProviderError::TransportUnavailable { .. } => {
-            GatewayError::BrowserTransport(legacy.to_string())
+        BrowserProviderError::Transport(_) | BrowserProviderError::TransportUnavailable { .. } => {
+            GatewayError::BrowserTransport(legacy_text)
         }
         BrowserProviderError::Classified { .. } => {
             unreachable!("classified browser provider errors are unwrapped above")
@@ -1177,13 +1183,13 @@ fn apply_auth(
     match account.auth_style.as_str() {
         "bearer" => {
             let value = HeaderValue::from_str(&format!("Bearer {key}"))
-                .map_err(|error| GatewayError::InvalidConfig(legacy.to_string()))?;
+                .map_err(|error| GatewayError::InvalidConfig(legacy_text.clone()))?;
             headers.insert(AUTHORIZATION, value);
         }
         "x-api-key" => {
             let name = HeaderName::from_static("x-api-key");
             let value = HeaderValue::from_str(key)
-                .map_err(|error| GatewayError::InvalidConfig(legacy.to_string()))?;
+                .map_err(|error| GatewayError::InvalidConfig(legacy_text.clone()))?;
             headers.insert(name, value);
         }
         other => {
