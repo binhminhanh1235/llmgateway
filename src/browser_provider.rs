@@ -1869,8 +1869,6 @@ impl BrowserProviderRegistry {
                         browser_adapter.is_cdp(),
                     )
                 });
-            let browser_was_live =
-                safe_fallback_candidate && self.cdp_session_live(&binding.session).await;
             let browser_execution_guard = if safe_fallback_candidate {
                 self.ensure_account_cdp_session_ready(provider, account, &binding)
                     .await
