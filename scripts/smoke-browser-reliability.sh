@@ -6,12 +6,14 @@ export FAKE_API_KEY="healthy"
 export LLMGATEWAY_CONFIG="/tmp/llmgateway-browser-reliability-smoke.toml"
 PROFILE_ROOT="/tmp/llmgateway-browser-reliability-profiles"
 FAKE_CHROMIUM="/tmp/llmgateway-reliability-fake-chromium"
+LAUNCH_LOG="/tmp/llmgateway-reliability-launches.log"
 GATEWAY_PID=""
 BROWSER_PID=""
 BRIDGE_PID=""
 FAKE_PID=""
 
 rm -rf "$PROFILE_ROOT"
+rm -f "$LAUNCH_LOG"
 rm -f data/llmgateway.db data/llmgateway.db-shm data/llmgateway.db-wal
 mkdir -p data
 
@@ -19,6 +21,7 @@ cat >"$FAKE_CHROMIUM" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 profile=""
+printf '%s\n' "$*" >>/tmp/llmgateway-reliability-launches.log
 for arg in "$@"; do
   case "$arg" in
     --user-data-dir=*) profile="${arg#--user-data-dir=}" ;;
@@ -99,6 +102,12 @@ enabled = true
 
 [browser.bindings.browser-account]
 session = "fake-web"
+
+[browser_runtime]
+allow_visible_auto_launch = false
+max_running_browsers = 1
+idle_timeout_secs = 2
+session_ttl_secs = 20
 
 [chromium]
 enabled = true
@@ -231,7 +240,7 @@ cleanup() {
   fi
   kill "$FAKE_PID" "$BRIDGE_PID" 2>/dev/null || true
   rm -rf "$PROFILE_ROOT"
-  rm -f "$FAKE_CHROMIUM" "$LLMGATEWAY_CONFIG"
+  rm -f "$FAKE_CHROMIUM" "$LLMGATEWAY_CONFIG" "$LAUNCH_LOG"
   rm -f data/llmgateway.db data/llmgateway.db-shm data/llmgateway.db-wal
 }
 trap cleanup EXIT
@@ -240,6 +249,10 @@ AUTH=(-H "Authorization: Bearer ${LLMGATEWAY_API_KEY}")
 JSON=(-H "Content-Type: application/json")
 
 start_gateway
+
+# P4: gateway startup is browser-cold. Configured sessions do not launch Chromium.
+sleep 1
+test ! -s "$LAUNCH_LOG"
 
 # Browser is not logged in yet, so the lower-priority API route is the only eligible route.
 curl -fsS -D /tmp/browser-reliability-before.headers -o /tmp/browser-reliability-before.json \
@@ -252,22 +265,60 @@ LAUNCH=$(curl -fsS -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/launch \
   "${AUTH[@]}")
 BROWSER_PID=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["pid"])')
-curl -fsS -X POST \
-  http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/verify \
-  "${AUTH[@]}" >/dev/null
+printf '%s' "$LAUNCH" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["launch"]["visible"] is True, x
+'
+test "$(wc -l < "$LAUNCH_LOG" | tr -d ' ')" = "1"
+grep -q -- '--new-window' "$LAUNCH_LOG"
+if grep -q -- '--headless' "$LAUNCH_LOG"; then
+  echo "explicit login unexpectedly launched headless" >&2
+  exit 1
+fi
 
-# Browser-first must beat the API route even though API has priority 1 and browser has 100.
-curl -fsS -D /tmp/browser-reliability-ready.headers -o /tmp/browser-reliability-ready.json \
-  -X POST http://127.0.0.1:7331/v1/chat/completions \
-  "${AUTH[@]}" "${JSON[@]}" \
-  -d '{"model":"llmgateway-auto","messages":[{"role":"user","content":"browser first"}]}'
-grep -qi '^x-llmgateway-route: browser-route' /tmp/browser-reliability-ready.headers
+VERIFY=$(curl -fsS -X POST \
+  http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/verify \
+  "${AUTH[@]}")
+printf '%s' "$VERIFY" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["authenticated"] is True, x
+assert x["browser_closed_after_capture"] is True, x
+assert x["status"]["running"] is False, x
+'
+BROWSER_PID=""
+
 INITIAL_READY_AT=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web "${AUTH[@]}" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["last_ready_at"])')
 
-# Restart llmgateway but leave Chromium alive. Startup reconciliation must reconnect to the live profile.
+# P4: concurrent requests from one cold READY account share exactly one browser cold start.
+for i in $(seq 1 8); do
+  curl -fsS -D "/tmp/browser-reliability-ready-$i.headers" -o "/tmp/browser-reliability-ready-$i.json" \
+    -X POST http://127.0.0.1:7331/v1/chat/completions \
+    "${AUTH[@]}" "${JSON[@]}" \
+    -d '{"model":"llmgateway-auto","messages":[{"role":"user","content":"concurrent cold start"}]}' &
+done
+wait
+for i in $(seq 1 8); do
+  grep -qi '^x-llmgateway-route: browser-route' "/tmp/browser-reliability-ready-$i.headers"
+done
+test "$(wc -l < "$LAUNCH_LOG" | tr -d ' ')" = "2"
+sed -n '2p' "$LAUNCH_LOG" | grep -q -- '--headless=new'
+if sed -n '2p' "$LAUNCH_LOG" | grep -q -- '--new-window'; then
+  echo "normal background request opened a visible Chromium window" >&2
+  exit 1
+fi
+STATUS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/status "${AUTH[@]}")
+BROWSER_PID=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"] or "")')
+test -n "$BROWSER_PID"
+
+# Restart llmgateway while the background browser is alive. Startup reconciliation reconnects
+# to existing CDP and must not launch another process.
+LAUNCHES_BEFORE_RESTART=$(wc -l < "$LAUNCH_LOG" | tr -d ' ')
 stop_gateway
 start_gateway
+test "$(wc -l < "$LAUNCH_LOG" | tr -d ' ')" = "$LAUNCHES_BEFORE_RESTART"
 
 SESSION=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web "${AUTH[@]}")
 printf '%s' "$SESSION" | python3 -c '
@@ -294,39 +345,42 @@ kill "$BROWSER_PID"
 wait "$BROWSER_PID" 2>/dev/null || true
 BROWSER_PID=""
 
-# Background reconciliation should remove the stale port, relaunch the isolated profile,
-# verify the authenticated page, and make the browser route eligible again.
-RECOVERED=0
-for _ in {1..40}; do
-  sleep 0.5
-  SESSION=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web "${AUTH[@]}")
-  STATUS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/status "${AUTH[@]}")
-  if printf '%s\n%s' "$SESSION" "$STATUS" | python3 -c '
+# P4: reconciliation may clean stale CDP, but it must never relaunch Chromium by itself.
+LAUNCHES_AFTER_CRASH=$(wc -l < "$LAUNCH_LOG" | tr -d ' ')
+sleep 6
+test "$(wc -l < "$LAUNCH_LOG" | tr -d ' ')" = "$LAUNCHES_AFTER_CRASH"
+STATUS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/status "${AUTH[@]}")
+printf '%s' "$STATUS" | python3 -c '
 import json,sys
-lines=sys.stdin.read().splitlines()
-session=json.loads(lines[0])
-status=json.loads(lines[1])
-ok=session["status"] == "ready" and session["routable"] is True and status["running"] is True and status["managed"] is True and status["ready_match"] == "http://127.0.0.1:18084/ready"
-raise SystemExit(0 if ok else 1)
-'; then
-    BROWSER_PID=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"] or "")')
-    RECOVERED_READY_AT=$(printf '%s' "$SESSION" | python3 -c 'import json,sys; print(json.load(sys.stdin)["last_ready_at"])')
-    test "$RECOVERED_READY_AT" != "$INITIAL_READY_AT"
-    RECOVERED=1
-    break
-  fi
-done
-if [ "$RECOVERED" != "1" ]; then
-  echo "browser did not recover" >&2
-  cat /tmp/llmgateway-browser-reliability.log >&2 || true
-  exit 1
-fi
+x=json.load(sys.stdin)
+assert x["running"] is False, x
+'
 
+# The next real request launches exactly one headless Chromium and recovers the route.
 curl -fsS -D /tmp/browser-reliability-recovered.headers -o /tmp/browser-reliability-recovered.json \
   -X POST http://127.0.0.1:7331/v1/chat/completions \
   "${AUTH[@]}" "${JSON[@]}" \
-  -d '{"model":"llmgateway-auto","messages":[{"role":"user","content":"after automatic recovery"}]}'
+  -d '{"model":"llmgateway-auto","messages":[{"role":"user","content":"after on-demand recovery"}]}'
 grep -qi '^x-llmgateway-route: browser-route' /tmp/browser-reliability-recovered.headers
+test "$(wc -l < "$LAUNCH_LOG" | tr -d ' ')" = "$((LAUNCHES_AFTER_CRASH + 1))"
+tail -n 1 "$LAUNCH_LOG" | grep -q -- '--headless=new'
+STATUS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/status "${AUTH[@]}")
+BROWSER_PID=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"] or "")')
+test -n "$BROWSER_PID"
+
+# Idle reaping must stop the background process without changing the authenticated READY state.
+LAUNCHES_BEFORE_IDLE=$(wc -l < "$LAUNCH_LOG" | tr -d ' ')
+sleep 6
+test "$(wc -l < "$LAUNCH_LOG" | tr -d ' ')" = "$LAUNCHES_BEFORE_IDLE"
+STATUS=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web/driver/status "${AUTH[@]}")
+SESSION=$(curl -fsS http://127.0.0.1:7331/_llmgateway/browser-sessions/fake-web "${AUTH[@]}")
+printf '%s\n%s' "$SESSION" "$STATUS" | python3 -c '
+import json,sys
+session,status=map(json.loads,sys.stdin.read().splitlines())
+assert session["status"] == "ready", session
+assert status["running"] is False, status
+'
+BROWSER_PID=""
 
 # A deliberate stop is sticky state: the background reconciler must not relaunch it.
 curl -fsS -X POST \
@@ -353,4 +407,4 @@ curl -fsS -D /tmp/browser-reliability-stopped.headers -o /tmp/browser-reliabilit
   -d '{"model":"llmgateway-auto","messages":[{"role":"user","content":"after deliberate stop"}]}'
 grep -qi '^x-llmgateway-route: api-route' /tmp/browser-reliability-stopped.headers
 
-echo "llmgateway browser restart + stale-CDP + automatic recovery smoke test passed"
+echo "llmgateway P4 invisible browser lifecycle + on-demand recovery smoke test passed"
