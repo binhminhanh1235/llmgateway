@@ -4,8 +4,8 @@ use crate::{
     chromium_driver_runtime,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
     conversation_runtime,
-    execution::{ExecutionFailure, ExecutionPhase, FailureClass, FailureScope, ReplaySafety},
     deepseek_web_transport::DeepSeekWebHttpAdapter,
+    execution::{ExecutionFailure, ExecutionPhase, FailureClass, FailureScope, ReplaySafety},
     gemini_web_transport::GeminiWebHttpAdapter,
     mimo_web_transport::MimoWebHttpAdapter,
     qwen_web_transport::QwenWebHttpAdapter,
@@ -422,9 +422,7 @@ fn browser_transport_execution_failure(message: &str) -> ExecutionFailure {
             FailureScope::Session,
             "browser page target was lost",
         )
-    } else if lower.contains("browser")
-        && (lower.contains("crash") || lower.contains("exited"))
-    {
+    } else if lower.contains("browser") && (lower.contains("crash") || lower.contains("exited")) {
         ExecutionFailure::new(
             FailureClass::BrowserCrashed,
             true,
@@ -3922,7 +3920,10 @@ mod tests {
                 FailureClass::CdpDisconnected,
             ),
             ("browser page target was lost", FailureClass::PageTargetLost),
-            ("browser process exited unexpectedly", FailureClass::BrowserCrashed),
+            (
+                "browser process exited unexpectedly",
+                FailureClass::BrowserCrashed,
+            ),
             (
                 "browser stream completed without assistant output",
                 FailureClass::StreamEmpty,
