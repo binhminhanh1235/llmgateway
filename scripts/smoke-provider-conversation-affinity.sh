@@ -221,8 +221,16 @@ if os.path.exists(ui_path):
 PY
 
 curl -fsS -X POST \
-  http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-affinity/driver/stop \
-  "${AUTH[@]}" >/dev/null
+  http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-affinity/driver/verify \
+  "${AUTH[@]}" >/tmp/llmgateway-browser-fetch-close.json
+python3 <<'PY'
+import json
+with open("/tmp/llmgateway-browser-fetch-close.json", encoding="utf-8") as f:
+    verify = json.load(f)
+assert verify["authenticated"] is True, verify
+assert verify["browser_closed_after_capture"] is True, verify
+assert verify["status"]["running"] is False, verify
+PY
 BROWSER_PID=""
 
 THREAD_A=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${JSON[@]}"   -d '{"title":"Affinity A","model":"llmgateway-auto"}'   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
