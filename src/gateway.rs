@@ -1183,13 +1183,13 @@ fn apply_auth(
     match account.auth_style.as_str() {
         "bearer" => {
             let value = HeaderValue::from_str(&format!("Bearer {key}"))
-                .map_err(|error| GatewayError::InvalidConfig(legacy_text.clone()))?;
+                .map_err(|error| GatewayError::InvalidConfig(error.to_string()))?;
             headers.insert(AUTHORIZATION, value);
         }
         "x-api-key" => {
             let name = HeaderName::from_static("x-api-key");
             let value = HeaderValue::from_str(key)
-                .map_err(|error| GatewayError::InvalidConfig(legacy_text.clone()))?;
+                .map_err(|error| GatewayError::InvalidConfig(error.to_string()))?;
             headers.insert(name, value);
         }
         other => {
