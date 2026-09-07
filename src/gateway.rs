@@ -1322,7 +1322,7 @@ fn normalized_gateway_failure(
             ExecutionPhase::Submitted,
             FailureScope::Transport,
             "browser-backed transport failed before client-visible commit",
-        )
+        ),
         GatewayError::BrowserAdapterIncompatible(_) => ExecutionFailure::new(
             FailureClass::ModelUnavailable,
             true,
