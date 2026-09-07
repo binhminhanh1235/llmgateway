@@ -368,6 +368,40 @@ impl BrowserProviderError {
                 )
                 .with_cooldown(30)
             }
+            Self::AdapterIncompatible { code, .. } if code == "browser_fetch_unsupported" => {
+                ExecutionFailure::new(
+                    FailureClass::NetworkTransient,
+                    true,
+                    ReplaySafety::Safe,
+                    ExecutionPhase::PreSubmit,
+                    FailureScope::Transport,
+                    "authenticated browser-context fetch is unsupported for this request",
+                )
+                .with_cooldown(0)
+            }
+            Self::AdapterIncompatible { code, .. } if code == "browser_challenge_required" => {
+                ExecutionFailure::new(
+                    FailureClass::HumanActionRequired,
+                    true,
+                    ReplaySafety::Safe,
+                    ExecutionPhase::PreSubmit,
+                    FailureScope::Transport,
+                    "browser-context fetch encountered provider-owned interactive challenge",
+                )
+                .with_cooldown(30)
+                .requiring_human_action()
+            }
+            Self::AdapterIncompatible { code, .. } if code == "browser_fetch_rejected" => {
+                ExecutionFailure::new(
+                    FailureClass::NetworkTransient,
+                    true,
+                    ReplaySafety::ProbablySafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Transport,
+                    "browser-context fetch was rejected after submission",
+                )
+                .with_cooldown(5)
+            }
             Self::AdapterIncompatible { .. } => ExecutionFailure::new(
                 FailureClass::ModelUnavailable,
                 true,
@@ -575,6 +609,21 @@ pub trait BrowserProviderAdapter: Send + Sync {
         self.browserless_capabilities().supports_native_conversation
     }
 
+    fn supports_browser_fetch(&self) -> bool {
+        false
+    }
+
+    async fn execute_browser_fetch(
+        &self,
+        request: BrowserAdapterRequest,
+    ) -> Result<reqwest::Response, BrowserProviderError> {
+        Err(BrowserProviderError::AdapterIncompatible {
+            account_id: request.account.id,
+            code: "browser_fetch_unsupported".into(),
+            message: "provider adapter does not implement authenticated browser-context fetch".into(),
+        })
+    }
+
     async fn discover_models(
         &self,
         _account_id: &str,
@@ -598,6 +647,12 @@ pub trait BrowserProviderAdapter: Send + Sync {
         &self,
         request: BrowserAdapterRequest,
     ) -> Result<reqwest::Response, BrowserProviderError>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowserAdapterOperation {
+    Chat,
+    BrowserFetch,
 }
 
 pub struct BrowserProviderRegistry {
@@ -871,14 +926,8 @@ impl BrowserProviderRegistry {
         model: &str,
         adapter: &dyn BrowserProviderAdapter,
         browser_fallback: bool,
+        transport: &str,
     ) {
-        let transport = if adapter.is_cdp() {
-            "browser-cdp"
-        } else if adapter.browserless_capabilities().supported {
-            "direct-http"
-        } else {
-            "browser-http"
-        };
         self.last_transport.write().await.insert(
             account_id.to_string(),
             BrowserTransportExecution {
@@ -1713,6 +1762,7 @@ impl BrowserProviderRegistry {
         adapter: Arc<dyn BrowserProviderAdapter>,
         request: BrowserAdapterRequest,
         transport: &str,
+        operation: BrowserAdapterOperation,
     ) -> Result<reqwest::Response, BrowserProviderError> {
         let key = RuntimeHealthKey::transport(&provider.id, &account.id, transport);
         let permit = match self.runtime_health.try_acquire_all(&[key]).await {
@@ -1725,7 +1775,12 @@ impl BrowserProviderRegistry {
             }
         };
 
-        match adapter.execute_chat(request).await {
+        let executed = match operation {
+            BrowserAdapterOperation::Chat => adapter.execute_chat(request).await,
+            BrowserAdapterOperation::BrowserFetch => adapter.execute_browser_fetch(request).await,
+        };
+
+        match executed {
             Ok(response) => {
                 self.runtime_health.record_success(permit).await;
                 Ok(response)
@@ -1752,6 +1807,78 @@ impl BrowserProviderRegistry {
                 Err(error)
             }
         }
+    }
+
+    async fn execute_cdp_fetch_then_ui(
+        &self,
+        provider: &ProviderConfig,
+        account: &AccountConfig,
+        route: &RouteConfig,
+        binding: &BrowserAccountBinding,
+        adapter: Arc<dyn BrowserProviderAdapter>,
+        request: BrowserAdapterRequest,
+        execution_guard: BrowserExecutionGuard,
+        allow_browser_fetch: bool,
+        mark_direct_unsynced: bool,
+    ) -> (Result<reqwest::Response, BrowserProviderError>, &'static str) {
+        if mark_direct_unsynced {
+            if let Err(error) = self.mark_direct_state_unsynced(&request).await {
+                return (Err(error), "browser_fetch");
+            }
+        }
+
+        if allow_browser_fetch && adapter.supports_browser_fetch() {
+            let fetch_result = self
+                .execute_transport(
+                    provider,
+                    account,
+                    route,
+                    binding,
+                    adapter.clone(),
+                    request.clone(),
+                    "browser_fetch",
+                    BrowserAdapterOperation::BrowserFetch,
+                )
+                .await;
+            match fetch_result {
+                Ok(response) => {
+                    return (
+                        wrap_response_with_browser_guard(response, execution_guard),
+                        "browser_fetch",
+                    );
+                }
+                Err(error) if browser_fetch_error_allows_ui_fallback(&error) => {
+                    warn!(
+                        provider = %provider.id,
+                        account = %account.id,
+                        model = %route.model,
+                        error = %error,
+                        "browser-context fetch failed before client-visible commit; falling back to headless UI"
+                    );
+                }
+                Err(error) => return (Err(error), "browser_fetch"),
+            }
+        }
+
+        let ui_result = self
+            .execute_transport(
+                provider,
+                account,
+                route,
+                binding,
+                adapter,
+                request,
+                "browser_runtime",
+                BrowserAdapterOperation::Chat,
+            )
+            .await;
+        (
+            match ui_result {
+                Ok(response) => wrap_response_with_browser_guard(response, execution_guard),
+                Err(error) => Err(error),
+            },
+            "browser_runtime",
+        )
     }
 
     pub async fn execute_chat(
@@ -1834,9 +1961,20 @@ impl BrowserProviderRegistry {
 
         let mut used_adapter = browser_adapter.clone();
         let mut browser_fallback_used = false;
+        let mut used_transport = if browser_adapter.is_cdp() {
+            "browser_runtime"
+        } else {
+            "browser_http"
+        };
+        let allow_browser_fetch =
+            binding.transport_mode != BrowserTransportMode::BrowserOnly
+                && browser_adapter.is_cdp()
+                && browser_adapter.supports_browser_fetch();
+
         let result = if direct_snapshot_ready {
             let direct = direct_adapter.expect("direct adapter checked above");
             used_adapter = direct.clone();
+            used_transport = "direct_http";
             let direct_result = self
                 .execute_transport(
                     provider,
@@ -1846,6 +1984,7 @@ impl BrowserProviderRegistry {
                     direct.clone(),
                     adapter_request.clone(),
                     "direct_http",
+                    BrowserAdapterOperation::Chat,
                 )
                 .await;
             let dynamic_model = self
@@ -1869,34 +2008,31 @@ impl BrowserProviderRegistry {
                         browser_adapter.is_cdp(),
                     )
                 });
-            let browser_execution_guard = if safe_fallback_candidate {
-                self.ensure_account_cdp_session_ready(provider, account, &binding)
-                    .await
-            } else {
-                None
-            };
 
-            if let Some(execution_guard) = browser_execution_guard {
-                browser_fallback_used = true;
-                used_adapter = browser_adapter.clone();
-                if let Err(error) = self.mark_direct_state_unsynced(&adapter_request).await {
-                    Err(error)
-                } else {
-                    match self
-                        .execute_transport(
+            if safe_fallback_candidate {
+                if let Some(execution_guard) = self
+                    .ensure_account_cdp_session_ready(provider, account, &binding)
+                    .await
+                {
+                    browser_fallback_used = true;
+                    used_adapter = browser_adapter.clone();
+                    let (result, transport) = self
+                        .execute_cdp_fetch_then_ui(
                             provider,
                             account,
                             route,
                             &binding,
                             browser_adapter.clone(),
                             adapter_request,
-                            "browser_runtime",
+                            execution_guard,
+                            allow_browser_fetch,
+                            true,
                         )
-                        .await
-                    {
-                        Ok(response) => wrap_response_with_browser_guard(response, execution_guard),
-                        Err(error) => Err(error),
-                    }
+                        .await;
+                    used_transport = transport;
+                    result
+                } else {
+                    direct_result
                 }
             } else {
                 direct_result
@@ -1906,21 +2042,21 @@ impl BrowserProviderRegistry {
                 .ensure_account_cdp_session_ready(provider, account, &binding)
                 .await
             {
-                match self
-                    .execute_transport(
+                let (result, transport) = self
+                    .execute_cdp_fetch_then_ui(
                         provider,
                         account,
                         route,
                         &binding,
                         browser_adapter.clone(),
                         adapter_request,
-                        "browser_runtime",
+                        execution_guard,
+                        allow_browser_fetch,
+                        false,
                     )
-                    .await
-                {
-                    Ok(response) => wrap_response_with_browser_guard(response, execution_guard),
-                    Err(error) => Err(error),
-                }
+                    .await;
+                used_transport = transport;
+                result
             } else {
                 Err(BrowserProviderError::SessionUnavailable {
                     account_id: account.id.clone(),
@@ -1939,6 +2075,7 @@ impl BrowserProviderRegistry {
                 browser_adapter.clone(),
                 adapter_request,
                 "browser_runtime",
+                BrowserAdapterOperation::Chat,
             )
             .await
         };
@@ -1950,6 +2087,12 @@ impl BrowserProviderRegistry {
                     &route.model,
                     used_adapter.as_ref(),
                     browser_fallback_used,
+                    match used_transport {
+                        "direct_http" => "direct-http",
+                        "browser_fetch" => "browser-fetch",
+                        "browser_runtime" => "browser-cdp",
+                        _ => "browser-http",
+                    },
                 )
                 .await;
                 self.invalidate_diagnostics(&account.id).await;
@@ -1985,7 +2128,7 @@ impl BrowserProviderRegistry {
             }
             Err(BrowserProviderError::SessionUnavailable { .. })
             | Err(BrowserProviderError::Transport(_))
-                if used_adapter.is_cdp() =>
+                if used_adapter.is_cdp() && used_transport == "browser_runtime" =>
             {
                 let error_text = result
                     .as_ref()
@@ -1996,17 +2139,12 @@ impl BrowserProviderRegistry {
             }
             _ => {}
         }
-        let transport = if used_adapter.is_cdp() {
-            "browser_runtime"
-        } else {
-            "direct_http"
-        };
         result.map_err(|error| {
             error.with_execution_context(
                 &provider.id,
                 &account.id,
                 &route.model,
-                transport,
+                used_transport,
                 Some(&binding.session),
                 true,
             )
@@ -2198,6 +2336,7 @@ struct CdpAdapterSpec {
     new_chat_url: Option<&'static str>,
     ephemeral_default: bool,
     native_conversation_affinity: bool,
+    browser_fetch: bool,
 }
 
 #[derive(Clone)]
@@ -2324,6 +2463,7 @@ impl CdpBrowserAdapter {
             new_chat_url: None,
             ephemeral_default: false,
             native_conversation_affinity: false,
+            browser_fetch: false,
         })
     }
 
@@ -2337,6 +2477,7 @@ impl CdpBrowserAdapter {
             new_chat_url: Some("https://gemini.google.com/app"),
             ephemeral_default: true,
             native_conversation_affinity: true,
+            browser_fetch: true,
         })
     }
 
@@ -2350,6 +2491,7 @@ impl CdpBrowserAdapter {
             new_chat_url: Some("https://chatgpt.com/"),
             ephemeral_default: true,
             native_conversation_affinity: true,
+            browser_fetch: false,
         })
     }
 
@@ -2363,6 +2505,7 @@ impl CdpBrowserAdapter {
             new_chat_url: Some("https://chat.qwen.ai/c/new-chat"),
             ephemeral_default: true,
             native_conversation_affinity: false,
+            browser_fetch: true,
         })
     }
 
@@ -2376,6 +2519,7 @@ impl CdpBrowserAdapter {
             new_chat_url: Some("https://chat.deepseek.com/"),
             ephemeral_default: true,
             native_conversation_affinity: true,
+            browser_fetch: false,
         })
     }
 
@@ -2389,6 +2533,7 @@ impl CdpBrowserAdapter {
             new_chat_url: Some("https://aistudio.xiaomimimo.com/#/c"),
             ephemeral_default: true,
             native_conversation_affinity: false,
+            browser_fetch: false,
         })
     }
 
@@ -3260,6 +3405,10 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         self.spec.native_conversation_affinity
     }
 
+    fn supports_browser_fetch(&self) -> bool {
+        self.spec.browser_fetch
+    }
+
     async fn diagnose(
         &self,
         account_id: &str,
@@ -3338,6 +3487,116 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
                 &error.to_string(),
             ),
         }
+    }
+
+    async fn execute_browser_fetch(
+        &self,
+        request: BrowserAdapterRequest,
+    ) -> Result<reqwest::Response, BrowserProviderError> {
+        if !self.spec.browser_fetch {
+            return Err(BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "browser_fetch_unsupported".into(),
+                message: "this provider adapter has no browser-context fetch implementation".into(),
+            });
+        }
+
+        let script = self.script(&request.binding)?;
+        let mut normalized_body = request.body.clone();
+        let object = normalized_body.as_object_mut().ok_or_else(|| {
+            BrowserProviderError::InvalidConfig("chat request body must be a JSON object".into())
+        })?;
+        object.insert("model".into(), Value::String(request.route.model.clone()));
+
+        let mut context = self.context(&request.binding, Some(&request.route.model));
+        if let Some(context) = context.as_object_mut() {
+            context.insert("transport".into(), Value::String("browser_fetch".into()));
+            context.insert(
+                "thread_id_present".into(),
+                Value::Bool(request.thread_id.is_some()),
+            );
+            context.insert(
+                "ephemeral_chat".into(),
+                Value::Bool(
+                    request.binding.ephemeral_chat.unwrap_or(false)
+                        && request.thread_id.is_none(),
+                ),
+            );
+        }
+
+        let runtime_target_timeout = Duration::from_millis(
+            request
+                .binding
+                .probe_timeout_ms
+                .unwrap_or(8_000)
+                .max(10_000),
+        );
+        let target = self
+            .select_runtime_ready_target(
+                &request.profile_dir,
+                self.target_url_prefix(&request.binding),
+                runtime_target_timeout,
+            )
+            .await
+            .map_err(|error| match error {
+                BrowserProviderError::AdapterIncompatible { code, message, .. } => {
+                    BrowserProviderError::AdapterIncompatible {
+                        account_id: request.account.id.clone(),
+                        code,
+                        message,
+                    }
+                }
+                other => other,
+            })?;
+
+        if normalized_body
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && self.spec.builtin_script.is_some()
+        {
+            // Browser-fetch streams use the same CDP poll/cancel machinery as UI streams.
+            // Clearing thread_id prevents UI-native conversation persistence from being
+            // attached to a transport that deliberately avoids DOM submission.
+            let mut stream_request = request.clone();
+            stream_request.thread_id = None;
+            return self
+                .execute_streaming_chat(
+                    &stream_request,
+                    target,
+                    script,
+                    context,
+                    normalized_body,
+                    false,
+                )
+                .await;
+        }
+
+        let envelope = self
+            .evaluate_contract(
+                &target,
+                &script,
+                "browser_fetch",
+                Some(&normalized_body),
+                &context,
+                &request.account.id,
+            )
+            .await?;
+        if let Some(error) = envelope.error {
+            return contract_error_to_provider_error(
+                &request.account.id,
+                &request.route.model,
+                error,
+            );
+        }
+        let result = envelope
+            .result
+            .ok_or_else(|| BrowserProviderError::AdapterIncompatible {
+                account_id: request.account.id.clone(),
+                code: "missing_browser_fetch_result".into(),
+                message: "browser fetch contract did not return a result".into(),
+            })?;
+        synthetic_response(result)
     }
 
     async fn execute_chat(
@@ -3869,6 +4128,28 @@ if (!__probe || __probe.ok !== true) {
 if (__operation === "probe") {
   return { meta: __meta, probe: __probe };
 }
+if (__operation === "browser_fetch") {
+  if (typeof __adapter.browserFetch !== "function") {
+    return {
+      meta: __meta,
+      probe: __probe,
+      error: { code: "browser_fetch_unsupported", message: "adapter contract is missing browserFetch(request, context)" }
+    };
+  }
+  try {
+    const __result = await __adapter.browserFetch(__request, __context);
+    return { meta: __meta, probe: __probe, result: __result };
+  } catch (error) {
+    const __message = String(error?.message || error || "browser fetch failed");
+    let __code = "browser_fetch_rejected";
+    if (/^BROWSER_FETCH_UNSUPPORTED:/i.test(__message)) __code = "browser_fetch_unsupported";
+    else if (/^BROWSER_FETCH_CHALLENGED:/i.test(__message)) __code = "browser_challenge_required";
+    else if (/^BROWSER_FETCH_WAF_REJECTED:/i.test(__message)) __code = "upstream_waf_rejected";
+    else if (/^LOGIN_REQUIRED:/i.test(__message)) __code = "login_required";
+    else if (/^INVALID_REQUEST:/i.test(__message)) __code = "invalid_request";
+    return { meta: __meta, probe: __probe, error: { code: __code, message: __message } };
+  }
+}
 if (__operation === "chat_stream_start") {
   if (typeof __adapter.streamStart !== "function") {
     return {
@@ -3881,12 +4162,22 @@ if (__operation === "chat_stream_start") {
     const __stream = await __adapter.streamStart(__request, __context);
     return { meta: __meta, probe: __probe, stream: __stream };
   } catch (error) {
+    const __message = String(error?.message || error || "browser stream failed to start");
+    let __code = "stream_start_error";
+    if (__context?.transport === "browser_fetch") {
+      __code = "browser_fetch_rejected";
+      if (/^BROWSER_FETCH_UNSUPPORTED:/i.test(__message)) __code = "browser_fetch_unsupported";
+      else if (/^BROWSER_FETCH_CHALLENGED:/i.test(__message)) __code = "browser_challenge_required";
+      else if (/^BROWSER_FETCH_WAF_REJECTED:/i.test(__message)) __code = "upstream_waf_rejected";
+      else if (/^LOGIN_REQUIRED:/i.test(__message)) __code = "login_required";
+      else if (/^INVALID_REQUEST:/i.test(__message)) __code = "invalid_request";
+    }
     return {
       meta: __meta,
       probe: __probe,
       error: {
-        code: "stream_start_error",
-        message: String(error?.message || error || "browser stream failed to start")
+        code: __code,
+        message: __message
       }
     };
   }
@@ -4075,7 +4366,11 @@ fn contract_error_to_provider_error(
         | "adapter_incompatible"
         | "wrong_page"
         | "target_not_found"
-        | "login_required" => Err(BrowserProviderError::AdapterIncompatible {
+        | "login_required"
+        | "browser_fetch_unsupported"
+        | "browser_challenge_required"
+        | "browser_fetch_rejected"
+        | "upstream_waf_rejected" => Err(BrowserProviderError::AdapterIncompatible {
             account_id: account_id.to_string(),
             code: error.code,
             message: error.message,
@@ -4119,6 +4414,12 @@ fn direct_error_allows_browser_fallback(
             | "conversation_prepare_failed"
             | "conversation_prepare_invalid"
     )
+}
+
+fn browser_fetch_error_allows_ui_fallback(error: &BrowserProviderError) -> bool {
+    let failure = error.execution_failure();
+    !matches!(failure.phase, ExecutionPhase::Committed | ExecutionPhase::Terminal)
+        && failure.allows_silent_fallback(false)
 }
 
 fn cdp_session_status_probeable(status: &str) -> bool {
@@ -5092,6 +5393,72 @@ mod tests {
         .await;
         assert_eq!(diagnostics.status, "adapter_incompatible");
         assert!(diagnostics.message.contains("prompt composer missing"));
+    }
+
+    #[test]
+    fn browser_fetch_contract_is_provider_neutral_and_explicit() {
+        let expression = build_contract_expression(
+            "globalThis.__LLMGATEWAY_ADAPTER__={meta:{contract_version:1,id:'x',provider:'x'},probe:async()=>({ok:true}),browserFetch:async()=>({status:200,content_type:'application/json',body:{ok:true}})};",
+            "browser_fetch",
+            Some(&json!({"model":"fixture"})),
+            &json!({"transport":"browser_fetch"}),
+        )
+        .unwrap();
+        assert!(expression.contains("__adapter.browserFetch"));
+        assert!(expression.contains("browser_fetch_unsupported"));
+        assert!(!expression.contains("chat.qwen.ai/api"));
+        assert!(!expression.contains("BardFrontendService"));
+    }
+
+    #[test]
+    fn browser_fetch_fallback_stops_after_committed_or_unsafe_failure() {
+        let unsupported = BrowserProviderError::AdapterIncompatible {
+            account_id: "a".into(),
+            code: "browser_fetch_unsupported".into(),
+            message: "unsupported".into(),
+        };
+        assert!(browser_fetch_error_allows_ui_fallback(&unsupported));
+
+        let challenged = BrowserProviderError::AdapterIncompatible {
+            account_id: "a".into(),
+            code: "browser_challenge_required".into(),
+            message: "challenge".into(),
+        };
+        assert!(browser_fetch_error_allows_ui_fallback(&challenged));
+
+        let committed = BrowserProviderError::Classified {
+            failure: Box::new(ExecutionFailure::new(
+                FailureClass::StreamDropped,
+                false,
+                ReplaySafety::Unsafe,
+                ExecutionPhase::Committed,
+                FailureScope::Conversation,
+                "partial browser fetch stream committed",
+            )),
+            source: Box::new(BrowserProviderError::Transport("stream dropped".into())),
+        };
+        assert!(!browser_fetch_error_allows_ui_fallback(&committed));
+    }
+
+    #[tokio::test]
+    async fn browser_fetch_and_headless_ui_health_keys_are_isolated() {
+        let graph = RuntimeHealthGraph::default();
+        let fetch_key = RuntimeHealthKey::transport("p", "a", "browser_fetch");
+        let ui_key = RuntimeHealthKey::transport("p", "a", "browser_runtime");
+        let permit = graph.try_acquire_all(&[fetch_key.clone()]).await.unwrap();
+        graph
+            .record_failure(
+                permit,
+                &[fetch_key.clone()],
+                FailureClass::NetworkTransient,
+                30,
+                "fixture browser fetch failure",
+            )
+            .await;
+
+        assert!(graph.try_acquire_all(&[fetch_key]).await.is_err());
+        let ui_permit = graph.try_acquire_all(&[ui_key]).await.unwrap();
+        graph.release(ui_permit).await;
     }
 
     #[test]

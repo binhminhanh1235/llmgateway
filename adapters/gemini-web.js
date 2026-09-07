@@ -3,7 +3,7 @@
 // Authentication, CAPTCHA, 2FA, anti-abuse controls, and provider quotas remain interactive/provider-owned.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.04.6";
+  const ADAPTER_VERSION = "2026.09.07.browser-fetch.1";
 
   const defaults = {
     input: [
@@ -589,6 +589,392 @@
     return { cancelled: true };
   };
 
+
+  // P5 browser-context fetch bridge. The request executes inside gemini.google.com,
+  // reusing browser cookies/origin. Explicit model recipes and native conversation
+  // continuations remain on the UI adapter until their private wire metadata can be
+  // preserved exactly; this bridge never silently substitutes another model.
+  const geminiFetchJobs = globalThis.__LLMGATEWAY_GEMINI_FETCH_JOBS__ || new Map();
+  globalThis.__LLMGATEWAY_GEMINI_FETCH_JOBS__ = geminiFetchJobs;
+  const GEMINI_FETCH_DEFAULT_MODEL = "gemini-web-default";
+  const GEMINI_FETCH_HOLD_CHARS = 192;
+
+  const geminiFetchTextOnly = (request) => {
+    if (Array.isArray(request?.tools) && request.tools.length) {
+      throw new Error("BROWSER_FETCH_UNSUPPORTED: Gemini browser fetch defers tool-call requests to UI transport");
+    }
+    const messages = Array.isArray(request?.messages) ? request.messages : [];
+    for (const message of messages) {
+      const content = message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const part of content) {
+        if (typeof part === "string") continue;
+        const type = String(part?.type || "");
+        if (type && type !== "text" && type !== "input_text") {
+          throw new Error("BROWSER_FETCH_UNSUPPORTED: Gemini browser fetch only handles text message parts");
+        }
+      }
+    }
+  };
+
+  const geminiEmbeddedString = (html, key) => {
+    const marker = '"' + key + '"';
+    const start = String(html || "").indexOf(marker);
+    if (start < 0) return "";
+    const tail = String(html).slice(start + marker.length);
+    const colon = tail.indexOf(":");
+    if (colon < 0) return "";
+    const value = tail.slice(colon + 1).trimStart();
+    if (!value.startsWith('"')) return "";
+    let escaped = false;
+    for (let i = 1; i < value.length; i += 1) {
+      const ch = value[i];
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (ch === '"') {
+        try { return JSON.parse(value.slice(0, i + 1)); } catch (_) { return ""; }
+      }
+    }
+    return "";
+  };
+
+  const geminiFetchUuid = () => {
+    try { return String(globalThis.crypto?.randomUUID?.() || ("gemini-" + Date.now() + "-" + Math.random().toString(36).slice(2))).toUpperCase(); }
+    catch (_) { return ("GEMINI-" + Date.now() + "-" + Math.random().toString(36).slice(2)).toUpperCase(); }
+  };
+  const geminiFetchReqId = () => 10000 + Math.floor(Math.random() * 90000);
+
+  const geminiBuildInner = (prompt, language, requestUuid, temporary) => {
+    const inner = Array(81).fill(null);
+    inner[0] = [prompt, 0, null, null, null, null, 0];
+    inner[1] = [language];
+    inner[2] = ["", "", "", null, null, null, null, null, null, ""];
+    inner[6] = [1];
+    inner[7] = 1;
+    inner[10] = 1;
+    inner[11] = 0;
+    inner[17] = [[0]];
+    inner[18] = 0;
+    inner[27] = 1;
+    inner[30] = [4];
+    inner[41] = [1];
+    if (temporary) inner[45] = 1;
+    inner[53] = 0;
+    inner[59] = requestUuid;
+    inner[61] = [];
+    inner[68] = 1;
+    inner[79] = 1;
+    inner[80] = 1;
+    return inner;
+  };
+
+  const geminiNested = (value, path) => {
+    let current = value;
+    for (const index of path) {
+      if (!Array.isArray(current) || index >= current.length) return undefined;
+      current = current[index];
+    }
+    return current;
+  };
+
+  const geminiParseFetchUpdate = (part) => {
+    const errorCode = Number(geminiNested(part, [5, 2, 0, 1, 0]));
+    const raw = geminiNested(part, [2]);
+    if (typeof raw !== "string") {
+      return { text: "", completed: false, errorCode: Number.isFinite(errorCode) ? errorCode : null };
+    }
+    let inner;
+    try { inner = JSON.parse(raw); }
+    catch (_) { return { text: "", completed: false, errorCode: Number.isFinite(errorCode) ? errorCode : null }; }
+    const candidates = geminiNested(inner, [4]);
+    let text = "";
+    let completed = false;
+    if (Array.isArray(candidates)) {
+      for (const candidate of candidates) {
+        if (!text) text = String(geminiNested(candidate, [1, 0]) || "");
+        completed = completed || Number(geminiNested(candidate, [8, 0])) === 2;
+      }
+    }
+    return { text, completed, errorCode: Number.isFinite(errorCode) ? errorCode : null };
+  };
+
+  const geminiParseAvailableFrames = (state, finalInput = false) => {
+    let text = state.frameBuffer;
+    let pos = 0;
+    const frames = [];
+    if (!state.preambleHandled) {
+      const trimmed = text.replace(/^\s+/, "");
+      const whitespace = text.length - trimmed.length;
+      if (trimmed.length < 4 && ")]}'".startsWith(trimmed) && !finalInput) return frames;
+      if (trimmed.startsWith(")]}'")) pos = whitespace + 4;
+      state.preambleHandled = true;
+    }
+    while (true) {
+      while (pos < text.length && /\s/.test(text[pos])) pos += 1;
+      if (pos >= text.length) {
+        state.frameBuffer = "";
+        return frames;
+      }
+      const digitStart = pos;
+      while (pos < text.length && /[0-9]/.test(text[pos])) pos += 1;
+      if (digitStart === pos) throw new Error("BROWSER_FETCH_REJECTED: Gemini stream frame length marker was invalid");
+      if (pos >= text.length) {
+        state.frameBuffer = text.slice(digitStart);
+        return frames;
+      }
+      if (text[pos] !== "\n") throw new Error("BROWSER_FETCH_REJECTED: Gemini stream frame length was not newline terminated");
+      const length = Number(text.slice(digitStart, pos));
+      if (!Number.isFinite(length) || length < 0) throw new Error("BROWSER_FETCH_REJECTED: Gemini stream frame length was invalid");
+      const contentStart = pos;
+      const contentEnd = contentStart + length;
+      if (contentEnd > text.length) {
+        state.frameBuffer = text.slice(digitStart);
+        return frames;
+      }
+      const chunk = text.slice(contentStart, contentEnd).trim();
+      pos = contentEnd;
+      if (!chunk) continue;
+      let value;
+      try { value = JSON.parse(chunk); }
+      catch (_) { throw new Error("BROWSER_FETCH_REJECTED: Gemini stream returned invalid JSON frame"); }
+      if (Array.isArray(value)) frames.push(...value);
+      else frames.push(value);
+      if (pos >= text.length) {
+        state.frameBuffer = "";
+        return frames;
+      }
+    }
+  };
+
+  const geminiFetchChunk = (state, delta, finishReason = null) => ({
+    id: state.completionId,
+    object: "chat.completion.chunk",
+    model: state.model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }]
+  });
+
+  const geminiFetchWakeReady = (state) => {
+    if (state.readyResolved) return;
+    if (!state.error && !state.done && state.events.length === 0) return;
+    state.readyResolved = true;
+    state.resolveReady?.();
+  };
+
+  const geminiObserveFetchText = (state, snapshot, completed) => {
+    const value = String(snapshot || "");
+    if (!value) return;
+    if (!value.startsWith(state.emitted)) {
+      throw new Error("BROWSER_FETCH_REJECTED: Gemini rewrote text outside the committed stability window");
+    }
+    state.latest = value;
+    const chars = Array.from(value);
+    const commitChars = completed ? chars.length : Math.max(0, chars.length - GEMINI_FETCH_HOLD_CHARS);
+    const committed = chars.slice(0, commitChars).join("");
+    if (committed.length <= state.emitted.length) return;
+    const delta = committed.slice(state.emitted.length);
+    state.emitted = committed;
+    if (!delta) return;
+    const payload = state.roleEmitted ? { content: delta } : { role: "assistant", content: delta };
+    state.roleEmitted = true;
+    state.events.push(geminiFetchChunk(state, payload));
+    state.progressSeq += 1;
+    state.progressPhase = "streaming";
+    geminiFetchWakeReady(state);
+  };
+
+  const geminiApplyFetchFrame = (state, part) => {
+    const update = geminiParseFetchUpdate(part);
+    if (update.errorCode && update.errorCode !== 0) {
+      throw new Error("BROWSER_FETCH_REJECTED: Gemini StreamGenerate returned error code " + update.errorCode);
+    }
+    if (update.text) state.latest = update.text;
+    state.completed = state.completed || update.completed;
+    geminiObserveFetchText(state, state.latest, state.completed);
+  };
+
+  const geminiPumpFetch = async (state, response) => {
+    const reader = response.body?.getReader?.();
+    if (!reader) throw new Error("BROWSER_FETCH_UNSUPPORTED: Gemini response body is not incrementally readable");
+    const decoder = new TextDecoder();
+    while (true) {
+      if (state.cancelled) throw new Error("STREAM_CANCELLED: Gemini browser fetch cancelled");
+      const { value, done } = await reader.read();
+      if (done) break;
+      state.frameBuffer += decoder.decode(value, { stream: true });
+      for (const frame of geminiParseAvailableFrames(state, false)) geminiApplyFetchFrame(state, frame);
+    }
+    state.frameBuffer += decoder.decode();
+    for (const frame of geminiParseAvailableFrames(state, true)) geminiApplyFetchFrame(state, frame);
+    if (!state.completed) throw new Error("BROWSER_FETCH_REJECTED: Gemini StreamGenerate ended before completion marker");
+    if (!state.latest.trim()) throw new Error("BROWSER_FETCH_REJECTED: Gemini StreamGenerate completed without assistant text");
+    // Completion flushes the stability window even when the final provider frame
+    // repeated the same text snapshot.
+    geminiObserveFetchText(state, state.latest, true);
+    state.done = true;
+    state.progressSeq += 1;
+    state.progressPhase = "completed";
+    geminiFetchWakeReady(state);
+  };
+
+  const geminiFetchPrompt = (request) => {
+    geminiFetchTextOnly(request);
+    const prompt = formatMessages(request);
+    if (!String(prompt || "").trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
+    return prompt;
+  };
+
+  const startGeminiBrowserFetch = async (request, context) => {
+    if (location.hostname !== "gemini.google.com") {
+      throw new Error("BROWSER_FETCH_UNSUPPORTED: Gemini browser fetch requires gemini.google.com origin");
+    }
+    if (context?.thread_id_present) {
+      throw new Error("BROWSER_FETCH_UNSUPPORTED: Gemini native conversation continuation stays on UI transport");
+    }
+    const model = String(request?.model || GEMINI_FETCH_DEFAULT_MODEL);
+    if (model !== GEMINI_FETCH_DEFAULT_MODEL) {
+      throw new Error("BROWSER_FETCH_UNSUPPORTED: Gemini selected-model private recipe stays on UI transport");
+    }
+    const prompt = geminiFetchPrompt(request);
+
+    const bootstrap = await fetch("/app", { method: "GET", credentials: "include" });
+    const html = await bootstrap.text();
+    if (bootstrap.status === 401 || bootstrap.status === 403) {
+      throw new Error("LOGIN_REQUIRED: Gemini browser session bootstrap was rejected");
+    }
+    if (!bootstrap.ok) {
+      throw new Error("BROWSER_FETCH_REJECTED: Gemini browser bootstrap returned HTTP " + bootstrap.status);
+    }
+    const accessToken = geminiEmbeddedString(html, "SNlM0e");
+    if (!accessToken) throw new Error("LOGIN_REQUIRED: Gemini browser bootstrap returned no access token");
+    const buildLabel = geminiEmbeddedString(html, "cfb2h");
+    const frontendSessionId = geminiEmbeddedString(html, "FdrFJe");
+    const language = geminiEmbeddedString(html, "TuX5cc") || "en";
+    const requestUuid = geminiFetchUuid();
+    const inner = geminiBuildInner(prompt, language, requestUuid, Boolean(context?.ephemeral_chat));
+    const fReq = JSON.stringify([null, JSON.stringify(inner)]);
+    const query = new URLSearchParams({
+      rt: "c",
+      _reqid: String(geminiFetchReqId()),
+      hl: language
+    });
+    if (buildLabel) query.set("bl", buildLabel);
+    if (frontendSessionId) query.set("f.sid", frontendSessionId);
+    const form = new URLSearchParams({ "f.req": fReq, at: accessToken });
+    const controller = new AbortController();
+    const response = await fetch("/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?" + query.toString(), {
+      method: "POST",
+      credentials: "include",
+      signal: controller.signal,
+      headers: {
+        "content-type": "application/x-www-form-urlencoded;charset=utf-8",
+        "x-same-domain": "1",
+        "x-goog-ext-525005358-jspb": JSON.stringify([requestUuid, 1]),
+        "accept": "*/*"
+      },
+      body: form.toString()
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new Error("LOGIN_REQUIRED: Gemini StreamGenerate rejected browser session");
+    }
+    if (!response.ok) {
+      throw new Error("BROWSER_FETCH_REJECTED: Gemini StreamGenerate returned HTTP " + response.status);
+    }
+
+    const streamId = "gemini_fetch_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+    const state = {
+      streamId,
+      completionId: "chatcmpl_gemini_fetch_" + Date.now(),
+      model,
+      controller,
+      events: [],
+      emitted: "",
+      latest: "",
+      completed: false,
+      done: false,
+      finalEmitted: false,
+      roleEmitted: false,
+      cancelled: false,
+      error: null,
+      frameBuffer: "",
+      preambleHandled: false,
+      progressSeq: 1,
+      progressPhase: "submitted",
+      readyResolved: false,
+      resolveReady: null,
+      ready: null
+    };
+    state.ready = new Promise((resolve) => { state.resolveReady = resolve; });
+    geminiFetchJobs.set(streamId, state);
+    state.worker = geminiPumpFetch(state, response).catch((error) => {
+      state.error = {
+        code: /^STREAM_CANCELLED:/i.test(String(error?.message || error)) ? "cancelled" : "browser_fetch_rejected",
+        message: String(error?.message || error)
+      };
+      state.done = true;
+      state.progressSeq += 1;
+      state.progressPhase = state.error.code === "cancelled" ? "cancelled" : "failed";
+      geminiFetchWakeReady(state);
+    });
+    const firstByteMs = Number(context?.first_byte_timeout_ms || 30000);
+    await Promise.race([
+      state.ready,
+      sleep(firstByteMs).then(() => { throw new Error("BROWSER_FETCH_REJECTED: Gemini browser fetch first-byte timeout"); })
+    ]);
+    if (state.error) {
+      geminiFetchJobs.delete(streamId);
+      throw new Error(state.error.message);
+    }
+    return state;
+  };
+
+  const pollGeminiBrowserFetch = (streamId) => {
+    const state = geminiFetchJobs.get(String(streamId || ""));
+    if (!state) return { events: [], done: true, error: { code: "stream_not_found", message: "Gemini browser fetch stream not found" } };
+    const events = state.events.splice(0);
+    if (state.done && !state.error && !state.finalEmitted) {
+      events.push(geminiFetchChunk(state, {}, "stop"));
+      state.finalEmitted = true;
+    }
+    const done = state.done && (Boolean(state.error) || state.finalEmitted);
+    const result = {
+      events,
+      done,
+      error: state.error,
+      progress_seq: state.progressSeq,
+      progress_phase: state.progressPhase
+    };
+    if (done) geminiFetchJobs.delete(state.streamId);
+    return result;
+  };
+
+  const cancelGeminiBrowserFetch = (streamId) => {
+    const state = geminiFetchJobs.get(String(streamId || ""));
+    if (!state) return { cancelled: false, missing: true };
+    state.cancelled = true;
+    try { state.controller?.abort?.(); } catch (_) {}
+    state.error = { code: "cancelled", message: "Gemini browser fetch cancelled" };
+    state.done = true;
+    state.progressSeq += 1;
+    state.progressPhase = "cancelled";
+    geminiFetchWakeReady(state);
+    return { cancelled: true };
+  };
+
+  const bufferedGeminiBrowserFetch = async (request, context) => {
+    const state = await startGeminiBrowserFetch(request, context);
+    await state.worker;
+    if (state.error) {
+      geminiFetchJobs.delete(state.streamId);
+      throw new Error(state.error.message);
+    }
+    geminiFetchJobs.delete(state.streamId);
+    return {
+      status: 200,
+      content_type: "application/json",
+      body: openAIResult(request, state.model, state.latest, "chatcmpl_gemini_fetch_")
+    };
+  };
+
   globalThis.__LLMGATEWAY_ADAPTER__ = {
     meta: {
       contract_version: CONTRACT_VERSION,
@@ -627,16 +1013,28 @@
       };
     },
 
+    async browserFetch(request, context) {
+      return bufferedGeminiBrowserFetch(request, context);
+    },
+
     async streamStart(request, context) {
+      if (context?.transport === "browser_fetch") {
+        const state = await startGeminiBrowserFetch(request, context);
+        return { stream_id: state.streamId, status: 200, content_type: "text/event-stream" };
+      }
       return startStreamJob(request, context);
     },
 
     async streamPoll(request) {
-      return pollStreamJob(request?.stream_id);
+      const streamId = String(request?.stream_id || "");
+      if (streamId.startsWith("gemini_fetch_")) return pollGeminiBrowserFetch(streamId);
+      return pollStreamJob(streamId);
     },
 
     async streamCancel(request) {
-      return cancelStreamJob(request?.stream_id);
+      const streamId = String(request?.stream_id || "");
+      if (streamId.startsWith("gemini_fetch_")) return cancelGeminiBrowserFetch(streamId);
+      return cancelStreamJob(streamId);
     },
 
     async chat(request, context) {

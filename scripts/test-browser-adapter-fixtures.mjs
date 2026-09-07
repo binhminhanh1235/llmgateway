@@ -43,6 +43,7 @@ globalThis.KeyboardEvent = class {
   constructor(type, init = {}) { this.type = type; Object.assign(this, init); }
 };
 globalThis.sessionStorage = new FakeSessionStorage();
+globalThis.localStorage = new FakeSessionStorage();
 
 function installPage({ host, path = "/app", nodes = {} }) {
   globalThis.location = { hostname: host, pathname: path, search: "" };
@@ -1270,6 +1271,264 @@ async function testMidRequestLoginExpiry() {
   );
 }
 
+
+function fakeFetchResponse(body, {
+  status = 200,
+  contentType = "application/json",
+  chunks = null,
+  delayMs = 0
+} = {}) {
+  const text = String(body ?? "");
+  const encodedChunks = (chunks || [text]).map((chunk) => new TextEncoder().encode(String(chunk)));
+  let index = 0;
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: {
+      get(name) {
+        return String(name || "").toLowerCase() === "content-type" ? contentType : null;
+      }
+    },
+    async text() { return text || (chunks || []).join(""); },
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+            if (index >= encodedChunks.length) return { value: undefined, done: true };
+            return { value: encodedChunks[index++], done: false };
+          }
+        };
+      }
+    }
+  };
+}
+
+function qwenFixtureSse(answer = "browser fetch ok") {
+  return [
+    'data: {"response.created":{"chat_id":"chat-fetch","response_id":"response-fetch"}}\n\n',
+    'data: ' + JSON.stringify({ choices: [{ delta: { role: "assistant", content: answer, phase: "answer", status: "typing" } }] }) + '\n\n',
+    'data: {"choices":[{"delta":{"role":"assistant","content":"","phase":"answer","status":"finished"},"finish_reason":"stop"}]}\n\n',
+    'data: [DONE]\n\n'
+  ];
+}
+
+function geminiFixtureFrame(answer = "gemini browser fetch ok") {
+  const metadata = ["conversation-fetch", "response-fetch"];
+  const candidate = Array(9).fill(null);
+  candidate[0] = "candidate-fetch";
+  candidate[1] = [answer];
+  candidate[8] = [2];
+  const inner = Array(9).fill(null);
+  inner[1] = metadata;
+  inner[4] = [candidate];
+  const part = Array(6).fill(null);
+  part[2] = JSON.stringify(inner);
+  const frame = JSON.stringify([part]);
+  return ")]}'\n" + String(frame.length + 1) + "\n" + frame + "\n";
+}
+
+async function testQwenBrowserFetchBuffered() {
+  const oldFetch = globalThis.fetch;
+  const input = new FakeTextAreaElement();
+  const send = new FakeElement("Send");
+  let sendClicks = 0;
+  send.onClick = () => { sendClicks += 1; };
+  installPage({
+    host: "chat.qwen.ai",
+    nodes: {
+      "textarea.message-input-textarea": input,
+      "button.send-button": send
+    }
+  });
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    if (String(url).includes("/api/v2/chats/new")) {
+      return fakeFetchResponse(JSON.stringify({ data: { id: "chat-fetch" } }));
+    }
+    if (String(url).includes("/api/v2/chat/completions")) {
+      const chunks = qwenFixtureSse("qwen browser-context fetch");
+      return fakeFetchResponse(chunks.join(""), {
+        contentType: "text/event-stream",
+        chunks
+      });
+    }
+    throw new Error("unexpected Qwen fixture URL " + url);
+  };
+  try {
+    const adapter = loadAdapter("adapters/qwen-web.js");
+    assert.equal(typeof adapter.browserFetch, "function");
+    const result = await adapter.browserFetch({
+      model: "qwen-fixture-model",
+      stream: false,
+      messages: [{ role: "user", content: "fetch without UI" }]
+    }, { transport: "browser_fetch", first_byte_timeout_ms: 1000 });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.choices[0].message.content, "qwen browser-context fetch");
+    assert.equal(sendClicks, 0, "browser-fetch must not submit through the DOM");
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].init.credentials, "include");
+    assert.equal(calls[1].init.credentials, "include");
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+}
+
+async function testQwenBrowserFetchStreamingAndCancellation() {
+  const oldFetch = globalThis.fetch;
+  installPage({
+    host: "chat.qwen.ai",
+    nodes: { "textarea.message-input-textarea": new FakeTextAreaElement() }
+  });
+  let completionSignal = null;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes("/api/v2/chats/new")) {
+      return fakeFetchResponse(JSON.stringify({ data: { id: "chat-stream" } }));
+    }
+    if (String(url).includes("/api/v2/chat/completions")) {
+      completionSignal = init.signal;
+      const chunks = [
+        'data: {"response.created":{"chat_id":"chat-stream","response_id":"response-stream"}}\n\n' +
+        'data: {"choices":[{"delta":{"role":"assistant","content":"first","phase":"answer","status":"typing"}}]}\n\n',
+        'data: {"choices":[{"delta":{"role":"assistant","content":" second","phase":"answer","status":"typing"}}]}\n\n'
+      ];
+      return fakeFetchResponse(chunks.join(""), {
+        contentType: "text/event-stream",
+        chunks,
+        delayMs: 80
+      });
+    }
+    throw new Error("unexpected Qwen fixture URL " + url);
+  };
+  try {
+    const adapter = loadAdapter("adapters/qwen-web.js");
+    const started = await adapter.streamStart({
+      model: "qwen-fixture-model",
+      stream: true,
+      messages: [{ role: "user", content: "stream browser fetch" }]
+    }, { transport: "browser_fetch", first_byte_timeout_ms: 1000 });
+    assert.match(started.stream_id, /^qwen_fetch_/);
+    const first = await adapter.streamPoll({ stream_id: started.stream_id });
+    assert.ok(first.events.some((event) =>
+      String(event?.choices?.[0]?.delta?.content || "").includes("first")
+    ));
+    const cancelled = await adapter.streamCancel({ stream_id: started.stream_id });
+    assert.equal(cancelled.cancelled, true);
+    assert.equal(completionSignal?.aborted, true, "browser-fetch cancellation must abort provider fetch");
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+}
+
+async function testGeminiBrowserFetchBufferedAndModelIsolation() {
+  const oldFetch = globalThis.fetch;
+  const input = new FakeElement();
+  const send = new FakeElement("Send");
+  let sendClicks = 0;
+  send.onClick = () => { sendClicks += 1; };
+  installPage({
+    host: "gemini.google.com",
+    nodes: {
+      "div[aria-label='Enter a prompt for Gemini']": input,
+      "button[aria-label='Send message']": send
+    }
+  });
+  let fetchCalls = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    fetchCalls += 1;
+    if (String(url) === "/app") {
+      return fakeFetchResponse('<script>{"SNlM0e":"token-fetch","cfb2h":"build-fetch","FdrFJe":"sid-fetch","TuX5cc":"en"}</script>', {
+        contentType: "text/html"
+      });
+    }
+    if (String(url).includes("StreamGenerate")) {
+      const frame = geminiFixtureFrame("gemini browser-context fetch");
+      return fakeFetchResponse(frame, {
+        contentType: "application/json",
+        chunks: [frame]
+      });
+    }
+    throw new Error("unexpected Gemini fixture URL " + url);
+  };
+  try {
+    const adapter = loadAdapter("adapters/gemini-web.js");
+    assert.equal(typeof adapter.browserFetch, "function");
+    const result = await adapter.browserFetch({
+      model: "gemini-web-default",
+      stream: false,
+      messages: [{ role: "user", content: "fetch without UI" }]
+    }, {
+      transport: "browser_fetch",
+      thread_id_present: false,
+      first_byte_timeout_ms: 1000
+    });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.choices[0].message.content, "gemini browser-context fetch");
+    assert.equal(sendClicks, 0, "Gemini browser-fetch must not click the UI");
+    assert.equal(fetchCalls, 2);
+
+    fetchCalls = 0;
+    await assert.rejects(
+      () => adapter.browserFetch({
+        model: "gemini-web-pro",
+        stream: false,
+        messages: [{ role: "user", content: "preserve exact model" }]
+      }, { transport: "browser_fetch", thread_id_present: false }),
+      /BROWSER_FETCH_UNSUPPORTED: Gemini selected-model/
+    );
+    assert.equal(fetchCalls, 0, "unsupported selected model must fall back before provider submission");
+
+    await assert.rejects(
+      () => adapter.browserFetch({
+        model: "gemini-web-default",
+        stream: false,
+        messages: [{ role: "user", content: "preserve native thread" }]
+      }, { transport: "browser_fetch", thread_id_present: true }),
+      /BROWSER_FETCH_UNSUPPORTED: Gemini native conversation/
+    );
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+}
+
+async function testBrowserFetchRejectsSemanticLossBeforeSubmission() {
+  const oldFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; throw new Error("must not submit"); };
+  try {
+    installPage({
+      host: "chat.qwen.ai",
+      nodes: { "textarea.message-input-textarea": new FakeTextAreaElement() }
+    });
+    let adapter = loadAdapter("adapters/qwen-web.js");
+    await assert.rejects(
+      () => adapter.browserFetch({
+        model: "qwen-fixture-model",
+        messages: [{ role: "user", content: "tool please" }],
+        tools: [{ type: "function", function: { name: "lookup" } }]
+      }, { transport: "browser_fetch" }),
+      /BROWSER_FETCH_UNSUPPORTED/
+    );
+
+    installPage({
+      host: "gemini.google.com",
+      nodes: { "div[aria-label='Enter a prompt for Gemini']": new FakeElement() }
+    });
+    adapter = loadAdapter("adapters/gemini-web.js");
+    await assert.rejects(
+      () => adapter.browserFetch({
+        model: "gemini-web-default",
+        messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "x" } }] }]
+      }, { transport: "browser_fetch", thread_id_present: false }),
+      /BROWSER_FETCH_UNSUPPORTED/
+    );
+    assert.equal(calls, 0, "semantic-loss guard must fail before network submission");
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+}
+
 await testGemini();
 await testChatGPT();
 await testChatGPTProseMirrorStateSyncBeforeSubmit();
@@ -1296,4 +1555,8 @@ await testGeminiStreamCancellation();
 await testGeminiFreshThreadForcesNewChat();
 await testGeminiReopenWaitsForStableHistoryAndIgnoresRerenderedOldTurns();
 await testMidRequestLoginExpiry();
-console.log("built-in Gemini/ChatGPT/Qwen/DeepSeek/MiMo fake-page adapter fixtures passed");
+await testQwenBrowserFetchBuffered();
+await testQwenBrowserFetchStreamingAndCancellation();
+await testGeminiBrowserFetchBufferedAndModelIsolation();
+await testBrowserFetchRejectsSemanticLossBeforeSubmission();
+console.log("built-in Gemini/ChatGPT/Qwen/DeepSeek/MiMo + browser-fetch fake-page adapter fixtures passed");

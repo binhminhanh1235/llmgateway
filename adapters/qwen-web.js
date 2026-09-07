@@ -2,7 +2,7 @@
 // Contract v1. Runs inside an authenticated chat.qwen.ai page through loopback CDP.
 (() => {
   const CONTRACT_VERSION = 1;
-  const ADAPTER_VERSION = "2026.09.7";
+  const ADAPTER_VERSION = "2026.09.07.browser-fetch.1";
 
   const defaults = {
     input: [
@@ -508,6 +508,369 @@
     return { cancelled: true };
   };
 
+
+  // P5 browser-context fetch bridge. This runs inside chat.qwen.ai, so the browser
+  // owns cookies, SameSite behavior and anti-abuse policy. We only replay optional
+  // values already present in storage and never synthesize WAF/CAPTCHA material.
+  const browserFetchJobs = globalThis.__LLMGATEWAY_QWEN_FETCH_JOBS__ || new Map();
+  globalThis.__LLMGATEWAY_QWEN_FETCH_JOBS__ = browserFetchJobs;
+
+  const browserFetchTextOnly = (request) => {
+    if (Array.isArray(request?.tools) && request.tools.length) {
+      throw new Error("BROWSER_FETCH_UNSUPPORTED: Qwen browser fetch defers tool-call requests to UI transport");
+    }
+    const messages = Array.isArray(request?.messages) ? request.messages : [];
+    for (const message of messages) {
+      const content = message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const part of content) {
+        if (typeof part === "string") continue;
+        const type = String(part?.type || "");
+        if (type && type !== "text" && type !== "input_text") {
+          throw new Error("BROWSER_FETCH_UNSUPPORTED: Qwen browser fetch only handles text message parts");
+        }
+      }
+    }
+  };
+
+  const browserStorageValue = (keys) => {
+    for (const key of keys) {
+      for (const storage of [globalThis.localStorage, globalThis.sessionStorage]) {
+        try {
+          const raw = storage?.getItem?.(key);
+          if (raw != null && String(raw).trim()) return String(raw).trim();
+        } catch (_) {}
+      }
+    }
+    return "";
+  };
+
+  const browserToken = () => {
+    const raw = browserStorageValue(["token", "access_token", "accessToken", "auth_token", "authToken"]);
+    if (!raw) return "";
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === "string") return parsed.replace(/^Bearer\s+/i, "").trim();
+      for (const key of ["token", "access_token", "accessToken"]) {
+        if (typeof parsed?.[key] === "string") return parsed[key].replace(/^Bearer\s+/i, "").trim();
+      }
+    } catch (_) {}
+    return raw.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
+  };
+
+  const browserRequestId = () => {
+    try { return globalThis.crypto?.randomUUID?.() || ("fetch-" + Date.now() + "-" + Math.random().toString(36).slice(2)); }
+    catch (_) { return "fetch-" + Date.now() + "-" + Math.random().toString(36).slice(2); }
+  };
+
+  const browserFetchHeaders = (jsonBody = true) => {
+    const headers = {
+      "accept": "application/json, text/plain, */*",
+      "source": "web",
+      "version": browserStorageValue(["version", "app_version", "appVersion", "spa_version", "qwen_version"]) || "0.2.83",
+      "x-request-id": browserRequestId()
+    };
+    if (jsonBody) headers["content-type"] = "application/json";
+    const token = browserToken();
+    if (token) headers["authorization"] = "Bearer " + token;
+    for (const [header, keys] of [
+      ["bx-ua", ["bx-ua", "bx_ua"]],
+      ["bx-umidtoken", ["bx-umidtoken", "bx_umidtoken", "bxUmidToken"]],
+      ["bx-v", ["bx-v", "bx_v", "bxV"]]
+    ]) {
+      const value = browserStorageValue(keys);
+      if (value) headers[header] = value;
+    }
+    return headers;
+  };
+
+  const qwenRiskBody = (body) => /aliyun_waf|baxia|rgv587|punish|action=deny|puredenywait/i.test(String(body || ""));
+  const qwenFetchFailure = (status, contentType, body, phase) => {
+    if (Number(status) === 401) return new Error("LOGIN_REQUIRED: Qwen browser session is no longer authenticated");
+    if (Number(status) === 403 || /text\/html/i.test(String(contentType || "")) || qwenRiskBody(body)) {
+      return new Error("BROWSER_FETCH_WAF_REJECTED: Qwen " + phase + " was rejected by provider risk control");
+    }
+    return new Error("BROWSER_FETCH_REJECTED: Qwen " + phase + " returned HTTP " + String(status));
+  };
+
+  const qwenFetchPrompt = (request) => {
+    browserFetchTextOnly(request);
+    const prompt = formatMessages(request);
+    if (!String(prompt || "").trim()) throw new Error("INVALID_REQUEST: no textual messages to submit");
+    return prompt;
+  };
+
+  const qwenFetchPayload = (chatId, model, prompt) => {
+    const fid = browserRequestId();
+    const childId = browserRequestId();
+    const timestamp = Date.now();
+    return {
+      stream: true,
+      version: "2.1",
+      incremental_output: true,
+      chat_id: chatId,
+      chat_mode: "normal",
+      model,
+      parent_id: null,
+      messages: [{
+        id: null,
+        fid,
+        parentId: null,
+        childrenIds: [childId],
+        role: "user",
+        content: prompt,
+        user_action: "chat",
+        files: [],
+        timestamp,
+        models: [model],
+        model: "",
+        chat_type: "t2t",
+        feature_config: {
+          thinking_enabled: true,
+          output_schema: "phase",
+          research_mode: "normal",
+          auto_thinking: true,
+          thinking_mode: "Auto",
+          thinking_format: "summary",
+          auto_search: false
+        },
+        extra: { meta: { subChatType: "t2t" } },
+        sub_chat_type: "t2t",
+        parent_id: null
+      }],
+      timestamp
+    };
+  };
+
+  const qwenFetchEvent = (state, delta, finishReason = null) => ({
+    id: state.completionId,
+    object: "chat.completion.chunk",
+    model: state.model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }]
+  });
+
+  const qwenFetchWakeReady = (state) => {
+    if (state.readyResolved) return;
+    if (!state.error && !state.done && state.events.length === 0) return;
+    state.readyResolved = true;
+    state.resolveReady?.();
+  };
+
+  const qwenConsumeFetchFrame = (state, frame) => {
+    const data = frame.split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""))
+      .join("\n");
+    if (!data) return;
+    if (data.trim() === "[DONE]") {
+      state.doneMarker = true;
+      return;
+    }
+    let value;
+    try { value = JSON.parse(data); } catch (_) { return; }
+    if (value?.error || value?.success === false) {
+      throw new Error("BROWSER_FETCH_REJECTED: Qwen stream returned an upstream error");
+    }
+    const created = value?.["response.created"];
+    const responseId = created?.response_id || value?.response_id;
+    if (responseId) state.responseId = String(responseId);
+    const choice = Array.isArray(value?.choices) ? value.choices[0] : null;
+    if (!choice) return;
+    const delta = choice?.delta || {};
+    const phase = String(delta?.phase || "");
+    const status = String(delta?.status || "");
+    const answerPhase = !phase || phase === "answer";
+    const content = answerPhase ? String(delta?.content || "") : "";
+    if (content) {
+      state.text += content;
+      const payload = state.roleEmitted ? { content } : { role: "assistant", content };
+      state.roleEmitted = true;
+      state.events.push(qwenFetchEvent(state, payload));
+      state.progressSeq += 1;
+      state.progressPhase = "streaming";
+      qwenFetchWakeReady(state);
+    }
+    if (choice?.finish_reason != null || (answerPhase && status === "finished")) {
+      state.completed = true;
+    }
+  };
+
+  const qwenPumpFetch = async (state, response) => {
+    const reader = response.body?.getReader?.();
+    if (!reader) throw new Error("BROWSER_FETCH_UNSUPPORTED: Qwen response body is not incrementally readable");
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      if (state.cancelled) throw new Error("STREAM_CANCELLED: Qwen browser fetch cancelled");
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let match;
+      while ((match = buffer.match(/\r?\n\r?\n/))) {
+        const index = match.index;
+        const frame = buffer.slice(0, index);
+        buffer = buffer.slice(index + match[0].length);
+        qwenConsumeFetchFrame(state, frame);
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) qwenConsumeFetchFrame(state, buffer);
+    if (!state.completed && !state.doneMarker) {
+      throw new Error("BROWSER_FETCH_REJECTED: Qwen stream ended before logical completion");
+    }
+    if (!state.text.trim()) {
+      throw new Error("BROWSER_FETCH_REJECTED: Qwen stream completed without assistant output");
+    }
+    state.done = true;
+    state.progressSeq += 1;
+    state.progressPhase = "completed";
+    qwenFetchWakeReady(state);
+  };
+
+  const startQwenBrowserFetch = async (request, context) => {
+    if (location.hostname !== "chat.qwen.ai") {
+      throw new Error("BROWSER_FETCH_UNSUPPORTED: Qwen browser fetch requires chat.qwen.ai origin");
+    }
+    const prompt = qwenFetchPrompt(request);
+    const model = String(request?.model || context?.model_label || "");
+    if (!model) throw new Error("INVALID_REQUEST: Qwen browser fetch requires a model");
+
+    const create = await fetch("/api/v2/chats/new", {
+      method: "POST",
+      credentials: "include",
+      headers: browserFetchHeaders(true),
+      body: JSON.stringify({
+        title: "New Chat",
+        models: [model],
+        chat_mode: "normal",
+        chat_type: "t2t",
+        timestamp: Date.now()
+      })
+    });
+    const createType = create.headers?.get?.("content-type") || "";
+    const createText = await create.text();
+    if (!create.ok) throw qwenFetchFailure(create.status, createType, createText, "create-chat");
+    if (qwenRiskBody(createText)) throw qwenFetchFailure(create.status, createType, createText, "create-chat");
+    let createValue;
+    try { createValue = JSON.parse(createText); }
+    catch (_) { throw new Error("BROWSER_FETCH_REJECTED: Qwen create-chat returned invalid JSON"); }
+    if (createValue?.success === false) {
+      if (qwenRiskBody(createText)) throw qwenFetchFailure(create.status, createType, createText, "create-chat");
+      throw new Error("BROWSER_FETCH_REJECTED: Qwen create-chat was rejected");
+    }
+    const chatId = String(createValue?.data?.id || createValue?.data?.chat_id || createValue?.chat_id || "").trim();
+    if (!chatId) throw new Error("BROWSER_FETCH_REJECTED: Qwen create-chat returned no chat id");
+
+    const controller = new AbortController();
+    const completion = await fetch("/api/v2/chat/completions?chat_id=" + encodeURIComponent(chatId), {
+      method: "POST",
+      credentials: "include",
+      headers: browserFetchHeaders(true),
+      signal: controller.signal,
+      body: JSON.stringify(qwenFetchPayload(chatId, model, prompt))
+    });
+    const completionType = completion.headers?.get?.("content-type") || "";
+    if (!completion.ok || !/text\/event-stream/i.test(completionType)) {
+      const body = await completion.text();
+      throw qwenFetchFailure(completion.status, completionType, body, "completion");
+    }
+
+    const streamId = "qwen_fetch_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+    const state = {
+      streamId,
+      completionId: "chatcmpl_qwen_fetch_" + Date.now(),
+      model,
+      chatId,
+      controller,
+      events: [],
+      text: "",
+      responseId: "",
+      completed: false,
+      doneMarker: false,
+      done: false,
+      finalEmitted: false,
+      roleEmitted: false,
+      cancelled: false,
+      error: null,
+      progressSeq: 1,
+      progressPhase: "submitted",
+      readyResolved: false,
+      resolveReady: null,
+      ready: null
+    };
+    state.ready = new Promise((resolve) => { state.resolveReady = resolve; });
+    browserFetchJobs.set(streamId, state);
+    state.worker = qwenPumpFetch(state, completion).catch((error) => {
+      state.error = {
+        code: /^STREAM_CANCELLED:/i.test(String(error?.message || error)) ? "cancelled" : "browser_fetch_rejected",
+        message: String(error?.message || error)
+      };
+      state.done = true;
+      state.progressSeq += 1;
+      state.progressPhase = state.error.code === "cancelled" ? "cancelled" : "failed";
+      qwenFetchWakeReady(state);
+    });
+
+    const firstByteMs = Number(context?.first_byte_timeout_ms || 30000);
+    await Promise.race([
+      state.ready,
+      sleep(firstByteMs).then(() => { throw new Error("BROWSER_FETCH_REJECTED: Qwen browser fetch first-byte timeout"); })
+    ]);
+    if (state.error) {
+      browserFetchJobs.delete(streamId);
+      throw new Error(state.error.message);
+    }
+    return state;
+  };
+
+  const pollQwenBrowserFetch = (streamId) => {
+    const state = browserFetchJobs.get(String(streamId || ""));
+    if (!state) return { events: [], done: true, error: { code: "stream_not_found", message: "Qwen browser fetch stream not found" } };
+    const events = state.events.splice(0);
+    if (state.done && !state.error && !state.finalEmitted) {
+      events.push(qwenFetchEvent(state, {}, "stop"));
+      state.finalEmitted = true;
+    }
+    const done = state.done && (Boolean(state.error) || state.finalEmitted);
+    const result = {
+      events,
+      done,
+      error: state.error,
+      progress_seq: state.progressSeq,
+      progress_phase: state.progressPhase
+    };
+    if (done) browserFetchJobs.delete(state.streamId);
+    return result;
+  };
+
+  const cancelQwenBrowserFetch = (streamId) => {
+    const state = browserFetchJobs.get(String(streamId || ""));
+    if (!state) return { cancelled: false, missing: true };
+    state.cancelled = true;
+    try { state.controller?.abort?.(); } catch (_) {}
+    state.error = { code: "cancelled", message: "Qwen browser fetch cancelled" };
+    state.done = true;
+    state.progressSeq += 1;
+    state.progressPhase = "cancelled";
+    qwenFetchWakeReady(state);
+    return { cancelled: true };
+  };
+
+  const bufferedQwenBrowserFetch = async (request, context) => {
+    const state = await startQwenBrowserFetch(request, context);
+    await state.worker;
+    if (state.error) {
+      browserFetchJobs.delete(state.streamId);
+      throw new Error(state.error.message);
+    }
+    browserFetchJobs.delete(state.streamId);
+    return {
+      status: 200,
+      content_type: "application/json",
+      body: openAIResult(request, state.model, state.text, "chatcmpl_qwen_fetch_")
+    };
+  };
+
   globalThis.__LLMGATEWAY_ADAPTER__ = {
     meta: {
       contract_version: CONTRACT_VERSION,
@@ -546,16 +909,28 @@
       };
     },
 
+    async browserFetch(request, context) {
+      return bufferedQwenBrowserFetch(request, context);
+    },
+
     async streamStart(request, context) {
+      if (context?.transport === "browser_fetch") {
+        const state = await startQwenBrowserFetch(request, context);
+        return { stream_id: state.streamId, status: 200, content_type: "text/event-stream" };
+      }
       return startStreamJob(request, context);
     },
 
     async streamPoll(request) {
-      return pollStreamJob(request?.stream_id);
+      const streamId = String(request?.stream_id || "");
+      if (streamId.startsWith("qwen_fetch_")) return pollQwenBrowserFetch(streamId);
+      return pollStreamJob(streamId);
     },
 
     async streamCancel(request) {
-      return cancelStreamJob(request?.stream_id);
+      const streamId = String(request?.stream_id || "");
+      if (streamId.startsWith("qwen_fetch_")) return cancelQwenBrowserFetch(streamId);
+      return cancelStreamJob(streamId);
     },
 
     async chat(request, context) {
