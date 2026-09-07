@@ -712,6 +712,7 @@ impl BrowserProviderConfig {
 }
 
 impl BrowserProviderRegistry {
+    #[allow(dead_code)]
     pub fn new(config: BrowserProviderConfig) -> Result<Self, BrowserProviderError> {
         Self::with_runtime_health(config, Arc::new(RuntimeHealthGraph::default()))
     }

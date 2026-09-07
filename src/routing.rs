@@ -110,6 +110,7 @@ pub struct Router {
 }
 
 impl Router {
+    #[allow(dead_code)]
     pub fn new(
         config: Arc<AppConfig>,
         live_config: LiveConfig,

@@ -205,6 +205,7 @@ impl RuntimeHealthGraph {
             .collect()
     }
 
+    #[cfg(test)]
     async fn snapshot_at(
         &self,
         key: &RuntimeHealthKey,

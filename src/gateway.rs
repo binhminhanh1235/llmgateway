@@ -256,6 +256,7 @@ pub enum GatewayError {
 }
 
 impl Gateway {
+    #[allow(dead_code)]
     pub fn new(
         config: Arc<AppConfig>,
         live_config: LiveConfig,
@@ -564,8 +565,12 @@ impl Gateway {
                 .await
             {
                 Ok(permit) => permit,
-                Err(_) => {
-                    recovery_reason = Some("runtime_breaker_open".into());
+                Err(blocked) => {
+                    recovery_reason = blocked
+                        .snapshot
+                        .last_failure_class
+                        .clone()
+                        .or_else(|| Some("runtime_breaker_open".into()));
                     continue;
                 }
             };
