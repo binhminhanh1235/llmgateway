@@ -1,6 +1,6 @@
 use crate::{
     account_runtime::{AccountRuntimeRegistry, AccountRuntimeSnapshot, ProviderRuntimePolicy},
-    browser_auth_runtime, browser_session_runtime,
+    browser_auth_runtime, browser_runtime, browser_session_runtime,
     chatgpt_web_transport::ChatGptWebHttpAdapter,
     chromium_driver_runtime,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
@@ -1484,6 +1484,15 @@ impl BrowserProviderRegistry {
     }
 
     async fn ensure_cdp_session_ready(&self, session_id: &str) -> bool {
+        if let Some(runtime) = browser_runtime::get() {
+            return runtime
+                .ensure_background_ready(session_id)
+                .await
+                .unwrap_or(false);
+        }
+
+        // Test/minimal-runtime fallback remains invisible-first even when the global
+        // supervisor is not installed.
         if self.cdp_session_live(session_id).await {
             return true;
         }
@@ -1491,7 +1500,31 @@ impl BrowserProviderRegistry {
             return false;
         };
 
-        if driver.launch(session_id).await.is_err()
+        if driver
+            .status(session_id)
+            .await
+            .is_ok_and(|status| status.running && status.debugger_reachable)
+            && driver
+                .reacquire_ready_page(session_id)
+                .await
+                .unwrap_or(false)
+            && driver
+                .verify(session_id)
+                .await
+                .is_ok_and(|verification| verification.authenticated)
+        {
+            return true;
+        }
+
+        if driver
+            .status(session_id)
+            .await
+            .is_ok_and(|status| status.running)
+        {
+            let _ = driver.suspend(session_id).await;
+        }
+
+        if driver.launch_headless(session_id).await.is_err()
             && !driver
                 .status(session_id)
                 .await
@@ -1536,7 +1569,7 @@ impl BrowserProviderRegistry {
         match result {
             Ok(ready) => ready,
             Err(_) => {
-                if !browser_was_live {
+                if !browser_was_live && browser_runtime::get().is_none() {
                     stop_browser_runtime_soon(session_id);
                 }
                 false
@@ -1830,12 +1863,14 @@ impl BrowserProviderRegistry {
                 browser_fallback_used = true;
                 used_adapter = browser_adapter.clone();
                 if let Err(error) = self.mark_direct_state_unsynced(&adapter_request).await {
-                    if !browser_was_live {
+                    if !browser_was_live && browser_runtime::get().is_none() {
                         stop_browser_runtime_soon(binding.session.clone());
                     }
                     Err(error)
                 } else {
-                    let fallback_result = self
+                    let execution_guard =
+                        browser_execution_guard(binding.session.clone(), !browser_was_live);
+                    match self
                         .execute_transport(
                             provider,
                             account,
@@ -1845,35 +1880,44 @@ impl BrowserProviderRegistry {
                             adapter_request,
                             "browser_runtime",
                         )
-                        .await;
-                    if browser_was_live {
-                        fallback_result
-                    } else {
-                        match fallback_result {
-                            Ok(response) => {
-                                wrap_response_with_browser_stop(response, binding.session.clone())
-                            }
-                            Err(error) => {
-                                stop_browser_runtime_soon(binding.session.clone());
-                                Err(error)
-                            }
-                        }
+                        .await
+                    {
+                        Ok(response) => wrap_response_with_browser_guard(response, execution_guard),
+                        Err(error) => Err(error),
                     }
                 }
             } else {
                 direct_result
             }
         } else {
-            self.execute_transport(
-                provider,
-                account,
-                route,
-                &binding,
-                browser_adapter.clone(),
-                adapter_request,
-                "browser_runtime",
-            )
-            .await
+            let browser_was_live = self.cdp_session_live(&binding.session).await;
+            if !self
+                .ensure_account_cdp_session_ready(provider, account, &binding)
+                .await
+            {
+                Err(BrowserProviderError::SessionUnavailable {
+                    account_id: account.id.clone(),
+                    session_id: binding.session.clone(),
+                })
+            } else {
+                let execution_guard =
+                    browser_execution_guard(binding.session.clone(), !browser_was_live);
+                match self
+                    .execute_transport(
+                        provider,
+                        account,
+                        route,
+                        &binding,
+                        browser_adapter.clone(),
+                        adapter_request,
+                        "browser_runtime",
+                    )
+                    .await
+                {
+                    Ok(response) => wrap_response_with_browser_guard(response, execution_guard),
+                    Err(error) => Err(error),
+                }
+            }
         };
 
         match &result {
@@ -1967,6 +2011,24 @@ impl Drop for BrowserFallbackStopGuard {
     }
 }
 
+struct BrowserExecutionGuard {
+    _runtime_lease: Option<crate::browser_runtime::BrowserRuntimeLease>,
+    _fallback_stop: Option<BrowserFallbackStopGuard>,
+}
+
+fn browser_execution_guard(session_id: String, stop_when_released: bool) -> BrowserExecutionGuard {
+    if let Some(runtime) = browser_runtime::get() {
+        return BrowserExecutionGuard {
+            _runtime_lease: runtime.acquire_lease(&session_id),
+            _fallback_stop: None,
+        };
+    }
+    BrowserExecutionGuard {
+        _runtime_lease: None,
+        _fallback_stop: stop_when_released.then(|| BrowserFallbackStopGuard::new(session_id)),
+    }
+}
+
 fn stop_browser_runtime_soon(session_id: String) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
@@ -1978,15 +2040,14 @@ fn stop_browser_runtime_soon(session_id: String) {
     });
 }
 
-fn wrap_response_with_browser_stop(
+fn wrap_response_with_browser_guard(
     response: reqwest::Response,
-    session_id: String,
+    guard: BrowserExecutionGuard,
 ) -> Result<reqwest::Response, BrowserProviderError> {
     let status = response.status();
     let headers = response.headers().clone();
-    // Construct the guard outside the generator so the response owns it even if
-    // the body is dropped before its first poll.
-    let guard = BrowserFallbackStopGuard::new(session_id);
+    // Construct the guard outside the generator so cancellation before first poll
+    // still releases the lease or legacy stop guard deterministically.
     let stream = async_stream::stream! {
         let _guard = guard;
         let mut body = response.bytes_stream();

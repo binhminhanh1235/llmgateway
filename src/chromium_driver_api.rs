@@ -1,6 +1,6 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
-    browser_provider_runtime,
+    browser_provider_runtime, browser_runtime,
     chromium_driver::{ChromiumDriver, ChromiumDriverError},
     chromium_driver_runtime,
 };
@@ -25,13 +25,28 @@ pub async fn launch_chromium_login(
         return unavailable();
     };
     invalidate_session_lifecycle(&session_id);
+    if let Some(runtime) = browser_runtime::get() {
+        if let Err(error) = runtime.prepare_interactive(&session_id).await {
+            return driver_error(error);
+        }
+    }
     match driver.launch(&session_id).await {
-        Ok(launch) => json_response(
-            StatusCode::OK,
-            json!({"launched":true,"launch":launch}),
-            None,
-        ),
-        Err(error) => driver_error(error),
+        Ok(launch) => {
+            if let Some(runtime) = browser_runtime::get() {
+                runtime.note_interactive_started(&session_id);
+            }
+            json_response(
+                StatusCode::OK,
+                json!({"launched":true,"launch":launch}),
+                None,
+            )
+        }
+        Err(error) => {
+            if let Some(runtime) = browser_runtime::get() {
+                runtime.note_interactive_launch_failed(&session_id);
+            }
+            driver_error(error)
+        }
     }
 }
 
@@ -67,7 +82,12 @@ pub async fn verify_chromium_login(
         Ok(mut verification) => {
             if verification.authenticated && verification.auth_material_captured {
                 refresh_session_browser_models(&state, &session_id).await;
-                if let Some(status) =
+                if let Some(runtime) = browser_runtime::get() {
+                    if let Ok(status) = runtime.finish_interactive_login(&session_id).await {
+                        verification.browser_closed_after_capture = true;
+                        verification.status = status;
+                    }
+                } else if let Some(status) =
                     release_session_browser_if_direct_ready(&state, &session_id).await
                 {
                     verification.browser_closed_after_capture = true;
@@ -161,12 +181,20 @@ pub async fn stop_chromium(
         return unavailable();
     };
     invalidate_session_lifecycle(&session_id);
+    if let Some(runtime) = browser_runtime::get() {
+        runtime.invalidate(&session_id);
+    }
     match driver.stop(&session_id).await {
-        Ok(status) => json_response(
-            StatusCode::OK,
-            json!({"stopped":true,"status":status}),
-            None,
-        ),
+        Ok(status) => {
+            if let Some(runtime) = browser_runtime::get() {
+                runtime.note_explicit_stop(&session_id);
+            }
+            json_response(
+                StatusCode::OK,
+                json!({"stopped":true,"status":status}),
+                None,
+            )
+        }
         Err(error) => driver_error(error),
     }
 }
@@ -198,6 +226,7 @@ fn driver_error(error: ChromiumDriverError) -> Response<Body> {
         | ChromiumDriverError::SessionDisabled(_)
         | ChromiumDriverError::ExecutableNotFound
         | ChromiumDriverError::AlreadyRunning(_)
+        | ChromiumDriverError::BackgroundLaunchNotReady(_)
         | ChromiumDriverError::InvalidDevToolsPort(_)
         | ChromiumDriverError::InvalidConfig(_) => json_error(
             StatusCode::BAD_REQUEST,
@@ -207,6 +236,11 @@ fn driver_error(error: ChromiumDriverError) -> Response<Body> {
         ChromiumDriverError::BrowserSession(error) => json_error(
             StatusCode::BAD_REQUEST,
             "browser_session_error",
+            &error.to_string(),
+        ),
+        ChromiumDriverError::ResourceBudgetExhausted(_) => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chromium_resource_budget_exhausted",
             &error.to_string(),
         ),
         ChromiumDriverError::Launch(_)

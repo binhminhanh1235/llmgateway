@@ -8,6 +8,7 @@ mod browser_auth;
 mod browser_auth_runtime;
 mod browser_provider;
 mod browser_provider_runtime;
+mod browser_runtime;
 mod browser_runtime_api;
 mod browser_session;
 mod browser_session_api;
@@ -72,6 +73,7 @@ use browser_account_setup::{
 };
 use browser_auth::BrowserAuthVault;
 use browser_provider::{BrowserProviderConfig, BrowserProviderRegistry};
+use browser_runtime::{BrowserRuntimeConfig, BrowserRuntimeSupervisor};
 use browser_runtime_api::{
     browser_account_runtime_diagnostics, browser_thread_affinity_diagnostics,
 };
@@ -137,6 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let browser_config = BrowserConfig::load_from_gateway_config(&config_path)?;
     let browser_auth_vault_root = browser_config.auth_vault_root.clone();
     let browser_provider_config = BrowserProviderConfig::load_from_gateway_config(&config_path)?;
+    let browser_runtime_config = BrowserRuntimeConfig::load_from_gateway_config(&config_path)?;
     let chromium_config = ChromiumConfig::load_from_gateway_config(&config_path)?;
     let config = Arc::new(AppConfig::load(&config_path)?);
     let live_config = LiveConfig::new(config.clone());
@@ -176,6 +179,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let runtime_health = Arc::new(RuntimeHealthGraph::default());
     let account_runtimes = Arc::new(AccountRuntimeRegistry::default());
+    let browser_runtime_supervisor = Arc::new(BrowserRuntimeSupervisor::new(
+        browser_runtime_config,
+        chromium_driver.clone(),
+    )?);
+    browser_runtime::install(browser_runtime_supervisor.clone())
+        .map_err(|_| "browser runtime supervisor was already initialized")?;
     let browser_providers = Arc::new(BrowserProviderRegistry::with_runtime_fabric(
         browser_provider_config,
         runtime_health.clone(),
@@ -199,12 +208,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ready = startup_browser_reconcile.ready,
             recovered = startup_browser_reconcile.recovered,
             attention = startup_browser_reconcile.attention,
-            "Chromium browser driver enabled and startup reconciliation completed"
+            "Chromium browser driver enabled and startup reconciliation completed without auto-launch"
         );
 
         let reconcile_driver = chromium_driver.clone();
         let reconcile_providers = browser_providers.clone();
         let reconcile_live_config = live_config.clone();
+        let reconcile_browser_runtime = browser_runtime_supervisor.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(
@@ -217,6 +227,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let summary = reconcile_driver
                     .reconcile_all_excluding(&browserless_idle)
                     .await;
+                let reclaimed = reconcile_browser_runtime.reclaim_idle().await;
+                if !reclaimed.is_empty() {
+                    info!(
+                        reclaimed = reclaimed.len(),
+                        sessions = %reclaimed.join(","),
+                        "idle browser runtimes reclaimed"
+                    );
+                }
                 if summary.recovered > 0 {
                     info!(
                         recovered = summary.recovered,
@@ -265,6 +283,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             if !has_real_models {
+                if config
+                    .provider(&account.provider)
+                    .is_some_and(|provider| provider.is_browser())
+                {
+                    info!(
+                        account_id = %account.id,
+                        "browser-backed model refresh deferred until explicit login or request; startup remains browser-cold"
+                    );
+                    continue;
+                }
                 info!(
                     account_id = %account.id,
                     "account has only default models or no models; refreshing on startup"

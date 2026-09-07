@@ -39,6 +39,7 @@ jobs:
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
       - run: bash -n scripts/live-mimo-browserless-acceptance.sh
       - run: bash -n scripts/smoke-gemini-recovery.sh
+      - run: bash -n scripts/smoke-invisible-browser-runtime.sh
       - run: RUSTFLAGS="-D warnings" cargo check --all-targets
       - run: cargo clippy --all-targets
       - run: cargo test --all-targets
@@ -52,6 +53,7 @@ jobs:
       - run: bash scripts/smoke-quota.sh
       - run: bash scripts/smoke-browser-session.sh
       - run: bash scripts/smoke-chromium-driver.sh
+      - run: bash scripts/smoke-invisible-browser-runtime.sh
       - run: bash scripts/smoke-browser-account-ux.sh
       - run: bash scripts/smoke-browser-streaming.sh
       - run: bash scripts/smoke-browser-provider.sh

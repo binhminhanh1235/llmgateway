@@ -130,6 +130,14 @@ auth_vault_root = "data/browser-auth"
 # Optional local Chromium launcher. This is separate from browser session persistence so API-only
 # and headless deployments remain unchanged. The driver always uses the isolated profile above,
 # binds DevTools to 127.0.0.1, and observes only sanitized page URLs (query/fragment removed).
+[browser_runtime]
+# Normal gateway traffic is always headless. Visible Chromium is reserved for
+# explicit Login / CAPTCHA / 2FA / consent / manual recovery actions.
+allow_visible_auto_launch = false
+max_running_browsers = 1
+idle_timeout_secs = 45
+session_ttl_secs = 300
+
 [chromium]
 enabled = false
 # executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
