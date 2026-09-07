@@ -35,7 +35,7 @@ enabled = false
 profile_root = "$PROFILE_ROOT"
 
 [chromium]
-enabled = false
+enabled = true
 executable = "$FAKE_CHROMIUM"
 startup_timeout_seconds = 5
 auto_recover = true
@@ -126,7 +126,6 @@ LAUNCH=$(curl -fsS -X POST \
   http://127.0.0.1:7331/_llmgateway/browser-sessions/chatgpt-affinity/driver/launch \
   "${AUTH[@]}")
 BROWSER_PID=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["pid"] or "")')
-DEBUGGER_PORT=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["debugger_port"])')
 PROFILE_DIR=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["profile_dir"])')
 export PROFILE_DIR
 
@@ -138,7 +137,10 @@ import json,sys
 x=json.load(sys.stdin)
 assert x["authenticated"] is True, x
 assert x["ready_match"] == "https://chatgpt.com/", x
+assert x["browser_closed_after_capture"] is True, x
+assert x["status"]["running"] is False, x
 '
+BROWSER_PID=""
 
 THREAD=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads \
   "${AUTH[@]}" "${JSON[@]}" \
@@ -151,6 +153,13 @@ curl -fsS -D /tmp/chatgpt-affinity-1.headers -o /tmp/chatgpt-affinity-1.sse \
   -d '{"content":"chatgpt-one","stream":true}'
 grep -qi '^x-llmgateway-route: chatgpt-affinity-route' /tmp/chatgpt-affinity-1.headers
 grep -q 'data: \[DONE\]' /tmp/chatgpt-affinity-1.sse
+
+# P4: the first ordinary turn cold-starts the saved profile headlessly.
+STATUS=$(curl -fsS \
+  http://127.0.0.1:7331/_llmgateway/browser-sessions/chatgpt-affinity/driver/status \
+  "${AUTH[@]}")
+DEBUGGER_PORT=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["running"] and x["debugger_reachable"], x; print(x["debugger_port"])')
+BROWSER_PID=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["pid"] or "")')
 
 curl -fsS -D /tmp/chatgpt-affinity-2.headers -o /tmp/chatgpt-affinity-2.sse \
   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD/messages" \
