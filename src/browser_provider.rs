@@ -1,7 +1,7 @@
 use crate::{
     account_runtime::{
-        AccountRuntimeRegistry, AccountRuntimeSnapshot, BrowserTransportPlanInput,
-        ProviderRuntimePolicy, RuntimeTransport,
+        AccountRuntimeRegistry, AccountRuntimeSnapshot, AccountTransportPlan,
+        BrowserTransportPlanInput, ProviderRuntimePolicy, RuntimeTransport,
     },
     browser_auth_runtime, browser_runtime, browser_session_runtime,
     chatgpt_web_transport::ChatGptWebHttpAdapter,
@@ -157,6 +157,7 @@ pub struct BrowserAccountTransportState {
     pub effective_reason: String,
     pub auth_state: String,
     pub auth_generation: u64,
+    pub transport_plan: AccountTransportPlan,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1110,6 +1111,21 @@ impl BrowserProviderRegistry {
                 .filter(|adapter_id| self.is_direct_http_adapter_id(adapter_id))
                 .map(str::to_string)
         });
+        let browser_adapter = self.adapters.get(provider_kind);
+        let transport_plan = self
+            .account_runtimes
+            .plan_browser_transports(BrowserTransportPlanInput {
+                direct_ready: direct_ready_adapter_id.is_some(),
+                browser_fetch_supported: binding.transport_mode != BrowserTransportMode::BrowserOnly
+                    && browser_adapter.is_some_and(|adapter| {
+                        adapter.is_cdp() && adapter.supports_browser_fetch()
+                    }),
+                browser_runtime_available: browser_runtime_available(),
+                browser_runtime_warm: browser_runtime::get()
+                    .is_some_and(|runtime| runtime.is_running(&binding.session)),
+                browser_adapter_is_cdp: browser_adapter.is_some_and(|adapter| adapter.is_cdp()),
+                browser_only: binding.transport_mode == BrowserTransportMode::BrowserOnly,
+            });
         let last = self.last_transport_execution(account_id).await;
         let (
             effective_transport,
@@ -1179,6 +1195,7 @@ impl BrowserProviderRegistry {
             effective_reason,
             auth_state,
             auth_generation,
+            transport_plan,
         })
     }
 
