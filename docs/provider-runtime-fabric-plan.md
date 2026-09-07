@@ -7,7 +7,7 @@ Working branch:
 `feat/provider-runtime-fabric`
 
 Status:
-`P0 + P1 + P2 + P3 + P4 DONE / VERIFIED — initiative remains NOT ON MAIN`
+`P0 + P1 + P2 + P3 + P4 + P5 DONE / VERIFIED — initiative remains NOT ON MAIN`
 
 ## 1. Goal
 
@@ -669,22 +669,51 @@ P4 verification — 2026-09-07:
 - legacy non-CDP `browser-http` bridges remain outside Chromium lifecycle ownership, preserving the pre-P4 compatibility boundary;
 - deterministic smoke coverage verifies invisible post-login closure, headless cold start, conversation affinity, ChatGPT recovery, browser streaming/cancellation, account UX, CDP reliability/restart reuse, routing intelligence and the complete regression chain.
 
-**P4 is DONE / VERIFIED on the working branch only. P5 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
+**P4 and P5 are DONE / VERIFIED on the working branch only. P6 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
 
 ### P5 — Browser Fetch Transport
 
-Deliver:
+**Status: DONE / VERIFIED on `feat/provider-runtime-fabric` only.**
 
-- provider-neutral browser-context fetch bridge contract;
-- streaming bridge;
-- Qwen/Gemini feasibility implementation where live behavior supports it;
-- safe fallback to headless UI when browser-fetch is unsupported.
+Verified code head:
 
-Acceptance:
+- commit `46e979644e89c09157c2732511a00c9fe0cda078`;
+- tree `190c5ee173f318cdd3670bc44a6d87004948fa2e`;
+- CI #1948 / run `34096872023` — SUCCESS;
+- Linux job `101662375329` — SUCCESS, including adapter fixtures, Rust fmt/check/clippy/tests, complete P0-P4 provider/browser/routing/execution regression chain, P5 fake-CDP acceptance and Docker;
+- Windows job `101662374960` — SUCCESS, including PowerShell validation, `cargo check --all-targets`, `cargo test --all-targets` and Chromium-driver Windows smoke.
 
-- provider tests prove transport isolation;
-- no WAF/CAPTCHA bypass behavior is introduced;
-- browser-fetch failure does not poison healthy headless-UI transport.
+Delivered:
+
+- provider-neutral browser-fetch capability and execution operation at the browser-provider boundary;
+- physical transport order for browserless-capable accounts is `direct_http -> browser_fetch -> browser_runtime`, while explicit `browser-only` preserves UI/CDP-only compatibility;
+- P4 `BrowserRuntime` lifecycle/lease and existing CDP target selection/recovery are reused; P5 does not create a second browser stack;
+- `direct_http`, `browser_fetch` and `browser_runtime` use distinct runtime-health resource keys, so one transport failure does not automatically poison another;
+- browser-fetch failures are classified at the adapter/provider boundary, with silent fallback to headless UI allowed only before client-visible commit when replay safety permits;
+- incremental browser-fetch streaming reuses the existing CDP stream start/poll/cancel and stream commit/replay-safety machinery, including cancellation propagation and no whole-response buffering for a real incremental stream;
+- Qwen browser-context fetch executes from the authenticated `chat.qwen.ai` page/origin, uses provider-owned browser cookies/session state, supports buffered + SSE delivery, and does not synthesize or bypass Aliyun WAF/CAPTCHA/anti-abuse material;
+- Qwen challenged/rejected/unsupported browser-fetch paths become typed failures and may fall back safely to headless UI before commit;
+- Gemini browser-context fetch executes from authenticated `gemini.google.com` context only where P5 can preserve verified semantics; current P5 feasibility is intentionally conservative for fresh/default-model text requests;
+- Gemini selected-model private recipes and provider-native conversation continuation are typed as browser-fetch unsupported and fall back to the existing headless UI adapter rather than silently changing model/thread semantics;
+- tool-call or unsupported multimodal shapes are rejected before browser-fetch submission when exact semantics are not preserved;
+- existing outward errors and P0-P4 behavior remain intact, including `BrowserSessionUnavailable`, `BrowserTransport`, `BrowserAdapterIncompatible`, `BrowserModelUnavailable`, `model_binding_conflict` HTTP 409, `model_recipe_stale`, cancellation and invisible/headless policy.
+
+Deterministic acceptance covers:
+
+- fake-CDP browser-fetch buffered success;
+- fake-CDP incremental stream success;
+- cancellation/Abort propagation;
+- direct HTTP failure path reaching browser-fetch before UI;
+- browser-fetch pre-commit typed fallback to headless UI;
+- browser-fetch vs headless-UI health isolation;
+- committed/unsafe stream failures blocking silent fallback;
+- Qwen/Gemini adapter ownership and semantic-loss guards;
+- no DOM/native-conversation mutation during browser-fetch;
+- no automatic visible Chromium launch;
+- legacy UI streaming ephemeral cleanup under explicit `browser-only`;
+- complete P0-P4 regression chain, Linux + Windows and Docker.
+
+No provider anti-abuse control is bypassed by P5. P6 auth-generation/rate-limit hardening has not started.
 
 ### P6 — Auth Generations & Gemini Hardening
 

@@ -416,7 +416,11 @@ Baseline:
 - P4 Invisible Browser Runtime — DONE / VERIFIED tại `2f0ad33dac21c963df999247a3af4c018ce26e46`;
 - P4 exact-head CI #1941 / run `34087147618` — PASS;
 - P4 Linux job `101633248671` — PASS full Rust checks/tests, complete provider/browser/routing/execution smoke chain, invisible-runtime + CDP reliability acceptance và Docker;
-- P4 Windows job `101633248569` — PASS check/tests/Chromium-driver smoke.
+- P4 Windows job `101633248569` — PASS check/tests/Chromium-driver smoke;
+- P5 Browser Fetch Transport — DONE / VERIFIED tại `46e979644e89c09157c2732511a00c9fe0cda078`, tree `190c5ee173f318cdd3670bc44a6d87004948fa2e`;
+- P5 exact-head CI #1948 / run `34096872023` — PASS;
+- P5 Linux job `101662375329` — PASS adapter fixtures, Rust fmt/check/clippy/tests, complete P0-P4 regression smokes, P5 fake-CDP buffered/streaming acceptance và Docker;
+- P5 Windows job `101662374960` — PASS check/tests/Chromium-driver smoke.
 
 P1 hiện có provider-neutral runtime health graph theo account/transport/session, breaker CLOSED/OPEN/HALF_OPEN, bounded half-open probe, exponential cooldown + jitter, hysteresis và transport isolation. Browser-backed account có thể quarantine `direct_http` mà không tự động làm mất `browser_runtime` khỏe. Account-scoped failure vẫn giữ route cooldown compatibility.
 
@@ -426,7 +430,9 @@ P3 bổ sung deterministic DeepSeek conversation runtime ngay tại adapter boun
 
 P4 bổ sung provider-neutral invisible browser supervisor: normal execution dùng true headless Chromium on-demand, visible browser chỉ dành cho explicit login/re-auth/human action, successful verify đóng browser visible sau khi capture auth, lifecycle cold-start là single-flight và generation-safe, browser process có bounded global budget + idle/TTL/LRU reclaim, và active response/stream giữ lease tới terminal cleanup. CDP recovery ưu tiên reuse/reacquire target trước restart; stream wrapper giữ nguyên error source chain; legacy non-CDP `browser-http` không bị ép acquire Chromium lease. Deterministic P4 acceptance bao gồm invisible lifecycle, conversation affinity, ChatGPT recovery, streaming/cancellation, account UX, CDP reliability/restart reuse và full regression chain.
 
-**P4 DONE / VERIFIED trên working branch only. P5 chưa bắt đầu.** Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
+P5 bổ sung provider-neutral browser-fetch transport nằm giữa direct HTTP và headless UI cho các browserless-capable account. Transport này dùng cùng P4 BrowserRuntime/CDP lifecycle, có health resource riêng và reuse stream commit/cancellation semantics. Qwen chạy fetch/SSE trong authenticated browser origin mà không bypass WAF/CAPTCHA; Gemini chỉ dùng browser-fetch ở feasibility subset giữ được semantics, còn selected-model/native-thread/tool/multimodal trường hợp chưa verified sẽ typed-fallback trước commit sang headless UI. Deterministic fake-CDP acceptance kiểm buffered, incremental stream, cancellation, invisible launch, adapter isolation và compatibility với UI streaming cũ.
+
+**P5 DONE / VERIFIED trên working branch only. P6 chưa bắt đầu.** Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
 
 ## 18. Open work đáng chú ý
 

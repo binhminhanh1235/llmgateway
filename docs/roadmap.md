@@ -161,12 +161,12 @@ Phase progress:
 - P2 Account Runtime & Admission Control — **DONE / VERIFIED on `feat/provider-runtime-fabric` only** at `c4a663797c015183fa2e4f06f387b119794d212b`; CI #1915 / run `34078114968` PASS on Linux + Windows, including full Rust checks/tests, routing/browser/streaming/execution smokes, Docker, bounded deadline-aware admission, typed overload rejection, adaptive per-account concurrency, single-flight lifecycle, generation safety, and account runtime diagnostics;
 - P3 DeepSeek Deterministic Stream State — **DONE / VERIFIED on `feat/provider-runtime-fabric` only** at `401adfc913813478b4f55403de6b7367a3aa553c`; CI #1921 / run `34080215157` PASS on Linux + Windows, including full Rust checks/tests, complete routing/browser/streaming/execution smokes, Docker, same-conversation lease serialization, monotonic epochs, dirty-session quarantine, cancellation cleanup, and one safe fresh-session recovery before client-visible commit;
 - P4 Invisible Browser Runtime — **DONE / VERIFIED on `feat/provider-runtime-fabric` only** at `2f0ad33dac21c963df999247a3af4c018ce26e46`; CI #1941 / run `34087147618` PASS on Linux + Windows, including full Rust checks/tests, complete provider/browser/routing/execution smokes, Docker, true headless on-demand lifecycle, hard visible-browser policy, single-flight cold start, active-lease protection, idle/TTL/LRU reclaim, CDP recovery and legacy non-CDP bridge compatibility;
-- P5 Browser Fetch Transport;
+- P5 Browser Fetch Transport — **DONE / VERIFIED on `feat/provider-runtime-fabric` only** at `46e979644e89c09157c2732511a00c9fe0cda078`, tree `190c5ee173f318cdd3670bc44a6d87004948fa2e`; CI #1948 / run `34096872023` PASS on Linux + Windows, including provider-neutral `direct_http -> browser_fetch -> browser_runtime`, authenticated Qwen/Gemini browser-context feasibility, incremental streaming/cancellation, typed pre-commit UI fallback, transport-health isolation, invisible Chromium acceptance, complete P0-P4 regression smokes and Docker;
 - P6 Auth Generations & Gemini Hardening;
 - P7 Logical Route / Transport Separation & Virtual-Model Continuity;
 - P8 Chaos, Resource & Live Acceptance.
 
-**P0, P1, P2, P3 and P4 are verified on the working branch, but the initiative remains NOT ON MAIN. Do not describe Provider Runtime Fabric as shipped on `main` until explicit merge approval. P5 has not started.**
+**P0, P1, P2, P3, P4 and P5 are verified on the working branch, but the initiative remains NOT ON MAIN. Do not describe Provider Runtime Fabric as shipped on `main` until explicit merge approval. P6 has not started.**
 
 ---
 
