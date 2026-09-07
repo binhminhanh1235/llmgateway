@@ -1594,8 +1594,8 @@ mod stream_trace_tests {
     use super::{
         is_retryable_attempt_error, legacy_gateway_error, map_browser_provider_error,
         normalized_gateway_failure, normalized_status_failure, observe_terminal_sse_completion,
-        route_failure_policy, stream_error_message, upstream_stream_error_sse,
-        BrowserProviderError, GatewayError,
+        route_cooldown_for_failure, route_failure_policy, stream_error_message,
+        upstream_stream_error_sse, BrowserProviderError, GatewayError,
     };
     use crate::execution::{ExecutionPhase, FailureClass, FailureScope, ReplaySafety};
     use reqwest::StatusCode;
@@ -1738,6 +1738,29 @@ mod stream_trace_tests {
         assert!(is_retryable_attempt_error(&GatewayError::BrowserTransport(
             "network".into()
         )));
+    }
+
+    #[test]
+    fn runtime_scope_preserves_account_cooldown_but_isolates_transport_cooldown() {
+        let account_failure = ExecutionFailure::new(
+            FailureClass::RateLimited,
+            true,
+            ReplaySafety::Safe,
+            ExecutionPhase::Submitted,
+            FailureScope::Account,
+            "rate limited",
+        );
+        assert_eq!(route_cooldown_for_failure(&account_failure, 60), 60);
+
+        let transport_failure = ExecutionFailure::new(
+            FailureClass::WafRejected,
+            true,
+            ReplaySafety::Safe,
+            ExecutionPhase::Submitted,
+            FailureScope::Transport,
+            "transport rejected",
+        );
+        assert_eq!(route_cooldown_for_failure(&transport_failure, 60), 0);
     }
 
     #[test]
