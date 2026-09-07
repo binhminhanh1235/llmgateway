@@ -35,7 +35,7 @@ enabled = false
 profile_root = "$PROFILE_ROOT"
 
 [chromium]
-enabled = false
+enabled = true
 executable = "$FAKE_CHROMIUM"
 startup_timeout_seconds = 5
 auto_recover = true
@@ -106,6 +106,15 @@ PROFILE_DIR=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.lo
 export PROFILE_DIR
 
 curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-affinity/driver/verify   "${AUTH[@]}" >/tmp/llmgateway-provider-conversation-verify.json
+python3 <<'PY'
+import json
+with open("/tmp/llmgateway-provider-conversation-verify.json", encoding="utf-8") as f:
+    verify = json.load(f)
+assert verify["authenticated"] is True, verify
+assert verify["browser_closed_after_capture"] is True, verify
+assert verify["status"]["running"] is False, verify
+PY
+BROWSER_PID=""
 
 curl -fsS \
   http://127.0.0.1:7331/_llmgateway/browser-accounts/gemini-affinity/runtime \
@@ -116,8 +125,9 @@ import json
 with open("/tmp/llmgateway-provider-runtime.json", encoding="utf-8") as f:
     runtime = json.load(f)
 assert runtime["account_id"] == "gemini-affinity", runtime
-assert runtime["browser_running"] is True, runtime
-assert runtime["effective_transport"] == "browser-cdp", runtime
+assert runtime["session"]["status"] == "ready", runtime
+assert runtime["browser_running"] is False, runtime
+assert runtime["effective_transport"] == "unavailable", runtime
 assert runtime["auth_snapshot_available"] is False, runtime
 PY
 
@@ -125,6 +135,19 @@ THREAD_A=$(curl -fsS -X POST http://127.0.0.1:7331/v1/threads   "${AUTH[@]}" "${
 
 curl -fsS -D /tmp/affinity-a1.headers -o /tmp/affinity-a1.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-one","stream":true}'
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-a1.headers
+
+# P4: first ordinary request reopens the authenticated profile headlessly, never visibly.
+curl -fsS \
+  http://127.0.0.1:7331/_llmgateway/browser-sessions/gemini-affinity/driver/status \
+  "${AUTH[@]}" >/tmp/llmgateway-provider-conversation-headless-status.json
+python3 <<'PY'
+import json
+with open("/tmp/llmgateway-provider-conversation-headless-status.json", encoding="utf-8") as f:
+    status = json.load(f)
+assert status["running"] is True, status
+assert status["debugger_reachable"] is True, status
+PY
+BROWSER_PID=$(python3 -c 'import json; print(json.load(open("/tmp/llmgateway-provider-conversation-headless-status.json"))["pid"] or "")')
 
 curl -fsS -D /tmp/affinity-a2.headers -o /tmp/affinity-a2.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_A/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"alpha-two","stream":true}'
 grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-a2.headers
