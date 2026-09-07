@@ -7,7 +7,7 @@ Working branch:
 `feat/provider-runtime-fabric`
 
 Status:
-`P0 + P1 + P2 DONE / VERIFIED — initiative remains NOT ON MAIN`
+`P0 + P1 + P2 + P3 DONE / VERIFIED — initiative remains NOT ON MAIN`
 
 ## 1. Goal
 
@@ -600,7 +600,7 @@ P2 verification — 2026-09-07:
 - deterministic tests cover concurrent cold start, failed-start single-flight, per-account limits, bounded queue/overflow, deadline-aware queue wait, adaptive reduction/recovery, account isolation, cancellation, aborted startup, stale generation, and shutdown/reload reuse;
 - Router remains provider-neutral and P1 `RuntimeHealthGraph` remains the single breaker/health system rather than introducing a competing P2 health graph.
 
-**P2 is DONE / VERIFIED on the working branch only. P3 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
+**P2 is DONE / VERIFIED on the working branch only. P3 verification is recorded below. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
 
 ### P3 — DeepSeek Deterministic Stream State
 
@@ -617,6 +617,21 @@ Acceptance:
 - burst regression no longer reproduces empty-output race under deterministic fixture;
 - cancellation leaves no leaked active lease;
 - no retry after unsafe commit.
+
+P3 verification — 2026-09-07:
+
+- verified code head: `401adfc913813478b4f55403de6b7367a3aa553c`;
+- full CI: #1921 / run `34080215157` — SUCCESS;
+- Linux job `101613966406` — SUCCESS, including `cargo fmt --all -- --check`, `RUSTFLAGS="-D warnings" cargo check --all-targets`, `cargo clippy --all-targets`, `cargo test --all-targets`, the complete routing/browser/streaming/execution smoke chain, and Docker build;
+- Windows job `101613966584` — SUCCESS, including PowerShell validation, `cargo check --all-targets`, `cargo test --all-targets`, and Chromium-driver Windows smoke;
+- DeepSeek direct HTTP now owns a provider/account/thread conversation lease through terminal response cleanup; concurrent turns for the same conversation are serialized while unrelated conversations remain independent;
+- each lease carries a monotonic conversation epoch; persisted schema v2 state records `conversation_epoch`, `dirty`, and `quarantined`, and stale epochs cannot overwrite a newer generation;
+- dropped/empty logical completion is retryable only inside the DeepSeek adapter and only before any client-visible content/reasoning has been emitted; one retry creates a fresh DeepSeek session and advances the epoch, while post-commit failures never retry;
+- terminal success persists a clean continuation state and releases the lease; terminal failure/cancellation quarantines the conversation before releasing the lease so a later request starts a fresh session instead of reusing uncertain state;
+- deterministic coverage includes same-conversation burst serialization, cancellation lease release, epoch advance/recovery, no retry after commit, and an integrated 8-request burst fixture with exactly one simulated empty pre-commit recovery and no overlap;
+- the P3 diff from the P2 docs head is confined to `src/deepseek_web_transport.rs`; Gateway/Router/common execution remain provider-neutral and P4 was not started.
+
+**P3 is DONE / VERIFIED on the working branch only. P4 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
 
 ### P4 — Invisible Browser Runtime
 
