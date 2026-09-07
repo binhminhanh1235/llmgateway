@@ -1901,7 +1901,7 @@ impl BrowserProviderRegistry {
             } else {
                 direct_result
             }
-        } else {
+        } else if browser_adapter.is_cdp() {
             if let Some(execution_guard) = self
                 .ensure_account_cdp_session_ready(provider, account, &binding)
                 .await
@@ -1927,6 +1927,20 @@ impl BrowserProviderRegistry {
                     session_id: binding.session.clone(),
                 })
             }
+        } else {
+            // Non-CDP browser bridges do not own a managed Chromium process.
+            // Preserve the pre-P4 compatibility boundary and execute them without
+            // acquiring a browser-runtime lease.
+            self.execute_transport(
+                provider,
+                account,
+                route,
+                &binding,
+                browser_adapter.clone(),
+                adapter_request,
+                "browser_runtime",
+            )
+            .await
         };
 
         match &result {
