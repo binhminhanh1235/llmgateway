@@ -1597,7 +1597,9 @@ mod stream_trace_tests {
         route_cooldown_for_failure, route_failure_policy, stream_error_message,
         upstream_stream_error_sse, BrowserProviderError, GatewayError,
     };
-    use crate::execution::{ExecutionPhase, FailureClass, FailureScope, ReplaySafety};
+    use crate::execution::{
+        ExecutionFailure, ExecutionPhase, FailureClass, FailureScope, ReplaySafety,
+    };
     use reqwest::StatusCode;
 
     #[test]
