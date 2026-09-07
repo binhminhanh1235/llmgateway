@@ -61,6 +61,8 @@ pub struct RouteCandidateDecision {
     pub route_health: RouteHealth,
     pub runtime_health: Vec<RuntimeHealthSnapshot>,
     pub runtime_health_penalty: i32,
+    pub activation_cost: i32,
+    pub activation_reason: String,
     pub quota_penalty: Option<i32>,
     pub adaptive_penalty: i32,
     pub adaptive: AdaptiveRouteSnapshot,
@@ -308,6 +310,8 @@ impl Router {
                     0
                 };
             let policy_reason = self.policy_reason(config.as_ref(), transport).to_string();
+            let (activation_cost, activation_reason) =
+                route_activation_cost(transport, &readiness);
             let group_tier_priority = config
                 .virtual_models
                 .get(&resolved_model)
@@ -431,6 +435,7 @@ impl Router {
                                 .saturating_add(adaptive_penalty)
                                 .saturating_add(browser_recovery_penalty)
                                 .saturating_add(runtime_health_penalty)
+                                .saturating_add(activation_cost)
                                 .saturating_add(task_adjustment),
                         );
                         if adaptive.active && adaptive_penalty > 0 {
@@ -464,6 +469,7 @@ impl Router {
                                 .saturating_add(adaptive_penalty)
                                 .saturating_add(browser_recovery_penalty)
                                 .saturating_add(runtime_health_penalty)
+                                .saturating_add(activation_cost)
                                 .saturating_add(task_adjustment),
                         );
                         if adaptive.active && adaptive_penalty > 0 {
@@ -508,6 +514,8 @@ impl Router {
                     route_health,
                     runtime_health,
                     runtime_health_penalty,
+                    activation_cost,
+                    activation_reason: activation_reason.to_string(),
                     quota_penalty,
                     adaptive_penalty,
                     adaptive,
@@ -1003,6 +1011,24 @@ struct RouteEvaluation {
     candidates: Vec<EvaluatedRoute>,
 }
 
+fn route_activation_cost(
+    transport: &str,
+    readiness: &AccountReadiness,
+) -> (i32, &'static str) {
+    match transport {
+        "api" => (0, "api_ready"),
+        "browser" if !readiness.routable => (100, "browser_unavailable"),
+        "browser" => match readiness.browser_session_status.as_deref() {
+            Some("stopped") => (3, "browser_cold_start"),
+            Some("starting") => (2, "browser_starting"),
+            Some("degraded") | Some("requires_attention") => (2, "browser_recovering"),
+            Some("ready") => (1, "browser_ready"),
+            _ => (2, "browser_activation"),
+        },
+        _ => (0, "transport_neutral"),
+    }
+}
+
 fn runtime_route_health_status(snapshots: &[RuntimeHealthSnapshot]) -> (bool, i32) {
     let account = snapshots
         .iter()
@@ -1063,9 +1089,52 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{execution_policy_exclusion, push_unique, runtime_route_health_status};
+    use super::{
+        execution_policy_exclusion, push_unique, route_activation_cost, runtime_route_health_status,
+    };
+    use crate::routing::AccountReadiness;
     use crate::runtime_health::{BreakerState, RuntimeHealthKey, RuntimeHealthSnapshot};
     use chrono::{Duration, Utc};
+
+    fn readiness(status: Option<&str>, routable: bool) -> AccountReadiness {
+        AccountReadiness {
+            account_id: "account".into(),
+            provider: "provider".into(),
+            transport: "browser".into(),
+            effective_status: if routable { "ready" } else { "unavailable" }.into(),
+            routable,
+            reasons: Vec::new(),
+            credential_configured: None,
+            browser_ready: Some(routable),
+            browser_session_id: Some("session".into()),
+            browser_session_status: status.map(str::to_string),
+            browser_last_error: None,
+            browser_adapter_status: Some("ready".into()),
+            browser_adapter_message: None,
+            quota_blocked: false,
+            quota_pressure: 0.0,
+            route_count: 1,
+            healthy_route_count: usize::from(routable),
+            cooling_route_count: 0,
+        }
+    }
+
+    #[test]
+    fn activation_cost_prefers_ready_and_api_routes_over_cold_browser() {
+        assert_eq!(route_activation_cost("api", &readiness(None, true)).0, 0);
+        assert_eq!(
+            route_activation_cost("browser", &readiness(Some("ready"), true)).0,
+            1
+        );
+        assert_eq!(
+            route_activation_cost("browser", &readiness(Some("stopped"), true)).0,
+            3
+        );
+        assert_eq!(
+            route_activation_cost("browser", &readiness(Some("failed"), false)).0,
+            100
+        );
+    }
 
     #[test]
     fn execution_policy_matrix_enforces_hard_transport_boundaries() {
