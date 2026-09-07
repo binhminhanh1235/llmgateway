@@ -48,6 +48,7 @@ mod response_state;
 mod retrieval_api;
 mod routing;
 mod routing_api;
+mod runtime_health;
 mod semantic_retrieval;
 mod structured_memory;
 mod ui;
@@ -96,6 +97,7 @@ use execution_trace::ExecutionTraceStore;
 use execution_trace_api::{get_execution, list_executions};
 use gateway::Gateway;
 use live_config::LiveConfig;
+use runtime_health::RuntimeHealthGraph;
 use memory_api::{add_thread_memory_pin, get_thread_memory, update_thread_memory_item};
 use memory_backfill::backfill_legacy_memories;
 use memory_provenance::MemoryProvenanceStore;
@@ -170,7 +172,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     chromium_driver_runtime::install(chromium_driver.clone())
         .map_err(|_| "Chromium driver was already initialized")?;
 
-    let browser_providers = Arc::new(BrowserProviderRegistry::new(browser_provider_config)?);
+    let runtime_health = Arc::new(RuntimeHealthGraph::default());
+    let browser_providers = Arc::new(BrowserProviderRegistry::with_runtime_health(
+        browser_provider_config,
+        runtime_health.clone(),
+    )?);
     let browser_provider_bindings = browser_providers.binding_count();
     browser_provider_runtime::install(browser_providers.clone())
         .map_err(|_| "browser provider registry was already initialized")?;
@@ -279,11 +285,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let gateway = Arc::new(Gateway::new(
+    let gateway = Arc::new(Gateway::with_runtime_health(
         config.clone(),
         live_config.clone(),
         catalog.clone(),
         execution_traces,
+        runtime_health,
     )?);
     match gateway.restore_adaptive_from_traces().await {
         Ok(restored) if restored > 0 => {

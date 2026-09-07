@@ -7,6 +7,7 @@ use crate::{
     deepseek_web_transport::DeepSeekWebHttpAdapter,
     execution::{ExecutionFailure, ExecutionPhase, FailureClass, FailureScope, ReplaySafety},
     gemini_web_transport::GeminiWebHttpAdapter,
+    runtime_health::{RuntimeHealthGraph, RuntimeHealthKey},
     mimo_web_transport::MimoWebHttpAdapter,
     qwen_web_transport::QwenWebHttpAdapter,
 };
@@ -301,6 +302,17 @@ pub enum BrowserProviderError {
     ModelRecipeStale { account_id: String, model: String },
     #[error("browser provider transport error: {0}")]
     Transport(String),
+    #[error("browser provider transport '{transport}' is temporarily unavailable for account '{account_id}'")]
+    TransportUnavailable {
+        account_id: String,
+        transport: String,
+    },
+    #[error("{source}")]
+    Classified {
+        failure: Box<ExecutionFailure>,
+        #[source]
+        source: Box<BrowserProviderError>,
+    },
     #[error("browser provider config read error: {0}")]
     Io(#[from] std::io::Error),
     #[error("browser provider config TOML error: {0}")]
@@ -324,7 +336,7 @@ impl BrowserProviderError {
                 FailureScope::Request,
                 "browser provider configuration cannot execute the request",
             ),
-            Self::SessionUnavailable { .. } => ExecutionFailure::new(
+            Self::SessionUnavailable { session_id, .. } => ExecutionFailure::new(
                 FailureClass::SessionBusy,
                 true,
                 ReplaySafety::Safe,
@@ -332,6 +344,7 @@ impl BrowserProviderError {
                 FailureScope::Session,
                 "browser session is not ready",
             )
+            .with_resource_id(session_id.clone())
             .with_cooldown(2),
             Self::AdapterIncompatible { code, .. } if code == "model_binding_conflict" => {
                 ExecutionFailure::new(
@@ -352,6 +365,7 @@ impl BrowserProviderError {
                     FailureScope::Transport,
                     "upstream rejected the selected browser-backed transport",
                 )
+                .with_cooldown(30)
             }
             Self::AdapterIncompatible { .. } => ExecutionFailure::new(
                 FailureClass::ModelUnavailable,
@@ -381,8 +395,70 @@ impl BrowserProviderError {
             )
             .with_cooldown(0),
             Self::Transport(message) => browser_transport_execution_failure(message),
+            Self::TransportUnavailable { .. } => ExecutionFailure::new(
+                FailureClass::NetworkTransient,
+                true,
+                ReplaySafety::Safe,
+                ExecutionPhase::PreSubmit,
+                FailureScope::Transport,
+                "selected browser transport is cooling down",
+            )
+            .with_cooldown(0),
+            Self::Classified { failure, .. } => failure.as_ref().clone(),
         }
     }
+
+    fn with_execution_context(
+        self,
+        provider: &str,
+        account_id: &str,
+        model: &str,
+        transport: &str,
+        resource_id: Option<&str>,
+        runtime_health_recorded: bool,
+    ) -> Self {
+        match self {
+            Self::Classified { failure, source } => {
+                let mut failure = failure
+                    .as_ref()
+                    .clone()
+                    .with_context(provider, account_id, model, transport);
+                if let Some(resource_id) = resource_id {
+                    failure = failure.with_resource_id(resource_id.to_string());
+                }
+                if runtime_health_recorded {
+                    failure = failure.mark_runtime_health_recorded();
+                }
+                Self::Classified {
+                    failure: Box::new(failure),
+                    source,
+                }
+            }
+            source => {
+                let mut failure = source
+                    .execution_failure()
+                    .with_context(provider, account_id, model, transport);
+                if let Some(resource_id) = resource_id {
+                    failure = failure.with_resource_id(resource_id.to_string());
+                }
+                if runtime_health_recorded {
+                    failure = failure.mark_runtime_health_recorded();
+                }
+                Self::Classified {
+                    failure: Box::new(failure),
+                    source: Box::new(source),
+                }
+            }
+        }
+    }
+}
+
+fn legacy_browser_provider_error(error: &BrowserProviderError) -> &BrowserProviderError {
+    let mut current = error;
+    while let BrowserProviderError::Classified { source, .. } = current {
+        current = source.as_ref();
+    }
+    current
 }
 
 fn browser_transport_execution_failure(message: &str) -> ExecutionFailure {
@@ -531,6 +607,7 @@ pub struct BrowserProviderRegistry {
     last_transport: Arc<RwLock<BTreeMap<String, BrowserTransportExecution>>>,
     discovered_models: Arc<StdRwLock<BTreeMap<String, BTreeSet<String>>>>,
     model_catalog_refresh_required: Arc<StdRwLock<BTreeSet<String>>>,
+    runtime_health: Arc<RuntimeHealthGraph>,
 }
 
 impl BrowserProviderConfig {
@@ -636,6 +713,13 @@ impl BrowserProviderConfig {
 
 impl BrowserProviderRegistry {
     pub fn new(config: BrowserProviderConfig) -> Result<Self, BrowserProviderError> {
+        Self::with_runtime_health(config, Arc::new(RuntimeHealthGraph::default()))
+    }
+
+    pub fn with_runtime_health(
+        config: BrowserProviderConfig,
+        runtime_health: Arc<RuntimeHealthGraph>,
+    ) -> Result<Self, BrowserProviderError> {
         let http = Arc::new(HttpBrowserAdapter::new()?);
         let cdp = Arc::new(CdpBrowserAdapter::custom()?);
         let gemini = Arc::new(CdpBrowserAdapter::gemini()?);
@@ -672,6 +756,7 @@ impl BrowserProviderRegistry {
             last_transport: Arc::new(RwLock::new(BTreeMap::new())),
             discovered_models: Arc::new(StdRwLock::new(BTreeMap::new())),
             model_catalog_refresh_required: Arc::new(StdRwLock::new(BTreeSet::new())),
+            runtime_health,
         })
     }
 
@@ -1460,6 +1545,56 @@ impl BrowserProviderRegistry {
         Ok(())
     }
 
+    async fn execute_transport(
+        &self,
+        provider: &ProviderConfig,
+        account: &AccountConfig,
+        route: &RouteConfig,
+        binding: &BrowserAccountBinding,
+        adapter: Arc<dyn BrowserProviderAdapter>,
+        request: BrowserAdapterRequest,
+        transport: &str,
+    ) -> Result<reqwest::Response, BrowserProviderError> {
+        let key = RuntimeHealthKey::transport(&provider.id, &account.id, transport);
+        let permit = match self.runtime_health.try_acquire_all(&[key]).await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return Err(BrowserProviderError::TransportUnavailable {
+                    account_id: account.id.clone(),
+                    transport: transport.to_string(),
+                });
+            }
+        };
+
+        match adapter.execute_chat(request).await {
+            Ok(response) => {
+                self.runtime_health.record_success(permit).await;
+                Ok(response)
+            }
+            Err(error) => {
+                let failure = error
+                    .execution_failure()
+                    .with_context(&provider.id, &account.id, &route.model, transport)
+                    .with_resource_id(binding.session.clone());
+                let affected = RuntimeHealthKey::from_failure(&failure);
+                if affected.is_empty() {
+                    self.runtime_health.release(permit).await;
+                } else {
+                    self.runtime_health
+                        .record_failure(
+                            permit,
+                            &affected,
+                            failure.class,
+                            failure.suggested_cooldown_secs.unwrap_or(10),
+                            &error.to_string(),
+                        )
+                        .await;
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub async fn execute_chat(
         &self,
         provider: &ProviderConfig,
@@ -1539,7 +1674,17 @@ impl BrowserProviderRegistry {
         let result = if direct_snapshot_ready {
             let direct = direct_adapter.expect("direct adapter checked above");
             used_adapter = direct.clone();
-            let direct_result = direct.execute_chat(adapter_request.clone()).await;
+            let direct_result = self
+                .execute_transport(
+                    provider,
+                    account,
+                    route,
+                    &binding,
+                    direct.clone(),
+                    adapter_request.clone(),
+                    "direct_http",
+                )
+                .await;
             let dynamic_model = self
                 .discovered_models
                 .read()
@@ -1551,7 +1696,11 @@ impl BrowserProviderRegistry {
                 direct_failure_can_open_browser(&provider.kind, binding.transport_mode);
             let safe_fallback_candidate = direct_failure_can_open_browser
                 && direct_result.as_ref().err().is_some_and(|error| {
-                    direct_error_allows_browser_fallback(
+                    matches!(
+                        legacy_browser_provider_error(error),
+                        BrowserProviderError::TransportUnavailable { transport, .. }
+                            if transport == "direct_http"
+                    ) || direct_error_allows_browser_fallback(
                         error,
                         dynamic_model,
                         browser_adapter.is_cdp(),
@@ -1574,7 +1723,17 @@ impl BrowserProviderRegistry {
                     }
                     Err(error)
                 } else {
-                    let fallback_result = browser_adapter.execute_chat(adapter_request).await;
+                    let fallback_result = self
+                        .execute_transport(
+                            provider,
+                            account,
+                            route,
+                            &binding,
+                            browser_adapter.clone(),
+                            adapter_request,
+                            "browser_runtime",
+                        )
+                        .await;
                     if browser_was_live {
                         fallback_result
                     } else {
@@ -1593,7 +1752,16 @@ impl BrowserProviderRegistry {
                 direct_result
             }
         } else {
-            browser_adapter.execute_chat(adapter_request).await
+            self.execute_transport(
+                provider,
+                account,
+                route,
+                &binding,
+                browser_adapter.clone(),
+                adapter_request,
+                "browser_runtime",
+            )
+            .await
         };
 
         match &result {
@@ -1649,7 +1817,21 @@ impl BrowserProviderRegistry {
             }
             _ => {}
         }
-        result
+        let transport = if used_adapter.is_cdp() {
+            "browser_runtime"
+        } else {
+            "direct_http"
+        };
+        result.map_err(|error| {
+            error.with_execution_context(
+                &provider.id,
+                &account.id,
+                &route.model,
+                transport,
+                Some(&binding.session),
+                true,
+            )
+        })
     }
 }
 
@@ -3715,7 +3897,9 @@ fn direct_error_allows_browser_fallback(
     if dynamic_model || !browser_adapter_is_cdp {
         return false;
     }
-    let BrowserProviderError::AdapterIncompatible { code, .. } = error else {
+    let BrowserProviderError::AdapterIncompatible { code, .. } =
+        legacy_browser_provider_error(error)
+    else {
         return false;
     };
     matches!(

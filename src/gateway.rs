@@ -12,6 +12,7 @@ use crate::{
     quota_usage::{QuotaUsageStore, UsageEvent},
     quota_usage_runtime,
     routing::{RouteDecisionTrace, Router},
+    runtime_health::RuntimeHealthGraph,
 };
 use axum::http::Response as HttpResponse;
 use futures_util::StreamExt;
@@ -261,12 +262,29 @@ impl Gateway {
         catalog: Arc<ModelCatalog>,
         execution_traces: Arc<ExecutionTraceStore>,
     ) -> Result<Self, GatewayError> {
+        Self::with_runtime_health(
+            config,
+            live_config,
+            catalog,
+            execution_traces,
+            Arc::new(RuntimeHealthGraph::default()),
+        )
+    }
+
+    pub fn with_runtime_health(
+        config: Arc<AppConfig>,
+        live_config: LiveConfig,
+        catalog: Arc<ModelCatalog>,
+        execution_traces: Arc<ExecutionTraceStore>,
+        runtime_health: Arc<RuntimeHealthGraph>,
+    ) -> Result<Self, GatewayError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))
             .build()
             .map_err(|error| GatewayError::Transport(error.to_string()))?;
-        let router = Router::new(config.clone(), live_config.clone(), catalog);
+        let router =
+            Router::with_runtime_health(config.clone(), live_config.clone(), catalog, runtime_health);
         Ok(Self {
             config,
             live_config,
@@ -536,7 +554,19 @@ impl Gateway {
                     return Err(self.finish_execution_error(&request_id, error).await);
                 }
             };
+            let runtime_health_permit = match self
+                .router
+                .acquire_runtime_health_with_config(config.as_ref(), &route)
+                .await
+            {
+                Ok(permit) => permit,
+                Err(_) => {
+                    recovery_reason = Some("runtime_breaker_open".into());
+                    continue;
+                }
+            };
             if !budget_tracker.try_begin_attempt() {
+                self.router.release_runtime_health(runtime_health_permit).await;
                 last_error = Some(GatewayError::Transport(
                     "execution recovery budget exhausted".into(),
                 ));
@@ -605,6 +635,9 @@ impl Gateway {
                     self.router
                         .mark_success(&route.id, adaptive_latency_ms)
                         .await;
+                    self.router
+                        .mark_runtime_success(runtime_health_permit)
+                        .await;
                     if is_stream {
                         if let Err(error) = self
                             .execution_traces
@@ -652,13 +685,22 @@ impl Gateway {
                         .suggested_cooldown_secs
                         .unwrap_or_else(|| cooldown_for(status));
                     let adaptive_failure = failure_is_adaptive(&failure);
+                    let route_cooldown = route_cooldown_for_failure(&failure, cooldown);
                     self.router
                         .mark_failure(
                             &route.id,
                             format!("HTTP {status}: {body_text}"),
-                            cooldown,
+                            route_cooldown,
                             adaptive_latency_ms,
                             adaptive_failure,
+                        )
+                        .await;
+                    self.router
+                        .mark_runtime_failure(
+                            runtime_health_permit,
+                            &failure,
+                            &format!("HTTP {status}: {body_text}"),
+                            cooldown,
                         )
                         .await;
 
@@ -756,14 +798,28 @@ impl Gateway {
                     if let Some((route_cooldown_secs, adaptive_failure)) =
                         route_failure_policy_for_failure(&failure)
                     {
+                        let route_cooldown =
+                            route_cooldown_for_failure(&failure, route_cooldown_secs);
                         self.router
                             .mark_failure(
                                 &route.id,
                                 error_text.clone(),
-                                route_cooldown_secs,
+                                route_cooldown,
                                 adaptive_latency_ms,
                                 adaptive_failure,
                             )
+                            .await;
+                        self.router
+                            .mark_runtime_failure(
+                                runtime_health_permit,
+                                &failure,
+                                &error_text,
+                                route_cooldown_secs,
+                            )
+                            .await;
+                    } else {
+                        self.router
+                            .mark_runtime_failure(runtime_health_permit, &failure, &error_text, 0)
                             .await;
                     }
                     let outcome = failure_outcome(&error, &failure);
@@ -1064,16 +1120,20 @@ fn sanitized_upstream_body(body: &Value) -> Value {
 
 fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
     let failure = error.execution_failure();
-    let source = match error {
+    let mut legacy = error;
+    while let BrowserProviderError::Classified { source, .. } = legacy {
+        legacy = *source;
+    }
+    let source = match legacy {
         BrowserProviderError::InvalidConfig(_)
         | BrowserProviderError::UnsupportedAdapter(_)
         | BrowserProviderError::UnsupportedBrowserless(_)
         | BrowserProviderError::InvalidTransportPolicy(_)
         | BrowserProviderError::MissingBinding(_)
         | BrowserProviderError::Io(_)
-        | BrowserProviderError::Toml(_) => GatewayError::InvalidConfig(error.to_string()),
+        | BrowserProviderError::Toml(_) => GatewayError::InvalidConfig(legacy.to_string()),
         BrowserProviderError::SessionUnavailable { .. } => {
-            GatewayError::BrowserSessionUnavailable(error.to_string())
+            GatewayError::BrowserSessionUnavailable(legacy.to_string())
         }
         BrowserProviderError::AdapterIncompatible {
             account_id,
@@ -1090,12 +1150,18 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
             }
         }
         BrowserProviderError::ModelUnavailable { .. } => {
-            GatewayError::BrowserModelUnavailable(error.to_string())
+            GatewayError::BrowserModelUnavailable(legacy.to_string())
         }
         BrowserProviderError::ModelRecipeStale { .. } => {
-            GatewayError::BrowserModelRecipeStale(error.to_string())
+            GatewayError::BrowserModelRecipeStale(legacy.to_string())
         }
-        BrowserProviderError::Transport(_) => GatewayError::BrowserTransport(error.to_string()),
+        BrowserProviderError::Transport(_)
+        | BrowserProviderError::TransportUnavailable { .. } => {
+            GatewayError::BrowserTransport(legacy.to_string())
+        }
+        BrowserProviderError::Classified { .. } => {
+            unreachable!("classified browser provider errors are unwrapped above")
+        }
     };
     GatewayError::Classified {
         failure: Box::new(failure),
@@ -1111,13 +1177,13 @@ fn apply_auth(
     match account.auth_style.as_str() {
         "bearer" => {
             let value = HeaderValue::from_str(&format!("Bearer {key}"))
-                .map_err(|error| GatewayError::InvalidConfig(error.to_string()))?;
+                .map_err(|error| GatewayError::InvalidConfig(legacy.to_string()))?;
             headers.insert(AUTHORIZATION, value);
         }
         "x-api-key" => {
             let name = HeaderName::from_static("x-api-key");
             let value = HeaderValue::from_str(key)
-                .map_err(|error| GatewayError::InvalidConfig(error.to_string()))?;
+                .map_err(|error| GatewayError::InvalidConfig(legacy.to_string()))?;
             headers.insert(name, value);
         }
         other => {
@@ -1389,6 +1455,20 @@ fn failure_is_adaptive(failure: &ExecutionFailure) -> bool {
             | FailureClass::UpstreamOverloaded
             | FailureClass::Upstream5xx
     )
+}
+
+fn route_cooldown_for_failure(failure: &ExecutionFailure, cooldown_secs: i64) -> i64 {
+    if matches!(
+        failure.scope,
+        FailureScope::Account
+            | FailureScope::Transport
+            | FailureScope::Session
+            | FailureScope::Provider
+    ) {
+        0
+    } else {
+        cooldown_secs
+    }
 }
 
 fn route_failure_policy_for_failure(failure: &ExecutionFailure) -> Option<(i64, bool)> {

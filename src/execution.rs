@@ -108,6 +108,8 @@ pub struct ExecutionFailure {
     pub model: Option<String>,
     pub transport: Option<String>,
     pub conversation_id: Option<String>,
+    pub resource_id: Option<String>,
+    pub runtime_health_recorded: bool,
     pub retryable: bool,
     pub replay_safety: ReplaySafety,
     pub phase: ExecutionPhase,
@@ -133,6 +135,8 @@ impl ExecutionFailure {
             model: None,
             transport: None,
             conversation_id: None,
+            resource_id: None,
+            runtime_health_recorded: false,
             retryable,
             replay_safety,
             phase,
@@ -150,10 +154,30 @@ impl ExecutionFailure {
         model: &str,
         transport: &str,
     ) -> Self {
-        self.provider = Some(provider.to_string());
-        self.account_id = Some(account_id.to_string());
-        self.model = Some(model.to_string());
-        self.transport = Some(transport.to_string());
+        if self.provider.is_none() {
+            self.provider = Some(provider.to_string());
+        }
+        if self.account_id.is_none() {
+            self.account_id = Some(account_id.to_string());
+        }
+        if self.model.is_none() {
+            self.model = Some(model.to_string());
+        }
+        if self.transport.is_none() {
+            self.transport = Some(transport.to_string());
+        }
+        self
+    }
+
+    pub fn with_resource_id(mut self, resource_id: impl Into<String>) -> Self {
+        if self.resource_id.is_none() {
+            self.resource_id = Some(resource_id.into());
+        }
+        self
+    }
+
+    pub fn mark_runtime_health_recorded(mut self) -> Self {
+        self.runtime_health_recorded = true;
         self
     }
 

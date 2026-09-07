@@ -10,8 +10,13 @@ use crate::{
     browser_provider_runtime,
     catalog::ModelCatalog,
     config::{AppConfig, RouteConfig},
+    execution::ExecutionFailure,
     live_config::LiveConfig,
     quota_usage_runtime,
+    runtime_health::{
+        BreakerState, RuntimeHealthBlocked, RuntimeHealthGraph, RuntimeHealthKey,
+        RuntimeHealthPermit, RuntimeHealthScope, RuntimeHealthSnapshot,
+    },
 };
 use account_readiness::evaluate_base;
 use adaptive_scoring::AdaptiveRouteState;
@@ -54,6 +59,8 @@ pub struct RouteCandidateDecision {
     pub warnings: Vec<String>,
     pub readiness: AccountReadiness,
     pub route_health: RouteHealth,
+    pub runtime_health: Vec<RuntimeHealthSnapshot>,
+    pub runtime_health_penalty: i32,
     pub quota_penalty: Option<i32>,
     pub adaptive_penalty: i32,
     pub adaptive: AdaptiveRouteSnapshot,
@@ -99,6 +106,7 @@ pub struct Router {
     adaptive: Arc<RwLock<HashMap<String, AdaptiveRouteState>>>,
     browser_last_success: Arc<RwLock<HashMap<String, u64>>>,
     browser_success_sequence: Arc<AtomicU64>,
+    runtime_health: Arc<RuntimeHealthGraph>,
 }
 
 impl Router {
@@ -106,6 +114,20 @@ impl Router {
         config: Arc<AppConfig>,
         live_config: LiveConfig,
         catalog: Arc<ModelCatalog>,
+    ) -> Self {
+        Self::with_runtime_health(
+            config,
+            live_config,
+            catalog,
+            Arc::new(RuntimeHealthGraph::default()),
+        )
+    }
+
+    pub fn with_runtime_health(
+        config: Arc<AppConfig>,
+        live_config: LiveConfig,
+        catalog: Arc<ModelCatalog>,
+        runtime_health: Arc<RuntimeHealthGraph>,
     ) -> Self {
         Self {
             config,
@@ -115,6 +137,7 @@ impl Router {
             adaptive: Arc::new(RwLock::new(HashMap::new())),
             browser_last_success: Arc::new(RwLock::new(HashMap::new())),
             browser_success_sequence: Arc::new(AtomicU64::new(0)),
+            runtime_health,
         }
     }
 
@@ -253,6 +276,10 @@ impl Router {
                 0
             };
             let route_health = health_snapshot.get(&route.id).cloned().unwrap_or_default();
+            let runtime_keys = self.runtime_health_keys_for_route(config.as_ref(), &route);
+            let runtime_health = self.runtime_health.snapshots(&runtime_keys).await;
+            let (runtime_blocked, runtime_health_penalty) =
+                runtime_route_health_status(&runtime_health);
             let adaptive = adaptive_snapshot
                 .get(&route.id)
                 .cloned()
@@ -346,6 +373,22 @@ impl Router {
             {
                 push_unique(&mut exclusion_reasons, "route_cooldown");
             }
+            if runtime_blocked {
+                push_unique(&mut exclusion_reasons, "runtime_breaker_open");
+            } else {
+                if runtime_health
+                    .iter()
+                    .any(|snapshot| snapshot.state == BreakerState::Open)
+                {
+                    push_unique(&mut warnings, "runtime_transport_degraded");
+                }
+                if runtime_health
+                    .iter()
+                    .any(|snapshot| snapshot.state == BreakerState::HalfOpen)
+                {
+                    push_unique(&mut warnings, "runtime_breaker_half_open");
+                }
+            }
 
             if readiness.routable {
                 for reason in &readiness.reasons {
@@ -386,6 +429,7 @@ impl Router {
                                 .saturating_add(penalty)
                                 .saturating_add(adaptive_penalty)
                                 .saturating_add(browser_recovery_penalty)
+                                .saturating_add(runtime_health_penalty)
                                 .saturating_add(task_adjustment),
                         );
                         if adaptive.active && adaptive_penalty > 0 {
@@ -418,6 +462,7 @@ impl Router {
                                 .priority
                                 .saturating_add(adaptive_penalty)
                                 .saturating_add(browser_recovery_penalty)
+                                .saturating_add(runtime_health_penalty)
                                 .saturating_add(task_adjustment),
                         );
                         if adaptive.active && adaptive_penalty > 0 {
@@ -460,6 +505,8 @@ impl Router {
                     warnings,
                     readiness,
                     route_health,
+                    runtime_health,
+                    runtime_health_penalty,
                     quota_penalty,
                     adaptive_penalty,
                     adaptive,
@@ -781,6 +828,99 @@ impl Router {
             .collect()
     }
 
+    fn runtime_health_keys_for_route(
+        &self,
+        config: &AppConfig,
+        route: &RouteConfig,
+    ) -> Vec<RuntimeHealthKey> {
+        let Some(account) = config.account(&route.account) else {
+            return Vec::new();
+        };
+        let mut keys = vec![RuntimeHealthKey::account(&account.provider, &account.id)];
+        if self.route_transport(config, route) == "browser" {
+            keys.push(RuntimeHealthKey::transport(
+                &account.provider,
+                &account.id,
+                "direct_http",
+            ));
+            keys.push(RuntimeHealthKey::transport(
+                &account.provider,
+                &account.id,
+                "browser_runtime",
+            ));
+        } else {
+            keys.push(RuntimeHealthKey::transport(
+                &account.provider,
+                &account.id,
+                "direct_http",
+            ));
+        }
+        keys
+    }
+
+    fn runtime_health_attempt_keys(
+        &self,
+        config: &AppConfig,
+        route: &RouteConfig,
+    ) -> Vec<RuntimeHealthKey> {
+        let Some(account) = config.account(&route.account) else {
+            return Vec::new();
+        };
+        let mut keys = vec![RuntimeHealthKey::account(&account.provider, &account.id)];
+        if self.route_transport(config, route) != "browser" {
+            keys.push(RuntimeHealthKey::transport(
+                &account.provider,
+                &account.id,
+                "direct_http",
+            ));
+        }
+        keys
+    }
+
+    pub async fn acquire_runtime_health_with_config(
+        &self,
+        config: &AppConfig,
+        route: &RouteConfig,
+    ) -> Result<RuntimeHealthPermit, RuntimeHealthBlocked> {
+        let keys = self.runtime_health_attempt_keys(config, route);
+        self.runtime_health.try_acquire_all(&keys).await
+    }
+
+    pub async fn release_runtime_health(&self, permit: RuntimeHealthPermit) {
+        self.runtime_health.release(permit).await;
+    }
+
+    pub async fn mark_runtime_success(&self, permit: RuntimeHealthPermit) {
+        self.runtime_health.record_success(permit).await;
+    }
+
+    pub async fn mark_runtime_failure(
+        &self,
+        permit: RuntimeHealthPermit,
+        failure: &ExecutionFailure,
+        error: &str,
+        base_cooldown_secs: i64,
+    ) {
+        if failure.runtime_health_recorded {
+            self.runtime_health.release(permit).await;
+            return;
+        }
+        let affected = RuntimeHealthKey::from_failure(failure);
+        if affected.is_empty() {
+            self.runtime_health.release(permit).await;
+        } else {
+            self.runtime_health
+                .record_failure(
+                    permit,
+                    &affected,
+                    failure.class,
+                    base_cooldown_secs,
+                    error,
+                )
+                .await;
+        }
+    }
+
     pub async fn restore_adaptive_samples<I>(&self, samples: I) -> usize
     where
         I: IntoIterator<Item = (String, bool, u64, i64)>,
@@ -868,6 +1008,45 @@ struct RouteEvaluation {
     candidates: Vec<EvaluatedRoute>,
 }
 
+fn runtime_route_health_status(snapshots: &[RuntimeHealthSnapshot]) -> (bool, i32) {
+    let account = snapshots
+        .iter()
+        .find(|snapshot| snapshot.key.scope == RuntimeHealthScope::Account);
+    if account.is_some_and(|snapshot| snapshot.state == BreakerState::Open) {
+        return (true, 0);
+    }
+    let account_penalty = account
+        .filter(|snapshot| snapshot.state == BreakerState::HalfOpen)
+        .map(|snapshot| snapshot.recovery_penalty)
+        .unwrap_or(0);
+
+    let transports = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.key.scope == RuntimeHealthScope::Transport)
+        .collect::<Vec<_>>();
+    if !transports.is_empty()
+        && transports
+            .iter()
+            .all(|snapshot| snapshot.state == BreakerState::Open)
+    {
+        return (true, 0);
+    }
+
+    let has_closed_transport = transports
+        .iter()
+        .any(|snapshot| snapshot.state == BreakerState::Closed);
+    let transport_penalty = if has_closed_transport {
+        0
+    } else {
+        transports
+            .iter()
+            .map(|snapshot| snapshot.recovery_penalty)
+            .max()
+            .unwrap_or(0)
+    };
+    (false, account_penalty.max(transport_penalty))
+}
+
 fn execution_policy_exclusion(
     policy: &str,
     api_fallback: bool,
@@ -889,7 +1068,8 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{execution_policy_exclusion, push_unique};
+    use super::{execution_policy_exclusion, push_unique, runtime_route_health_status};
+    use crate::runtime_health::{BreakerState, RuntimeHealthKey, RuntimeHealthSnapshot};
     use chrono::{Duration, Utc};
 
     #[test]
@@ -919,6 +1099,52 @@ mod tests {
             execution_policy_exclusion("prefer-api", true, "browser"),
             None
         );
+    }
+
+    #[test]
+    fn direct_transport_open_does_not_exclude_browser_logical_route() {
+        let direct = RuntimeHealthSnapshot {
+            key: RuntimeHealthKey::transport("browser-qwen", "account-a", "direct_http"),
+            state: BreakerState::Open,
+            consecutive_failures: 1,
+            recovery_successes: 0,
+            retry_at: None,
+            half_open_in_flight: 0,
+            last_error: Some("waf".into()),
+            last_failure_class: Some("waf_rejected".into()),
+            last_cooldown_secs: Some(30),
+            recovery_penalty: 0,
+        };
+        let browser = RuntimeHealthSnapshot {
+            key: RuntimeHealthKey::transport("browser-qwen", "account-a", "browser_runtime"),
+            state: BreakerState::Closed,
+            consecutive_failures: 0,
+            recovery_successes: 0,
+            retry_at: None,
+            half_open_in_flight: 0,
+            last_error: None,
+            last_failure_class: None,
+            last_cooldown_secs: None,
+            recovery_penalty: 0,
+        };
+        assert_eq!(runtime_route_health_status(&[direct, browser]), (false, 0));
+    }
+
+    #[test]
+    fn half_open_only_transport_is_penalized_until_hysteresis_closes_it() {
+        let snapshot = RuntimeHealthSnapshot {
+            key: RuntimeHealthKey::transport("provider", "account", "direct_http"),
+            state: BreakerState::HalfOpen,
+            consecutive_failures: 2,
+            recovery_successes: 1,
+            retry_at: None,
+            half_open_in_flight: 0,
+            last_error: Some("network".into()),
+            last_failure_class: Some("network_transient".into()),
+            last_cooldown_secs: Some(20),
+            recovery_penalty: 25,
+        };
+        assert_eq!(runtime_route_health_status(&[snapshot]), (false, 25));
     }
 
     #[test]
