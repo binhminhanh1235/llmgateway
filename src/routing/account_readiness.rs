@@ -205,6 +205,8 @@ mod tests {
             reasons: Vec::new(),
             credential_configured: Some(true),
             browser_ready: None,
+            browser_running: None,
+            browser_direct_ready: None,
             browser_session_id: None,
             browser_session_status: None,
             browser_last_error: None,
