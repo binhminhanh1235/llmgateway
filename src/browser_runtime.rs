@@ -102,7 +102,12 @@ impl RuntimeState {
         self.entries.values().filter(|entry| entry.running).count()
     }
 
-    fn reserve(&mut self, session_id: &str, mode: BrowserRuntimeMode, now: Instant) -> GenerationToken {
+    fn reserve(
+        &mut self,
+        session_id: &str,
+        mode: BrowserRuntimeMode,
+        now: Instant,
+    ) -> GenerationToken {
         let tick = self.next_tick();
         let browser_generation = self
             .entries
@@ -167,15 +172,13 @@ impl RuntimeState {
                 last_used: now,
             },
         );
-        GenerationToken { browser: 1, page: 1 }
+        GenerationToken {
+            browser: 1,
+            page: 1,
+        }
     }
 
-    fn complete_launch(
-        &mut self,
-        session_id: &str,
-        browser_generation: u64,
-        now: Instant,
-    ) -> bool {
+    fn complete_launch(&mut self, session_id: &str, browser_generation: u64, now: Instant) -> bool {
         let tick = self.next_tick();
         let Some(entry) = self.entries.get_mut(session_id) else {
             return false;
@@ -190,7 +193,12 @@ impl RuntimeState {
         true
     }
 
-    fn mark_page_reacquired(&mut self, session_id: &str, token: GenerationToken, now: Instant) -> bool {
+    fn mark_page_reacquired(
+        &mut self,
+        session_id: &str,
+        token: GenerationToken,
+        now: Instant,
+    ) -> bool {
         let tick = self.next_tick();
         let Some(entry) = self.entries.get_mut(session_id) else {
             return false;
@@ -241,9 +249,9 @@ impl RuntimeState {
     }
 
     fn browser_generation_current(&self, session_id: &str, browser_generation: u64) -> bool {
-        self.entries.get(session_id).is_some_and(|entry| {
-            entry.running && entry.browser_generation == browser_generation
-        })
+        self.entries
+            .get(session_id)
+            .is_some_and(|entry| entry.running && entry.browser_generation == browser_generation)
     }
 
     fn invalidate(&mut self, session_id: &str, now: Instant) {
@@ -307,9 +315,7 @@ impl RuntimeState {
                     && entry.mode == BrowserRuntimeMode::Background
                     && entry.active_leases == 0
             })
-            .min_by(|(id_a, a), (id_b, b)| {
-                a.lru_tick.cmp(&b.lru_tick).then_with(|| id_a.cmp(id_b))
-            })
+            .min_by(|(id_a, a), (id_b, b)| a.lru_tick.cmp(&b.lru_tick).then_with(|| id_a.cmp(id_b)))
             .map(|(session_id, entry)| (session_id.clone(), entry.browser_generation))
     }
 
@@ -375,8 +381,10 @@ impl BrowserRuntimeSupervisor {
     }
 
     pub fn generation(&self, session_id: &str) -> Option<BrowserRuntimeGenerationView> {
-        self.lock_state().entries.get(session_id).map(|entry| {
-            BrowserRuntimeGenerationView {
+        self.lock_state()
+            .entries
+            .get(session_id)
+            .map(|entry| BrowserRuntimeGenerationView {
                 session_id: session_id.to_string(),
                 browser_generation: entry.browser_generation,
                 page_generation: entry.page_generation,
@@ -387,8 +395,7 @@ impl BrowserRuntimeSupervisor {
                     BrowserRuntimeMode::Interactive => "interactive_visible",
                 }
                 .into(),
-            }
-        })
+            })
     }
 
     pub fn accepts_generation(
@@ -454,19 +461,14 @@ impl BrowserRuntimeSupervisor {
             return Ok(false);
         }
 
-        let token = self.lock_state().reserve(
-            session_id,
-            BrowserRuntimeMode::Background,
-            Instant::now(),
-        );
+        let token =
+            self.lock_state()
+                .reserve(session_id, BrowserRuntimeMode::Background, Instant::now());
         let mut pending = PendingLaunchGuard::new(self, session_id, token.browser);
 
         if let Err(error) = self.driver.launch_headless(session_id).await {
-            self.lock_state().mark_stopped_if_generation(
-                session_id,
-                token.browser,
-                Instant::now(),
-            );
+            self.lock_state()
+                .mark_stopped_if_generation(session_id, token.browser, Instant::now());
             pending.disarm();
             return Err(error);
         }
@@ -474,18 +476,15 @@ impl BrowserRuntimeSupervisor {
         let verification = self.driver.verify(session_id).await?;
         if !verification.authenticated {
             let _ = self.driver.suspend(session_id).await;
-            self.lock_state().mark_stopped_if_generation(
-                session_id,
-                token.browser,
-                Instant::now(),
-            );
+            self.lock_state()
+                .mark_stopped_if_generation(session_id, token.browser, Instant::now());
             pending.disarm();
             return Ok(false);
         }
 
-        let committed = self
-            .lock_state()
-            .complete_launch(session_id, token.browser, Instant::now());
+        let committed =
+            self.lock_state()
+                .complete_launch(session_id, token.browser, Instant::now());
         pending.disarm();
         Ok(committed)
     }
@@ -509,11 +508,8 @@ impl BrowserRuntimeSupervisor {
             ));
         }
 
-        self.lock_state().reserve(
-            session_id,
-            BrowserRuntimeMode::Interactive,
-            Instant::now(),
-        );
+        self.lock_state()
+            .reserve(session_id, BrowserRuntimeMode::Interactive, Instant::now());
         Ok(())
     }
 
@@ -529,11 +525,7 @@ impl BrowserRuntimeSupervisor {
                 return;
             }
         }
-        state.reserve(
-            session_id,
-            BrowserRuntimeMode::Interactive,
-            Instant::now(),
-        );
+        state.reserve(session_id, BrowserRuntimeMode::Interactive, Instant::now());
     }
 
     pub fn note_interactive_launch_failed(&self, session_id: &str) {
@@ -591,11 +583,8 @@ impl BrowserRuntimeSupervisor {
                 return Ok(false);
             };
             self.driver.suspend(&victim_id).await?;
-            self.lock_state().mark_stopped_if_generation(
-                &victim_id,
-                generation,
-                Instant::now(),
-            );
+            self.lock_state()
+                .mark_stopped_if_generation(&victim_id, generation, Instant::now());
         }
     }
 
@@ -652,11 +641,9 @@ pub struct BrowserRuntimeLease {
 
 impl Drop for BrowserRuntimeLease {
     fn drop(&mut self) {
-        self.runtime.lock_state().release_lease(
-            &self.session_id,
-            self.token,
-            Instant::now(),
-        );
+        self.runtime
+            .lock_state()
+            .release_lease(&self.session_id, self.token, Instant::now());
     }
 }
 
@@ -815,18 +802,13 @@ mod tests {
             BrowserRuntimeMode::Background,
             now - Duration::from_secs(120),
         );
-        assert!(state.complete_launch(
-            "session-a",
-            token.browser,
-            now - Duration::from_secs(120)
-        ));
+        assert!(state.complete_launch("session-a", token.browser, now - Duration::from_secs(120)));
         if let Some(entry) = state.entries.get_mut("session-a") {
             entry.last_used = now - Duration::from_secs(60);
             entry.started_at = now - Duration::from_secs(120);
         }
 
-        let reclaimable =
-            state.reclaimable(now, Duration::from_secs(45), Duration::from_secs(300));
+        let reclaimable = state.reclaimable(now, Duration::from_secs(45), Duration::from_secs(300));
         assert_eq!(reclaimable.len(), 1);
         assert_eq!(reclaimable[0].0, "session-a");
     }

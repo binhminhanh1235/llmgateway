@@ -358,9 +358,10 @@ impl ChromiumDriver {
                 let login = self.sessions.begin_login(session_id).await?;
                 (login.login_attempt_id, login.login_url)
             }
-            ChromiumLaunchMode::BackgroundHeadless => {
-                (format!("background-headless-{session_id}"), session.login_url.clone())
-            }
+            ChromiumLaunchMode::BackgroundHeadless => (
+                format!("background-headless-{session_id}"),
+                session.login_url.clone(),
+            ),
         };
 
         // Use an explicit loopback port instead of relying exclusively on Chrome's
@@ -1700,13 +1701,17 @@ mod tests {
 
     #[test]
     fn background_launch_args_are_headless_and_interactive_launch_is_visible() {
-        let background =
-            launch_tail_args(ChromiumLaunchMode::BackgroundHeadless, "https://example.com/app");
+        let background = launch_tail_args(
+            ChromiumLaunchMode::BackgroundHeadless,
+            "https://example.com/app",
+        );
         assert!(background.iter().any(|arg| arg == "--headless=new"));
         assert!(!background.iter().any(|arg| arg == "--new-window"));
 
-        let interactive =
-            launch_tail_args(ChromiumLaunchMode::InteractiveVisible, "https://example.com/login");
+        let interactive = launch_tail_args(
+            ChromiumLaunchMode::InteractiveVisible,
+            "https://example.com/login",
+        );
         assert!(interactive.iter().any(|arg| arg == "--new-window"));
         assert!(!interactive.iter().any(|arg| arg.starts_with("--headless")));
     }
