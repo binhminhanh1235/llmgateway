@@ -100,8 +100,17 @@ label = "Reliable fake browser"
 login_url = "http://127.0.0.1:18084/login"
 enabled = true
 
+[browser.sessions.fake-web-2]
+provider = "browser-fake"
+label = "Second cold browser"
+login_url = "http://127.0.0.1:18084/login"
+enabled = true
+
 [browser.bindings.browser-account]
 session = "fake-web"
+
+[browser.bindings.browser-account-2]
+session = "fake-web-2"
 
 [browser_runtime]
 allow_visible_auto_launch = false
@@ -118,6 +127,10 @@ reconcile_interval_seconds = 5
 extra_args = []
 
 [chromium.sessions.fake-web]
+enabled = true
+ready_url_prefixes = ["http://127.0.0.1:18084/ready"]
+
+[chromium.sessions.fake-web-2]
 enabled = true
 ready_url_prefixes = ["http://127.0.0.1:18084/ready"]
 
@@ -139,6 +152,12 @@ models_path = "models"
 
 [[accounts]]
 id = "browser-account"
+provider = "browser-fake"
+enabled = true
+discover_models = false
+
+[[accounts]]
+id = "browser-account-2"
 provider = "browser-fake"
 enabled = true
 discover_models = false
@@ -250,7 +269,7 @@ JSON=(-H "Content-Type: application/json")
 
 start_gateway
 
-# P4: gateway startup is browser-cold. Configured sessions do not launch Chromium.
+# P4: gateway startup is browser-cold even with multiple configured browser accounts.
 sleep 1
 test ! -s "$LAUNCH_LOG"
 

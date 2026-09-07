@@ -1555,7 +1555,7 @@ impl BrowserProviderRegistry {
         provider: &ProviderConfig,
         account: &AccountConfig,
         binding: &BrowserAccountBinding,
-    ) -> bool {
+    ) -> Option<BrowserExecutionGuard> {
         let policy = self.account_runtime_policy(&provider.kind, &account.id);
         let session_id = binding.session.clone();
         let browser_was_live = self.cdp_session_live(&session_id).await;
@@ -1569,13 +1569,28 @@ impl BrowserProviderRegistry {
                 }
             })
             .await;
+
         match result {
-            Ok(ready) => ready,
+            Ok(true) => {
+                if let Some(runtime) = browser_runtime::get() {
+                    return runtime
+                        .ensure_background_lease(&session_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(BrowserExecutionGuard::runtime);
+                }
+                Some(BrowserExecutionGuard::legacy(
+                    session_id,
+                    !browser_was_live,
+                ))
+            }
+            Ok(false) => None,
             Err(_) => {
                 if !browser_was_live && browser_runtime::get().is_none() {
                     stop_browser_runtime_soon(session_id);
                 }
-                false
+                None
             }
         }
     }
@@ -1859,24 +1874,19 @@ impl BrowserProviderRegistry {
                 });
             let browser_was_live =
                 safe_fallback_candidate && self.cdp_session_live(&binding.session).await;
-            let safe_browser_fallback = if safe_fallback_candidate {
+            let browser_execution_guard = if safe_fallback_candidate {
                 self.ensure_account_cdp_session_ready(provider, account, &binding)
                     .await
             } else {
-                false
+                None
             };
 
-            if safe_browser_fallback {
+            if let Some(execution_guard) = browser_execution_guard {
                 browser_fallback_used = true;
                 used_adapter = browser_adapter.clone();
                 if let Err(error) = self.mark_direct_state_unsynced(&adapter_request).await {
-                    if !browser_was_live && browser_runtime::get().is_none() {
-                        stop_browser_runtime_soon(binding.session.clone());
-                    }
                     Err(error)
                 } else {
-                    let execution_guard =
-                        browser_execution_guard(binding.session.clone(), !browser_was_live);
                     match self
                         .execute_transport(
                             provider,
@@ -1897,18 +1907,10 @@ impl BrowserProviderRegistry {
                 direct_result
             }
         } else {
-            let browser_was_live = self.cdp_session_live(&binding.session).await;
-            if !self
+            if let Some(execution_guard) = self
                 .ensure_account_cdp_session_ready(provider, account, &binding)
                 .await
             {
-                Err(BrowserProviderError::SessionUnavailable {
-                    account_id: account.id.clone(),
-                    session_id: binding.session.clone(),
-                })
-            } else {
-                let execution_guard =
-                    browser_execution_guard(binding.session.clone(), !browser_was_live);
                 match self
                     .execute_transport(
                         provider,
@@ -1924,6 +1926,11 @@ impl BrowserProviderRegistry {
                     Ok(response) => wrap_response_with_browser_guard(response, execution_guard),
                     Err(error) => Err(error),
                 }
+            } else {
+                Err(BrowserProviderError::SessionUnavailable {
+                    account_id: account.id.clone(),
+                    session_id: binding.session.clone(),
+                })
             }
         };
 
@@ -2023,16 +2030,19 @@ struct BrowserExecutionGuard {
     _fallback_stop: Option<BrowserFallbackStopGuard>,
 }
 
-fn browser_execution_guard(session_id: String, stop_when_released: bool) -> BrowserExecutionGuard {
-    if let Some(runtime) = browser_runtime::get() {
-        return BrowserExecutionGuard {
-            _runtime_lease: runtime.acquire_lease(&session_id),
+impl BrowserExecutionGuard {
+    fn runtime(lease: crate::browser_runtime::BrowserRuntimeLease) -> Self {
+        Self {
+            _runtime_lease: Some(lease),
             _fallback_stop: None,
-        };
+        }
     }
-    BrowserExecutionGuard {
-        _runtime_lease: None,
-        _fallback_stop: stop_when_released.then(|| BrowserFallbackStopGuard::new(session_id)),
+
+    fn legacy(session_id: String, stop_when_released: bool) -> Self {
+        Self {
+            _runtime_lease: None,
+            _fallback_stop: stop_when_released.then(|| BrowserFallbackStopGuard::new(session_id)),
+        }
     }
 }
 

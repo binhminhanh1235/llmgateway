@@ -387,6 +387,24 @@ impl BrowserRuntimeSupervisor {
         session_id: &str,
     ) -> Result<bool, ChromiumDriverError> {
         let _lifecycle_guard = self.lifecycle.lock().await;
+        self.ensure_background_ready_locked(session_id).await
+    }
+
+    pub async fn ensure_background_lease(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<Option<BrowserRuntimeLease>, ChromiumDriverError> {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        if !self.ensure_background_ready_locked(session_id).await? {
+            return Ok(None);
+        }
+        Ok(self.acquire_lease(session_id))
+    }
+
+    async fn ensure_background_ready_locked(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<bool, ChromiumDriverError> {
         self.sync_running_from_driver().await;
 
         let status = self.driver.status(session_id).await?;
@@ -400,9 +418,20 @@ impl BrowserRuntimeSupervisor {
                 return Ok(true);
             }
 
-            if self.driver.reacquire_ready_page(session_id).await? {
-                let verification = self.driver.verify(session_id).await?;
-                if verification.authenticated {
+            // Recovery ladder: stale page/target is cheaper than a browser restart.
+            // Any reacquire or verification failure falls through to the restart step.
+            if self
+                .driver
+                .reacquire_ready_page(session_id)
+                .await
+                .unwrap_or(false)
+            {
+                if self
+                    .driver
+                    .verify(session_id)
+                    .await
+                    .is_ok_and(|verification| verification.authenticated)
+                {
                     self.lock_state()
                         .mark_page_reacquired(session_id, token, Instant::now());
                     return Ok(true);
@@ -473,15 +502,10 @@ impl BrowserRuntimeSupervisor {
 
     pub fn note_interactive_started(&self, session_id: &str) {
         let mut state = self.lock_state();
-        if let Some(entry) = state.entries.get(session_id) {
-            if entry.running && entry.mode == BrowserRuntimeMode::Interactive {
-                let token = GenerationToken {
-                    browser: entry.browser_generation,
-                    page: entry.page_generation,
-                };
-                let _ = token;
-                return;
-            }
+        if state.entries.get(session_id).is_some_and(|entry| {
+            entry.running && entry.mode == BrowserRuntimeMode::Interactive
+        }) {
+            return;
         }
         state.reserve(session_id, BrowserRuntimeMode::Interactive, Instant::now());
     }
@@ -551,17 +575,22 @@ impl BrowserRuntimeSupervisor {
             let Ok(status) = self.driver.status(&session_id).await else {
                 continue;
             };
+            let default_mode = if self
+                .driver
+                .session_allows_background_runtime(&session_id)
+                .await
+            {
+                BrowserRuntimeMode::Background
+            } else {
+                BrowserRuntimeMode::Interactive
+            };
             let mut state = self.lock_state();
             let tracked_running = state
                 .entries
                 .get(&session_id)
                 .is_some_and(|entry| entry.running);
             if status.running && !tracked_running {
-                state.observe_existing(
-                    &session_id,
-                    BrowserRuntimeMode::Interactive,
-                    Instant::now(),
-                );
+                state.observe_existing(&session_id, default_mode, Instant::now());
             } else if !status.running && tracked_running {
                 state.mark_stopped(&session_id, Instant::now());
             }
@@ -730,10 +759,10 @@ mod tests {
     fn lru_budget_evicts_oldest_idle_background_runtime() {
         let mut state = RuntimeState::default();
         let now = Instant::now();
-        state.reserve("session-a", BrowserRuntimeMode::Background, now);
-        state.reserve("session-b", BrowserRuntimeMode::Background, now);
-        let lease = state.acquire_lease("session-b", now).unwrap();
-        state.release_lease("session-b", lease, now);
+        let a = state.reserve("session-a", BrowserRuntimeMode::Background, now);
+        assert!(state.complete_launch("session-a", a.browser, now));
+        let b = state.reserve("session-b", BrowserRuntimeMode::Background, now);
+        assert!(state.complete_launch("session-b", b.browser, now));
 
         let victim = state.lru_background_victim("session-c").unwrap();
         assert_eq!(victim.0, "session-a");
@@ -743,8 +772,10 @@ mod tests {
     fn active_lease_protects_runtime_from_lru_eviction() {
         let mut state = RuntimeState::default();
         let now = Instant::now();
-        state.reserve("session-a", BrowserRuntimeMode::Background, now);
-        state.reserve("session-b", BrowserRuntimeMode::Background, now);
+        let a = state.reserve("session-a", BrowserRuntimeMode::Background, now);
+        assert!(state.complete_launch("session-a", a.browser, now));
+        let b = state.reserve("session-b", BrowserRuntimeMode::Background, now);
+        assert!(state.complete_launch("session-b", b.browser, now));
         let _lease = state.acquire_lease("session-a", now).unwrap();
 
         let victim = state.lru_background_victim("session-c").unwrap();
@@ -769,6 +800,34 @@ mod tests {
         let reclaimable = state.reclaimable(now, Duration::from_secs(45), Duration::from_secs(300));
         assert_eq!(reclaimable.len(), 1);
         assert_eq!(reclaimable[0].0, "session-a");
+    }
+
+    #[test]
+    fn reacquire_advances_page_generation_without_browser_restart() {
+        let mut state = RuntimeState::default();
+        let now = Instant::now();
+        let launch = state.reserve("session-a", BrowserRuntimeMode::Background, now);
+        assert!(state.complete_launch("session-a", launch.browser, now));
+        let before = state.acquire_lease("session-a", now).unwrap();
+        state.release_lease("session-a", before, now);
+
+        assert!(state.mark_page_reacquired("session-a", before, now));
+        let after = state.acquire_lease("session-a", now).unwrap();
+        assert_eq!(after.browser, before.browser);
+        assert_ne!(after.page, before.page);
+    }
+
+    #[test]
+    fn cancelled_cold_start_releases_reserved_runtime_capacity() {
+        let mut state = RuntimeState::default();
+        let now = Instant::now();
+        let pending = state.reserve("session-a", BrowserRuntimeMode::Background, now);
+        assert_eq!(state.running_count(), 1);
+
+        state.mark_stopped_if_generation("session-a", pending.browser, now);
+
+        assert_eq!(state.running_count(), 0);
+        assert_eq!(state.entries["session-a"].active_leases, 0);
     }
 
     #[test]
