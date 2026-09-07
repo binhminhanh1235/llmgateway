@@ -2373,7 +2373,7 @@ mod tests {
                     let stale_epoch = lease.epoch();
                     let retry_epoch = lease.advance_epoch();
                     assert!(retry_epoch > stale_epoch);
-                    assert!(!lease.slot.dirty.swap(false, Ordering::AcqRel));
+                    assert!(lease.is_dirty());
                     lease.mark_clean();
                     epochs.lock().await.push(retry_epoch);
                 } else {
