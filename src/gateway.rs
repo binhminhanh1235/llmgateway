@@ -1471,10 +1471,7 @@ fn failure_is_adaptive(failure: &ExecutionFailure) -> bool {
 fn route_cooldown_for_failure(failure: &ExecutionFailure, cooldown_secs: i64) -> i64 {
     if matches!(
         failure.scope,
-        FailureScope::Account
-            | FailureScope::Transport
-            | FailureScope::Session
-            | FailureScope::Provider
+        FailureScope::Transport | FailureScope::Session | FailureScope::Provider
     ) {
         0
     } else {
