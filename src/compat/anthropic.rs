@@ -608,7 +608,10 @@ mod tests {
             "messages":[{"role":"user","content":"hello"}]
         });
         let (_, openai) = to_openai_request(&request).unwrap();
-        assert_eq!(openai["messages"][0], json!({"role":"system","content":"You are Claude Code."}));
+        assert_eq!(
+            openai["messages"][0],
+            json!({"role":"system","content":"You are Claude Code."})
+        );
         assert_eq!(openai["messages"][1]["role"], "user");
     }
 
@@ -623,7 +626,10 @@ mod tests {
             ]
         });
         let (_, openai) = to_openai_request(&request).unwrap();
-        let roles = openai["messages"].as_array().unwrap().iter()
+        let roles = openai["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
             .map(|message| message["role"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(roles, vec!["user", "system", "user"]);
@@ -643,7 +649,10 @@ mod tests {
             }]
         });
         let (_, openai) = to_openai_request(&request).unwrap();
-        assert_eq!(openai["messages"][0], json!({"role":"system","content":"first\nsecond"}));
+        assert_eq!(
+            openai["messages"][0],
+            json!({"role":"system","content":"first\nsecond"})
+        );
     }
 
     #[test]
@@ -671,7 +680,10 @@ mod tests {
             ]
         });
         let (_, openai) = to_openai_request(&request).unwrap();
-        assert_eq!(openai["messages"][1], json!({"role":"system","content":"apply now"}));
+        assert_eq!(
+            openai["messages"][1],
+            json!({"role":"system","content":"apply now"})
+        );
     }
 
     #[test]
@@ -710,7 +722,10 @@ mod tests {
         });
         let (_, openai) = to_openai_request(&request).unwrap();
         assert_eq!(openai["messages"][0]["role"], "system");
-        assert_eq!(openai["messages"][1]["tool_calls"][0]["function"]["name"], "read_file");
+        assert_eq!(
+            openai["messages"][1]["tool_calls"][0]["function"]["name"],
+            "read_file"
+        );
         assert_eq!(openai["messages"][2]["role"], "tool");
         assert_eq!(openai["parallel_tool_calls"], false);
     }
@@ -747,22 +762,38 @@ mod tests {
             serde_json::from_str(include_str!("../../fixtures/claude-code-messages.json")).unwrap();
         let headers = fixture["headers"].as_object().unwrap();
         let version = headers.get("anthropic-version").and_then(Value::as_str);
-        let beta_values = headers.get("anthropic-beta").and_then(Value::as_array).unwrap().iter()
-            .filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+        let beta_values = headers
+            .get("anthropic-beta")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         let (_, openai) =
             to_openai_request_with_protocol(&fixture["body"], version, &beta_values).unwrap();
         assert_eq!(openai["stream"], true);
         assert_eq!(openai["tool_choice"], "auto");
         assert_eq!(openai["parallel_tool_calls"], false);
-        let roles = openai["messages"].as_array().unwrap().iter()
+        let roles = openai["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
             .map(|message| message["role"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(
             roles,
-            vec!["system", "user", "assistant", "tool", "system", "system", "user"]
+            vec![
+                "system",
+                "user",
+                "assistant",
+                "tool",
+                "system",
+                "system",
+                "user"
+            ]
         );
         assert_eq!(openai["messages"][4]["content"], "");
         assert_eq!(openai["messages"][5]["content"], "");
     }
-
 }
