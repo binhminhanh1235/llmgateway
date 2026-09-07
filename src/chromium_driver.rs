@@ -808,9 +808,10 @@ impl ChromiumDriver {
     }
 
     pub async fn session_allows_background_runtime(&self, session_id: &str) -> bool {
-        self.sessions.session(session_id).await.is_ok_and(|session| {
-            matches!(session.status.as_str(), STATUS_READY | STATUS_DEGRADED)
-        })
+        self.sessions
+            .session(session_id)
+            .await
+            .is_ok_and(|session| matches!(session.status.as_str(), STATUS_READY | STATUS_DEGRADED))
     }
 
     pub async fn reacquire_ready_page(

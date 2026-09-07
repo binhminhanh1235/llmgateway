@@ -1580,10 +1580,7 @@ impl BrowserProviderRegistry {
                         .flatten()
                         .map(BrowserExecutionGuard::runtime);
                 }
-                Some(BrowserExecutionGuard::legacy(
-                    session_id,
-                    !browser_was_live,
-                ))
+                Some(BrowserExecutionGuard::legacy(session_id, !browser_was_live))
             }
             Ok(false) => None,
             Err(_) => {

@@ -502,9 +502,11 @@ impl BrowserRuntimeSupervisor {
 
     pub fn note_interactive_started(&self, session_id: &str) {
         let mut state = self.lock_state();
-        if state.entries.get(session_id).is_some_and(|entry| {
-            entry.running && entry.mode == BrowserRuntimeMode::Interactive
-        }) {
+        if state
+            .entries
+            .get(session_id)
+            .is_some_and(|entry| entry.running && entry.mode == BrowserRuntimeMode::Interactive)
+        {
             return;
         }
         state.reserve(session_id, BrowserRuntimeMode::Interactive, Instant::now());
