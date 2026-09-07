@@ -464,7 +464,11 @@
     }
 
     const events = [];
-    if (!state.toolCalls) {
+    const toolProtocolPending =
+      Array.isArray(state.request?.tools) &&
+      state.request.tools.length > 0 &&
+      state.request?.tool_choice !== "none";
+    if (!state.toolCalls && !toolProtocolPending) {
       const current = String(state.answer || "");
       if (state.delivered && !current.startsWith(state.delivered)) {
         state.error = {
@@ -493,6 +497,18 @@
       if (state.toolCalls) {
         events.push(streamChunk(state, { role: "assistant", tool_calls: state.toolCalls }, "tool_calls"));
       } else {
+        if (toolProtocolPending) {
+          const finalText = String(state.answer || "");
+          const delta = finalText.slice(state.delivered.length);
+          if (delta) {
+            const payload = state.roleEmitted
+              ? { content: delta }
+              : { role: "assistant", content: delta };
+            state.roleEmitted = true;
+            state.delivered = finalText;
+            events.push(streamChunk(state, payload));
+          }
+        }
         events.push(streamChunk(state, {}, "stop"));
       }
       state.finalEmitted = true;
