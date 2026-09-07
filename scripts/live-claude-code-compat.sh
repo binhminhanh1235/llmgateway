@@ -85,13 +85,37 @@ def messages(model, payload):
     return events, raw_headers
 
 
-def tool_start(events):
+def streamed_tool_call(events):
     for event in events:
         if event.get("type") != "content_block_start":
             continue
         block = event.get("content_block") or {}
-        if block.get("type") == "tool_use":
-            return block
+        if block.get("type") != "tool_use":
+            continue
+        index = event.get("index")
+        partial_json = "".join(
+            (delta_event.get("delta") or {}).get("partial_json", "")
+            for delta_event in events
+            if delta_event.get("type") == "content_block_delta"
+            and delta_event.get("index") == index
+            and (delta_event.get("delta") or {}).get("type") == "input_json_delta"
+        )
+        if not partial_json:
+            raise AssertionError(f"tool_use block {block.get('id')} did not stream input_json_delta")
+        try:
+            streamed_input = json.loads(partial_json)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(
+                f"tool_use block {block.get('id')} emitted invalid partial JSON: {partial_json}"
+            ) from exc
+        return block, streamed_input
+    return None, None
+
+
+def stop_reason(events):
+    for event in events:
+        if event.get("type") == "message_delta":
+            return (event.get("delta") or {}).get("stop_reason")
     return None
 
 
@@ -145,13 +169,21 @@ for model in models:
     }
 
     first_events, first_headers = messages(model, first_payload)
-    started_tool = tool_start(first_events)
+    started_tool, streamed_input = streamed_tool_call(first_events)
     if not started_tool:
         raise AssertionError(
             f"{model}: forced read_file tool call was not emitted: {first_events}"
         )
     if started_tool.get("name") != "read_file":
         raise AssertionError(f"{model}: unexpected tool name: {started_tool}")
+    if streamed_input != {"path": "Cargo.toml"}:
+        raise AssertionError(
+            f"{model}: forced read_file streamed unexpected input: {streamed_input}"
+        )
+    if stop_reason(first_events) != "tool_use":
+        raise AssertionError(
+            f"{model}: forced tool phase did not terminate with stop_reason=tool_use: {first_events}"
+        )
 
     tool_id = started_tool.get("id")
     if not tool_id:
@@ -206,6 +238,14 @@ for model in models:
     final_text = text_output(second_events).strip()
     if not final_text:
         raise AssertionError(f"{model}: follow-up produced no text: {second_events}")
+    if "llmgateway" not in final_text.lower():
+        raise AssertionError(
+            f"{model}: follow-up did not consume the tool_result package name: {final_text}"
+        )
+    if stop_reason(second_events) == "tool_use":
+        raise AssertionError(
+            f"{model}: tool_choice=none follow-up unexpectedly requested another tool: {second_events}"
+        )
 
     print(
         json.dumps(
