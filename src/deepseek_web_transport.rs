@@ -2328,6 +2328,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn burst_empty_stream_fixture_recovers_once_without_overlap() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::{sync::Barrier, time::sleep};
+
+        let runtime = Arc::new(DeepSeekConversationRuntime::default());
+        let key = DeepSeekConversationKey::new("provider", "account", Some("thread"));
+        let barrier = Arc::new(Barrier::new(8));
+        let in_section = Arc::new(AtomicUsize::new(0));
+        let max_in_section = Arc::new(AtomicUsize::new(0));
+        let recoveries = Arc::new(AtomicUsize::new(0));
+        let epochs = Arc::new(AsyncMutex::new(Vec::new()));
+        let mut tasks = Vec::new();
+
+        for _ in 0..8 {
+            let runtime = runtime.clone();
+            let key = key.clone();
+            let barrier = barrier.clone();
+            let in_section = in_section.clone();
+            let max_in_section = max_in_section.clone();
+            let recoveries = recoveries.clone();
+            let epochs = epochs.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let mut lease = runtime.acquire_key(key).await;
+                let active = in_section.fetch_add(1, Ordering::AcqRel) + 1;
+                max_in_section.fetch_max(active, Ordering::AcqRel);
+                epochs.lock().await.push(lease.epoch());
+
+                if recoveries
+                    .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    let empty = DeepSeekStreamState {
+                        completed: true,
+                        response_message_id: Some(1),
+                        ..Default::default()
+                    };
+                    let failure = DeepSeekAttemptFailure::Retryable(
+                        empty.validate_completion().unwrap_err(),
+                    );
+                    assert!(should_retry_fresh_session(false, false, &failure));
+                    lease.mark_dirty();
+                    let stale_epoch = lease.epoch();
+                    let retry_epoch = lease.advance_epoch();
+                    assert!(retry_epoch > stale_epoch);
+                    assert!(!lease.slot.dirty.swap(false, Ordering::AcqRel));
+                    lease.mark_clean();
+                    epochs.lock().await.push(retry_epoch);
+                } else {
+                    assert!(!lease.is_dirty());
+                }
+
+                sleep(Duration::from_millis(5)).await;
+                in_section.fetch_sub(1, Ordering::AcqRel);
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        assert_eq!(max_in_section.load(Ordering::Acquire), 1);
+        assert_eq!(recoveries.load(Ordering::Acquire), 1);
+        let epochs = epochs.lock().await;
+        assert!(epochs.windows(2).all(|window| window[0] < window[1]));
+        drop(epochs);
+
+        let lease = runtime.acquire_key(key).await;
+        assert!(!lease.is_dirty());
+    }
+
+    #[tokio::test]
     async fn aborted_conversation_holder_releases_lease() {
         use std::future::pending;
         use tokio::{sync::oneshot, time::timeout};
