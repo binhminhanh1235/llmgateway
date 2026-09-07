@@ -4,6 +4,7 @@ use crate::{
     chromium_driver_runtime,
     config::{AccountConfig, AppConfig, ProviderConfig, RouteConfig},
     conversation_runtime,
+    execution::{ExecutionFailure, ExecutionPhase, FailureClass, FailureScope, ReplaySafety},
     deepseek_web_transport::DeepSeekWebHttpAdapter,
     gemini_web_transport::GeminiWebHttpAdapter,
     mimo_web_transport::MimoWebHttpAdapter,
@@ -304,6 +305,170 @@ pub enum BrowserProviderError {
     Io(#[from] std::io::Error),
     #[error("browser provider config TOML error: {0}")]
     Toml(#[from] toml::de::Error),
+}
+
+impl BrowserProviderError {
+    pub fn execution_failure(&self) -> ExecutionFailure {
+        match self {
+            Self::InvalidConfig(_)
+            | Self::UnsupportedAdapter(_)
+            | Self::UnsupportedBrowserless(_)
+            | Self::InvalidTransportPolicy(_)
+            | Self::MissingBinding(_)
+            | Self::Io(_)
+            | Self::Toml(_) => ExecutionFailure::new(
+                FailureClass::Unknown,
+                false,
+                ReplaySafety::Safe,
+                ExecutionPhase::PreSubmit,
+                FailureScope::Request,
+                "browser provider configuration cannot execute the request",
+            ),
+            Self::SessionUnavailable { .. } => ExecutionFailure::new(
+                FailureClass::SessionBusy,
+                true,
+                ReplaySafety::Safe,
+                ExecutionPhase::PreSubmit,
+                FailureScope::Session,
+                "browser session is not ready",
+            )
+            .with_cooldown(2),
+            Self::AdapterIncompatible { code, .. } if code == "model_binding_conflict" => {
+                ExecutionFailure::new(
+                    FailureClass::SessionStateDesync,
+                    false,
+                    ReplaySafety::Unsafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Conversation,
+                    "provider-native conversation is bound to incompatible model state",
+                )
+            }
+            Self::AdapterIncompatible { code, .. } if code == "upstream_waf_rejected" => {
+                ExecutionFailure::new(
+                    FailureClass::WafRejected,
+                    true,
+                    ReplaySafety::Safe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Transport,
+                    "upstream rejected the selected browser-backed transport",
+                )
+            }
+            Self::AdapterIncompatible { .. } => ExecutionFailure::new(
+                FailureClass::ModelUnavailable,
+                true,
+                ReplaySafety::Safe,
+                ExecutionPhase::PreSubmit,
+                FailureScope::Model,
+                "browser adapter is not compatible with the selected model/page",
+            )
+            .with_cooldown(0),
+            Self::ModelUnavailable { .. } => ExecutionFailure::new(
+                FailureClass::ModelUnavailable,
+                true,
+                ReplaySafety::Safe,
+                ExecutionPhase::PreSubmit,
+                FailureScope::Model,
+                "selected browser model is unavailable",
+            )
+            .with_cooldown(0),
+            Self::ModelRecipeStale { .. } => ExecutionFailure::new(
+                FailureClass::ModelRecipeStale,
+                false,
+                ReplaySafety::Safe,
+                ExecutionPhase::PreSubmit,
+                FailureScope::Model,
+                "selected browser model recipe is stale",
+            )
+            .with_cooldown(0),
+            Self::Transport(message) => browser_transport_execution_failure(message),
+        }
+    }
+}
+
+fn browser_transport_execution_failure(message: &str) -> ExecutionFailure {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("aliyun_waf_aa") || lower.contains("upstream_waf_rejected") {
+        ExecutionFailure::new(
+            FailureClass::WafRejected,
+            true,
+            ReplaySafety::Safe,
+            ExecutionPhase::Submitted,
+            FailureScope::Transport,
+            "upstream rejected the selected browser-backed transport",
+        )
+    } else if lower.contains("websocket protocol error")
+        || lower.contains("connection reset without closing handshake")
+        || (lower.contains("cdp")
+            && (lower.contains("disconnect")
+                || lower.contains("websocket closed")
+                || lower.contains("websocket ended")))
+    {
+        ExecutionFailure::new(
+            FailureClass::CdpDisconnected,
+            true,
+            ReplaySafety::ProbablySafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Session,
+            "browser control channel disconnected",
+        )
+    } else if lower.contains("target")
+        && (lower.contains("closed") || lower.contains("lost") || lower.contains("disappear"))
+    {
+        ExecutionFailure::new(
+            FailureClass::PageTargetLost,
+            true,
+            ReplaySafety::ProbablySafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Session,
+            "browser page target was lost",
+        )
+    } else if lower.contains("browser")
+        && (lower.contains("crash") || lower.contains("exited"))
+    {
+        ExecutionFailure::new(
+            FailureClass::BrowserCrashed,
+            true,
+            ReplaySafety::ProbablySafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Session,
+            "browser runtime exited unexpectedly",
+        )
+    } else if lower.contains("empty stream")
+        || lower.contains("empty output")
+        || lower.contains("without assistant output")
+    {
+        ExecutionFailure::new(
+            FailureClass::StreamEmpty,
+            true,
+            ReplaySafety::ProbablySafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Conversation,
+            "provider stream ended without client-visible output",
+        )
+    } else if lower.contains("upstream_stream_dropped")
+        || (lower.contains("stream")
+            && (lower.contains("drop")
+                || lower.contains("ended")
+                || lower.contains("before logical completion")))
+    {
+        ExecutionFailure::new(
+            FailureClass::StreamDropped,
+            true,
+            ReplaySafety::ProbablySafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Conversation,
+            "provider stream ended unexpectedly",
+        )
+    } else {
+        ExecutionFailure::new(
+            FailureClass::NetworkTransient,
+            true,
+            ReplaySafety::ProbablySafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Transport,
+            "browser-backed transport failed before client-visible commit",
+        )
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3733,6 +3898,45 @@ mod tests {
             model: "gemini-web-pro".into(),
         };
         assert!(!direct_error_allows_browser_fallback(&stale, false, true));
+    }
+
+    #[test]
+    fn qwen_waf_adapter_error_is_classified_at_provider_boundary() {
+        let error = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "upstream_waf_rejected".into(),
+            message: "classification=waf body=aliyun_waf_aa".into(),
+        };
+        let failure = error.execution_failure();
+        assert_eq!(failure.class, FailureClass::WafRejected);
+        assert_eq!(failure.scope, FailureScope::Transport);
+        assert_eq!(failure.replay_safety, ReplaySafety::Safe);
+        assert!(failure.retryable);
+    }
+
+    #[test]
+    fn transient_browser_compatibility_is_classified_at_provider_boundary() {
+        let cases = [
+            (
+                "WebSocket protocol error: Connection reset without closing handshake",
+                FailureClass::CdpDisconnected,
+            ),
+            ("browser page target was lost", FailureClass::PageTargetLost),
+            ("browser process exited unexpectedly", FailureClass::BrowserCrashed),
+            (
+                "browser stream completed without assistant output",
+                FailureClass::StreamEmpty,
+            ),
+            (
+                "upstream_stream_dropped: stream ended before logical completion",
+                FailureClass::StreamDropped,
+            ),
+        ];
+
+        for (message, expected) in cases {
+            let failure = BrowserProviderError::Transport(message.into()).execution_failure();
+            assert_eq!(failure.class, expected, "{message}");
+        }
     }
 
     #[test]

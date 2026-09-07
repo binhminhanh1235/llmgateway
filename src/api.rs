@@ -783,6 +783,7 @@ pub(crate) fn gateway_error(error: GatewayError) -> Response<Body> {
             json_error(StatusCode::BAD_GATEWAY, "model_recipe_stale", &message)
         }
         GatewayError::Upstream { status, body } => json_error(status, "upstream_error", &body),
+        GatewayError::Classified { source, .. } => gateway_error(*source),
         GatewayError::Execution { request_id, source } => {
             let mut response = gateway_error(*source);
             insert_request_id(&mut response, &request_id);
@@ -954,11 +955,35 @@ fn openai_assistant_message(openai: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::AppConfig, execution_trace::ExecutionTraceStore, live_config::LiveConfig};
+    use crate::{
+        config::AppConfig,
+        execution::{ExecutionFailure, ExecutionPhase, FailureClass, FailureScope, ReplaySafety},
+        execution_trace::ExecutionTraceStore,
+        live_config::LiveConfig,
+    };
     use axum::body::to_bytes;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::{collections::HashSet, fs};
     use uuid::Uuid;
+
+    #[test]
+    fn classified_model_binding_conflict_preserves_http_409() {
+        let failure = ExecutionFailure::new(
+            FailureClass::SessionStateDesync,
+            false,
+            ReplaySafety::Unsafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Conversation,
+            "provider-native conversation is bound to incompatible model state",
+        );
+        let response = gateway_error(GatewayError::Classified {
+            failure: Box::new(failure),
+            source: Box::new(GatewayError::ModelBindingConflict(
+                "model_binding_conflict".into(),
+            )),
+        });
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 
     #[tokio::test]
     async fn models_exposes_only_enabled_models_active_routes_and_viable_groups() {

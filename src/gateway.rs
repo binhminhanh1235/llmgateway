@@ -241,6 +241,12 @@ pub enum GatewayError {
     #[error("upstream rejected request with {status}: {body}")]
     Upstream { status: StatusCode, body: String },
     #[error("{source}")]
+    Classified {
+        failure: Box<ExecutionFailure>,
+        #[source]
+        source: Box<GatewayError>,
+    },
+    #[error("{source}")]
     Execution {
         request_id: String,
         #[source]
@@ -1057,7 +1063,8 @@ fn sanitized_upstream_body(body: &Value) -> Value {
 }
 
 fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
-    match error {
+    let failure = error.execution_failure();
+    let source = match error {
         BrowserProviderError::InvalidConfig(_)
         | BrowserProviderError::UnsupportedAdapter(_)
         | BrowserProviderError::UnsupportedBrowserless(_)
@@ -1089,6 +1096,10 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
             GatewayError::BrowserModelRecipeStale(error.to_string())
         }
         BrowserProviderError::Transport(_) => GatewayError::BrowserTransport(error.to_string()),
+    };
+    GatewayError::Classified {
+        failure: Box::new(failure),
+        source: Box::new(source),
     }
 }
 
@@ -1157,14 +1168,15 @@ fn no_route_message(trace: &RouteDecisionTrace) -> String {
     )
 }
 
-fn is_model_binding_conflict(error: &GatewayError) -> bool {
-    matches!(error, GatewayError::ModelBindingConflict(_))
-        || matches!(
-            error,
-            GatewayError::BrowserTransport(msg)
-                if msg.contains("native conversation is already bound to model")
-                    || msg.contains("model_binding_conflict")
-        )
+fn legacy_gateway_error(mut error: &GatewayError) -> &GatewayError {
+    loop {
+        match error {
+            GatewayError::Classified { source, .. } | GatewayError::Execution { source, .. } => {
+                error = source.as_ref();
+            }
+            _ => return error,
+        }
+    }
 }
 
 fn selected_transport_label(provider: &ProviderConfig) -> &'static str {
@@ -1271,18 +1283,6 @@ fn normalized_gateway_failure(
     model: &str,
     transport: &str,
 ) -> ExecutionFailure {
-    if is_model_binding_conflict(error) {
-        return ExecutionFailure::new(
-            FailureClass::SessionStateDesync,
-            false,
-            ReplaySafety::Unsafe,
-            ExecutionPhase::Submitted,
-            FailureScope::Conversation,
-            "provider-native conversation is bound to incompatible model state",
-        )
-        .with_context(provider, account_id, model, transport);
-    }
-
     let failure = match error {
         GatewayError::NoRoute(_) => ExecutionFailure::new(
             FailureClass::ModelUnavailable,
@@ -1327,82 +1327,14 @@ fn normalized_gateway_failure(
             "browser session is not ready",
         )
         .with_cooldown(2),
-        GatewayError::BrowserTransport(message) => {
-            let lower = message.to_ascii_lowercase();
-            if lower.contains("aliyun_waf_aa") || lower.contains("upstream_waf_rejected") {
-                ExecutionFailure::new(
-                    FailureClass::WafRejected,
-                    true,
-                    ReplaySafety::Safe,
-                    ExecutionPhase::Submitted,
-                    FailureScope::Transport,
-                    "upstream rejected the selected browser-backed transport",
-                )
-            } else if lower.contains("websocket protocol error")
-                || lower.contains("connection reset without closing handshake")
-                || lower.contains("cdp") && lower.contains("disconnect")
-            {
-                ExecutionFailure::new(
-                    FailureClass::CdpDisconnected,
-                    true,
-                    ReplaySafety::ProbablySafe,
-                    ExecutionPhase::Submitted,
-                    FailureScope::Session,
-                    "browser control channel disconnected",
-                )
-            } else if lower.contains("target")
-                && (lower.contains("closed") || lower.contains("lost"))
-            {
-                ExecutionFailure::new(
-                    FailureClass::PageTargetLost,
-                    true,
-                    ReplaySafety::ProbablySafe,
-                    ExecutionPhase::Submitted,
-                    FailureScope::Session,
-                    "browser page target was lost",
-                )
-            } else if lower.contains("browser")
-                && (lower.contains("crash") || lower.contains("exited"))
-            {
-                ExecutionFailure::new(
-                    FailureClass::BrowserCrashed,
-                    true,
-                    ReplaySafety::ProbablySafe,
-                    ExecutionPhase::Submitted,
-                    FailureScope::Session,
-                    "browser runtime exited unexpectedly",
-                )
-            } else if lower.contains("empty stream") || lower.contains("empty output") {
-                ExecutionFailure::new(
-                    FailureClass::StreamEmpty,
-                    true,
-                    ReplaySafety::ProbablySafe,
-                    ExecutionPhase::Submitted,
-                    FailureScope::Conversation,
-                    "provider stream ended without client-visible output",
-                )
-            } else if lower.contains("stream")
-                && (lower.contains("drop") || lower.contains("ended"))
-            {
-                ExecutionFailure::new(
-                    FailureClass::StreamDropped,
-                    true,
-                    ReplaySafety::ProbablySafe,
-                    ExecutionPhase::Submitted,
-                    FailureScope::Conversation,
-                    "provider stream ended unexpectedly",
-                )
-            } else {
-                ExecutionFailure::new(
-                    FailureClass::NetworkTransient,
-                    true,
-                    ReplaySafety::ProbablySafe,
-                    ExecutionPhase::Submitted,
-                    FailureScope::Transport,
-                    "browser-backed transport failed before client-visible commit",
-                )
-            }
-        }
+        GatewayError::BrowserTransport(_) => ExecutionFailure::new(
+            FailureClass::NetworkTransient,
+            true,
+            ReplaySafety::ProbablySafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Transport,
+            "browser-backed transport failed before client-visible commit",
+        )
         GatewayError::BrowserAdapterIncompatible(_) => ExecutionFailure::new(
             FailureClass::ModelUnavailable,
             true,
@@ -1412,7 +1344,15 @@ fn normalized_gateway_failure(
             "browser adapter is not compatible with the selected model/page",
         )
         .with_cooldown(0),
-        GatewayError::ModelBindingConflict(_) => unreachable!("handled above"),
+        GatewayError::ModelBindingConflict(_) => ExecutionFailure::new(
+            FailureClass::SessionStateDesync,
+            false,
+            ReplaySafety::Unsafe,
+            ExecutionPhase::Submitted,
+            FailureScope::Conversation,
+            "provider-native conversation is bound to incompatible model state",
+        )
+        .with_cooldown(0),
         GatewayError::BrowserModelUnavailable(_) => ExecutionFailure::new(
             FailureClass::ModelUnavailable,
             true,
@@ -1435,6 +1375,12 @@ fn normalized_gateway_failure(
             return normalized_status_failure(
                 *status, body, provider, account_id, model, transport, false,
             )
+        }
+        GatewayError::Classified { failure, .. } => {
+            return failure
+                .as_ref()
+                .clone()
+                .with_context(provider, account_id, model, transport)
         }
         GatewayError::Execution { source, .. } => {
             return normalized_gateway_failure(source, provider, account_id, model, transport)
@@ -1472,6 +1418,7 @@ fn route_failure_policy_for_failure(failure: &ExecutionFailure) -> Option<(i64, 
 }
 
 fn failure_outcome(error: &GatewayError, failure: &ExecutionFailure) -> &'static str {
+    let error = legacy_gateway_error(error);
     match failure.class {
         FailureClass::RateLimited => "rate_limited",
         FailureClass::AuthExpired
@@ -1617,11 +1564,18 @@ mod stream_trace_tests {
     }
 
     #[test]
-    fn browser_error_strings_are_normalized_at_the_adapter_boundary() {
+    fn browser_provider_errors_are_normalized_at_the_provider_boundary() {
+        let waf_error = map_browser_provider_error(BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "upstream_waf_rejected".into(),
+            message: "classification=waf body=aliyun_waf_aa".into(),
+        });
+        assert!(matches!(
+            legacy_gateway_error(&waf_error),
+            GatewayError::BrowserAdapterIncompatible(_)
+        ));
         let waf = normalized_gateway_failure(
-            &GatewayError::BrowserTransport(
-                "upstream_waf_rejected: classification=waf body=aliyun_waf_aa".into(),
-            ),
+            &waf_error,
             "qwen-web",
             "account-a",
             "qwen-max",
@@ -1632,10 +1586,11 @@ mod stream_trace_tests {
         assert_eq!(waf.replay_safety, ReplaySafety::Safe);
         assert!(waf.allows_silent_fallback(false));
 
+        let cdp_error = map_browser_provider_error(BrowserProviderError::Transport(
+            "WebSocket protocol error: Connection reset without closing handshake".into(),
+        ));
         let cdp = normalized_gateway_failure(
-            &GatewayError::BrowserTransport(
-                "WebSocket protocol error: Connection reset without closing handshake".into(),
-            ),
+            &cdp_error,
             "qwen-web",
             "account-a",
             "qwen-max",
@@ -1644,8 +1599,11 @@ mod stream_trace_tests {
         assert_eq!(cdp.class, FailureClass::CdpDisconnected);
         assert_eq!(cdp.scope, FailureScope::Session);
 
+        let empty_error = map_browser_provider_error(BrowserProviderError::Transport(
+            "browser stream completed without assistant output".into(),
+        ));
         let empty_stream = normalized_gateway_failure(
-            &GatewayError::BrowserTransport("provider returned empty stream".into()),
+            &empty_error,
             "deepseek-web",
             "account-a",
             "deepseek-chat",
@@ -1653,6 +1611,17 @@ mod stream_trace_tests {
         );
         assert_eq!(empty_stream.class, FailureClass::StreamEmpty);
         assert_eq!(empty_stream.scope, FailureScope::Conversation);
+
+        let raw_legacy = normalized_gateway_failure(
+            &GatewayError::BrowserTransport(
+                "upstream_waf_rejected: WebSocket protocol error: empty stream".into(),
+            ),
+            "legacy-browser",
+            "account-a",
+            "model-a",
+            "browser_runtime",
+        );
+        assert_eq!(raw_legacy.class, FailureClass::NetworkTransient);
     }
 
     #[test]
@@ -1673,15 +1642,20 @@ mod stream_trace_tests {
     }
 
     #[test]
-    fn stale_model_recipe_is_not_retryable_after_submit() {
-        assert!(!is_retryable_attempt_error(
-            &GatewayError::BrowserModelRecipeStale("stale".into())
-        ));
-        assert!(!is_retryable_attempt_error(
-            &GatewayError::BrowserTransport(
-                "Gemini native conversation is already bound to model 'pro'".into()
-            )
-        ));
+    fn stale_model_recipe_and_binding_conflict_are_not_retryable() {
+        let stale = map_browser_provider_error(BrowserProviderError::ModelRecipeStale {
+            account_id: "account-a".into(),
+            model: "gemini-pro".into(),
+        });
+        assert!(!is_retryable_attempt_error(&stale));
+
+        let conflict = map_browser_provider_error(BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "model_binding_conflict".into(),
+            message: "native conversation is already bound to model 'pro'".into(),
+        });
+        assert!(!is_retryable_attempt_error(&conflict));
+
         assert!(is_retryable_attempt_error(&GatewayError::BrowserTransport(
             "network".into()
         )));
@@ -1690,9 +1664,11 @@ mod stream_trace_tests {
     #[test]
     fn model_binding_conflict_does_not_mutate_route_health() {
         for provider in ["Gemini", "Qwen"] {
-            let conflict = GatewayError::BrowserTransport(format!(
-                "{provider} native conversation is already bound to model 'pro'"
-            ));
+            let conflict = map_browser_provider_error(BrowserProviderError::AdapterIncompatible {
+                account_id: "account-a".into(),
+                code: "model_binding_conflict".into(),
+                message: format!("{provider} native conversation is already bound to model 'pro'"),
+            });
             assert!(!is_retryable_attempt_error(&conflict));
             assert_eq!(route_failure_policy(&conflict), None);
         }
