@@ -831,6 +831,112 @@ async function testChatGPTReopenWaitsForStableHistory() {
   assert.equal(result.body.choices[0].message.content, "new answer");
 }
 
+async function testDeepSeekAndGeminiToolStreamsDoNotLeakProtocolEnvelope() {
+  const fixtures = [
+    {
+      path: "adapters/deepseek-web.js",
+      host: "chat.deepseek.com",
+      pathName: "/",
+      inputSelector: "#chat-input",
+      sendSelector: "button[type='submit']",
+      stopSelector: "button[aria-label*='Stop' i]",
+      responseSelector: "div.ds-markdown",
+      input: new FakeTextAreaElement()
+    },
+    {
+      path: "adapters/gemini-web.js",
+      host: "gemini.google.com",
+      pathName: "/app",
+      inputSelector: "div[aria-label='Enter a prompt for Gemini']",
+      sendSelector: "button[aria-label='Send message']",
+      stopSelector: "button[aria-label='Stop response']",
+      responseSelector: "div.markdown.markdown-main-panel",
+      input: new FakeElement()
+    }
+  ];
+  const envelope =
+    '[[LLMGATEWAY_TOOL_CALLS]]{"tool_calls":[{"name":"read_file","arguments":{"path":"' +
+    "src/".repeat(60) +
+    'Cargo.toml"}}]}[[/LLMGATEWAY_TOOL_CALLS]]';
+
+  for (const fixture of fixtures) {
+    const response = new FakeElement("");
+    const send = new FakeElement("Send");
+    const stop = new FakeElement("Stop");
+    const nodes = {
+      [fixture.inputSelector]: fixture.input,
+      [fixture.sendSelector]: send,
+      [fixture.stopSelector]: stop,
+      [fixture.responseSelector]: []
+    };
+    send.onClick = () => {
+      response.innerText = envelope;
+      response.textContent = response.innerText;
+      nodes[fixture.responseSelector] = [response];
+      setTimeout(() => {
+        delete nodes[fixture.stopSelector];
+      }, 360);
+    };
+
+    installPage({ host: fixture.host, path: fixture.pathName, nodes });
+    const adapter = loadAdapter(fixture.path);
+    const started = await adapter.streamStart({
+      model: fixture.path.includes("deepseek") ? "deepseek-web-test" : "gemini-web-test",
+      stream: true,
+      messages: [{ role: "user", content: "Read Cargo.toml" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "read_file",
+          description: "Read a repository file",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"]
+          }
+        }
+      }],
+      tool_choice: {
+        type: "function",
+        function: { name: "read_file" }
+      }
+    }, {
+      response_timeout_ms: 5000,
+      response_stable_ms: 60
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const pending = await adapter.streamPoll({ stream_id: started.stream_id });
+    assert.equal(pending.error, null, JSON.stringify(pending));
+    assert.equal(
+      pending.events.length,
+      0,
+      fixture.path + " must not stream tool protocol envelope as assistant text"
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 1250));
+    let final = await adapter.streamPoll({ stream_id: started.stream_id });
+    if (!final.done) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      final = await adapter.streamPoll({ stream_id: started.stream_id });
+    }
+    assert.equal(final.error, null, JSON.stringify(final));
+    assert.equal(final.done, true, JSON.stringify(final));
+    assert.equal(
+      final.events.some((event) => Boolean(event?.choices?.[0]?.delta?.content)),
+      false,
+      fixture.path + " must never leak the synthetic tool envelope into text deltas"
+    );
+    const toolEvent = final.events.find((event) =>
+      Array.isArray(event?.choices?.[0]?.delta?.tool_calls)
+    );
+    assert.ok(toolEvent, JSON.stringify(final));
+    assert.equal(toolEvent.choices[0].finish_reason, "tool_calls");
+    assert.equal(toolEvent.choices[0].delta.tool_calls[0].function.name, "read_file");
+  }
+}
+
+
 async function testQwenToolBridgeStream() {
   const input = new FakeTextAreaElement();
   const response = new FakeElement("");
@@ -1615,6 +1721,7 @@ await testChatGPTFreshStreamSkipsRedundantNewChatAndSubmitsBeforeReturn();
 await testChatGPTStreamRecoversAfterDocumentReplacement();
 await testChatGPTRecoverySurvivesVirtualizedHistoryAndSelectorOverrides();
 await testChatGPTReopenWaitsForStableHistory();
+await testDeepSeekAndGeminiToolStreamsDoNotLeakProtocolEnvelope();
 await testQwenToolBridgeStream();
 await testQwenIncrementalStream();
 await testBrowserTailRewriteTolerance();
