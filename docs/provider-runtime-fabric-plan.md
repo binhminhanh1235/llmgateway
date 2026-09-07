@@ -7,7 +7,7 @@ Working branch:
 `feat/provider-runtime-fabric`
 
 Status:
-`PLANNED`
+`P0 DONE / VERIFIED — initiative remains NOT ON MAIN`
 
 ## 1. Goal
 
@@ -521,6 +521,21 @@ Acceptance:
 - no Router string parsing added;
 - tests prove no silent fallback after committed partial output;
 - existing compatibility APIs remain behaviorally compatible.
+
+P0 verification — 2026-09-07:
+
+- verified code head: `c37da161da864f63b8a1107e573bde1e1e0a4fe1`;
+- full CI: run #1900 / `34071241430` — SUCCESS;
+- Linux job `101588869977` — SUCCESS, including `cargo fmt --all -- --check`, `RUSTFLAGS="-D warnings" cargo check --all-targets`, `cargo clippy --all-targets`, `cargo test --all-targets`, routing/browser/streaming/execution-trace smoke suites, and Docker build;
+- Windows job `101588869839` — SUCCESS, including PowerShell validation, `cargo check --all-targets`, `cargo test --all-targets`, and Chromium-driver Windows smoke;
+- browser/provider compatibility classification is owned by `BrowserProviderError` / browser-provider boundary, while common `execution.rs` remains provider-neutral;
+- Qwen `AdapterIncompatible(code=upstream_waf_rejected)` normalizes to `FailureClass::WafRejected`;
+- CDP disconnect, page-target loss, browser crash, empty stream, and dropped stream normalize to typed common failures at the browser-provider boundary;
+- production Gateway/Router/common execution paths do not parse provider-specific WAF/CDP/empty-stream/model-binding strings for retry/fallback decisions;
+- legacy outward semantics remain preserved through the typed `GatewayError::Classified { failure, source }` compatibility wrapper, including `model_binding_conflict` HTTP 409, browser session/transport/adapter/model errors, and `model_recipe_stale`;
+- regression coverage verifies safe pre-commit fallback, no silent fallback after client-visible commit, cancellation after commit, bounded execution budget, non-retry stale recipes, and non-retry/no-health-mutation model-binding conflicts.
+
+**P0 is DONE / VERIFIED on the working branch only. P1 has not started. The Provider Runtime Fabric initiative is still NOT ON MAIN and must not be described as shipped.**
 
 ### P1 — Runtime Health Graph & Breakers
 

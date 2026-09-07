@@ -154,10 +154,10 @@ This initiative refines the existing browser-first product direction into an **i
 - DeepSeek burst state, Gemini throttling/auth readiness and Qwen WAF/CDP recovery are explicit acceptance targets;
 - virtual models such as `llmgateway-best` and `llmgateway-coding` must remain available when an alternate eligible candidate exists.
 
-Planned phases:
+Phase progress:
 
-- P0 Execution Contract Foundation;
-- P1 Runtime Health Graph & Breakers;
+- P0 Execution Contract Foundation — **DONE / VERIFIED on `feat/provider-runtime-fabric` only** at `c37da161da864f63b8a1107e573bde1e1e0a4fe1`; CI #1900 / run `34071241430` PASS on Linux + Windows, including full Rust checks/tests, routing/browser/streaming/execution-trace smokes, and Docker;
+- P1 Runtime Health Graph & Breakers — not started;
 - P2 Account Runtime & Admission Control;
 - P3 DeepSeek Deterministic Stream State;
 - P4 Invisible Browser Runtime;
@@ -166,7 +166,7 @@ Planned phases:
 - P7 Logical Route / Transport Separation & Virtual-Model Continuity;
 - P8 Chaos, Resource & Live Acceptance.
 
-**Do not describe this initiative as shipped on `main` until final verification and explicit merge approval.**
+**P0 is verified on the working branch, but the initiative remains NOT ON MAIN. Do not describe Provider Runtime Fabric as shipped on `main` until explicit merge approval. P1 has not started.**
 
 ---
 
