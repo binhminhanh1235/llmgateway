@@ -1106,6 +1106,16 @@ impl ChromiumDriver {
         }
 
         if status.running && !status.debugger_reachable {
+            if !self.config_snapshot().auto_recover {
+                return ChromiumReconcileView {
+                    session_id: session_id.to_string(),
+                    action: "recovery_disabled".into(),
+                    session_status: session.status,
+                    running: true,
+                    ready: false,
+                    error: session.last_error,
+                };
+            }
             if matches!(
                 session.status.as_str(),
                 STATUS_READY | STATUS_DEGRADED | STATUS_FAILED

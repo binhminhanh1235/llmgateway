@@ -80,18 +80,20 @@ pub async fn verify_chromium_login(
     };
     match driver.verify(&session_id).await {
         Ok(mut verification) => {
-            if verification.authenticated && verification.auth_material_captured {
+            if verification.authenticated {
                 refresh_session_browser_models(&state, &session_id).await;
                 if let Some(runtime) = browser_runtime::get() {
                     if let Ok(status) = runtime.finish_interactive_login(&session_id).await {
                         verification.browser_closed_after_capture = true;
                         verification.status = status;
                     }
-                } else if let Some(status) =
-                    release_session_browser_if_direct_ready(&state, &session_id).await
-                {
-                    verification.browser_closed_after_capture = true;
-                    verification.status = status;
+                } else if verification.auth_material_captured {
+                    if let Some(status) =
+                        release_session_browser_if_direct_ready(&state, &session_id).await
+                    {
+                        verification.browser_closed_after_capture = true;
+                        verification.status = status;
+                    }
                 }
             }
             json_response(StatusCode::OK, json!(verification), None)

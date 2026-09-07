@@ -1,5 +1,5 @@
 use crate::chromium_driver::{ChromiumDriver, ChromiumDriverError};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     fs,
@@ -240,6 +240,7 @@ impl RuntimeState {
         entry.lru_tick = tick;
     }
 
+    #[cfg(test)]
     fn current(&self, session_id: &str, token: GenerationToken) -> bool {
         self.entries.get(session_id).is_some_and(|entry| {
             entry.running
@@ -345,16 +346,6 @@ impl RuntimeState {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct BrowserRuntimeGenerationView {
-    pub session_id: String,
-    pub browser_generation: u64,
-    pub page_generation: u64,
-    pub running: bool,
-    pub active_leases: usize,
-    pub mode: String,
-}
-
 pub struct BrowserRuntimeSupervisor {
     config: BrowserRuntimeConfig,
     driver: Arc<ChromiumDriver>,
@@ -378,39 +369,6 @@ impl BrowserRuntimeSupervisor {
 
     pub fn invalidate(&self, session_id: &str) {
         self.lock_state().invalidate(session_id, Instant::now());
-    }
-
-    pub fn generation(&self, session_id: &str) -> Option<BrowserRuntimeGenerationView> {
-        self.lock_state()
-            .entries
-            .get(session_id)
-            .map(|entry| BrowserRuntimeGenerationView {
-                session_id: session_id.to_string(),
-                browser_generation: entry.browser_generation,
-                page_generation: entry.page_generation,
-                running: entry.running,
-                active_leases: entry.active_leases,
-                mode: match entry.mode {
-                    BrowserRuntimeMode::Background => "background_headless",
-                    BrowserRuntimeMode::Interactive => "interactive_visible",
-                }
-                .into(),
-            })
-    }
-
-    pub fn accepts_generation(
-        &self,
-        session_id: &str,
-        browser_generation: u64,
-        page_generation: u64,
-    ) -> bool {
-        self.lock_state().current(
-            session_id,
-            GenerationToken {
-                browser: browser_generation,
-                page: page_generation,
-            },
-        )
     }
 
     pub fn acquire_lease(self: &Arc<Self>, session_id: &str) -> Option<BrowserRuntimeLease> {

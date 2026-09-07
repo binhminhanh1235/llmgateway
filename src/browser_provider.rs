@@ -1464,11 +1464,12 @@ impl BrowserProviderRegistry {
             if !cdp_session_status_probeable(&session.status) {
                 return false;
             }
-            if !self.cdp_session_live(&binding.session).await {
-                return false;
+            if self.cdp_session_live(&binding.session).await {
+                let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
+                return diagnostics.status == "ready";
             }
-            let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
-            return diagnostics.status == "ready";
+            return browser_runtime::get().is_some()
+                && cdp_session_background_recoverable(&session.status);
         }
 
         session.status == "ready"
@@ -1795,7 +1796,11 @@ impl BrowserProviderRegistry {
         let auth_snapshot_ready = (provider.kind == "browser-http"
             && self.auth_material_available(&binding.session))
             || direct_snapshot_ready;
-        if !session.enabled || (session.status != "ready" && !auth_snapshot_ready) {
+        let background_recoverable = browser_adapter.is_cdp()
+            && cdp_session_background_recoverable(&session.status);
+        if !session.enabled
+            || (session.status != "ready" && !auth_snapshot_ready && !background_recoverable)
+        {
             return Err(BrowserProviderError::SessionUnavailable {
                 account_id: account.id.clone(),
                 session_id: binding.session.clone(),
@@ -4098,6 +4103,10 @@ fn cdp_session_status_probeable(status: &str) -> bool {
     )
 }
 
+fn cdp_session_background_recoverable(status: &str) -> bool {
+    matches!(status, "ready" | "degraded")
+}
+
 fn read_debugger_port(profile_dir: &str) -> Result<u16, BrowserProviderError> {
     let path = Path::new(profile_dir).join("DevToolsActivePort");
     let raw = fs::read_to_string(&path).map_err(|error| {
@@ -4350,6 +4359,22 @@ mod tests {
         }
         for status in ["starting", "stopped", "failed"] {
             assert!(!cdp_session_status_probeable(status), "{status}");
+        }
+    }
+
+    #[test]
+    fn only_ready_or_degraded_sessions_can_auto_start_headless() {
+        for status in ["ready", "degraded"] {
+            assert!(cdp_session_background_recoverable(status), "{status}");
+        }
+        for status in [
+            "starting",
+            "stopped",
+            "failed",
+            "requires_attention",
+            "login_required",
+        ] {
+            assert!(!cdp_session_background_recoverable(status), "{status}");
         }
     }
 
