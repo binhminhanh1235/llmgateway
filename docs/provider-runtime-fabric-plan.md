@@ -713,67 +713,115 @@ Deterministic acceptance covers:
 - legacy UI streaming ephemeral cleanup under explicit `browser-only`;
 - complete P0-P4 regression chain, Linux + Windows and Docker.
 
-No provider anti-abuse control is bypassed by P5. P6 auth-generation/rate-limit hardening has not started.
+No provider anti-abuse control is bypassed by P5.
 
 ### P6 — Auth Generations & Gemini Hardening
 
-Deliver:
+**Status: DONE / VERIFIED on `feat/provider-runtime-fabric` only.**
 
-- auth generation model;
-- required-cookie/token readiness;
-- stale snapshot invalidation;
-- Gemini admission/throttling policy;
-- typed 503/rate-limit recovery.
+Verified code head:
+
+- commit `7a4592385141b3ad046f376995878813495c71a8`;
+- tree `e83f96fe4311849b78b036b1fea4a46719c5de56`;
+- CI #1954 / run `34104368716` — SUCCESS;
+- Linux job `101685910340` — SUCCESS;
+- Windows job `101685910051` — SUCCESS.
+
+Delivered and verified:
+
+- browser auth snapshots use explicit generations/fingerprints rather than mutable implicit cookie state;
+- only a verified re-authentication replaces the current valid auth generation; incomplete/failed re-auth cannot clobber a known-good generation;
+- required auth material is validated before normal direct execution where the provider contract permits it;
+- stale auth-bound state is invalidated by generation changes and late work cannot silently mutate a newer generation;
+- direct auth failure has bounded generation-aware recovery rather than an unbounded retry loop;
+- Gemini distinguishes auth-incomplete/expired conditions from provider overload/rate-limit responses;
+- Gemini 429/503 behavior feeds account-scoped admission/cooldown semantics instead of browser-session churn;
+- the conservative web-provider admission policy serializes unsafe shared-session concurrency and uses bounded queueing;
+- deterministic 40-request stress coverage proves overload is bounded by account admission instead of blindly bursting upstream.
 
 Acceptance:
 
-- missing auth is rejected before ordinary upstream execution where possible;
-- 40-request stress scenario is bounded by admission control instead of blindly bursting;
-- throttled account cools down while virtual model can select alternatives.
+- missing auth is rejected before ordinary upstream execution where practical — VERIFIED;
+- 40-request stress is bounded by admission control — VERIFIED;
+- throttling/cooldown remains provider-neutral to Router and permits alternate logical candidates — VERIFIED by P6/P7 regression coverage.
 
 ### P7 — Logical Route / Transport Separation & Virtual-Model Continuity
 
-Deliver:
+**Status: DONE / VERIFIED on `feat/provider-runtime-fabric` only.**
 
-- Router chooses logical provider/account/model candidate;
-- AccountRuntime chooses transport;
-- activation/resource cost;
-- canonical local conversation failover;
-- provider-native conversation reconstruction/migration.
+Verified code head:
+
+- commit `1f78c424501ae90c8fb817ee3b99ddc88359b16b`;
+- tree `c36ecd4102094692ff6214b0620c739e31338059`;
+- CI #2004 / run `34120630383` — SUCCESS;
+- Linux job `101737725328` — SUCCESS, including full Rust checks/tests, provider/browser/routing/execution smoke chain and Docker;
+- Windows job `101737725090` — SUCCESS, including `cargo check --all-targets`, `cargo test --all-targets` and Chromium-driver Windows smoke.
+
+Delivered and verified:
+
+- Router selects a logical provider/account/model candidate and stays provider-neutral;
+- `AccountRuntimeRegistry` owns the ordered physical transport plan for browser-backed accounts;
+- normal browserless-capable order is `direct_http -> browser_fetch -> browser_runtime`, while explicit `browser-only` keeps its compatibility boundary;
+- logical scoring includes structured activation cost/reason and distinguishes direct-ready, warm headless and cold browser activation;
+- route explain exposes activation cost/reason plus direct/warm readiness without leaking auth material;
+- transport health remains isolated, so a failed physical transport does not automatically poison the logical account/model;
+- canonical local conversation history remains the source of truth across provider/account switches;
+- provider-native affinity remains an optimization and the gateway reconstructs context from the persistent local thread when failover crosses providers;
+- deterministic failover verifies a Gemini-backed local thread can continue through the API fallback with prior local history preserved;
+- `llmgateway-best` continuity is verified with Gemini as the preferred eligible browser candidate and API fallback after Gemini is disabled;
+- `llmgateway-coding` continuity is verified with Qwen as the preferred coding-capable browser candidate and API fallback after Qwen is disabled;
+- when every logical candidate is unavailable, route planning terminates with no selected route rather than entering a transport-recovery loop.
 
 Acceptance:
 
-- `llmgateway-best` and `llmgateway-coding` continue when one preferred transport/provider fails and another eligible candidate exists;
-- transport failure alone does not incorrectly disable a logical model candidate;
-- persistent local thread can continue through an alternate provider/account using canonical local context.
+- `llmgateway-best` and `llmgateway-coding` survive preferred-provider failure when an alternate eligible candidate exists — VERIFIED;
+- transport failure alone does not incorrectly disable a logical model candidate — VERIFIED;
+- persistent local threads continue across alternate provider/account selection using canonical local context — VERIFIED.
 
 ### P8 — Chaos, Resource & Live Acceptance
 
-Deliver deterministic fault injection for:
+**Status: deterministic/resource implementation DONE / VERIFIED; authenticated live gate READY / PENDING.**
 
-- WAF rejection;
-- 503/429 burst;
-- missing cookies;
-- direct transport unavailable;
-- CDP channel reset;
-- page target close;
-- browser crash;
-- empty stream;
-- dropped stream;
-- partial committed stream;
-- client cancellation;
-- concurrent browser cold start;
-- all primary routes unavailable.
+Deterministic/resource code head is the P7 verified head:
 
-Measure:
+- commit `1f78c424501ae90c8fb817ee3b99ddc88359b16b`;
+- tree `c36ecd4102094692ff6214b0620c739e31338059`;
+- CI #2004 / run `34120630383` — SUCCESS on Linux + Windows.
 
-- browser process count;
-- idle RAM reclamation;
-- startup count;
-- queue depth;
-- fallback latency;
-- duplicate-output rate;
-- request success rate.
+Deterministic coverage includes:
+
+- Qwen WAF/direct-transport rejection and adapter-owned typed classification;
+- Gemini 429/503 burst handling and missing/incomplete auth;
+- direct transport unavailable with bounded browser-fetch/headless escalation;
+- CDP channel reset, page-target loss and browser restart/reacquire recovery;
+- DeepSeek empty/dropped stream recovery with conversation epochs and dirty-state quarantine;
+- partial committed streams blocking unsafe silent fallback;
+- client cancellation and terminal lease/admission cleanup;
+- concurrent cold browser startup with single-flight lifecycle;
+- idle/TTL/LRU browser reclaim and active-lease protection;
+- all primary logical candidates unavailable;
+- canonical provider/account failover and built-in virtual-model continuity.
+
+Resource/diagnostic instrumentation now exposes provider-neutral:
+
+- running browser process count;
+- active browser lease count;
+- background launch count;
+- automatic reclaim count;
+- account in-flight count;
+- queue depth/max queue depth;
+- effective concurrency limit;
+- runtime/auth generations;
+- transport activation cost/reason.
+
+Acceptance runners:
+
+- `scripts/smoke-provider-runtime-fabric.sh` composes deterministic fault/resource suites into one local gate;
+- `scripts/live-deepseek-provider-runtime.sh` provides conservative authenticated DeepSeek acceptance;
+- `scripts/live-provider-runtime-fabric.sh` composes authenticated Gemini, Qwen and DeepSeek acceptance and verifies no leaked browser processes, browser leases, account in-flight work or queued work at completion;
+- all new live runners are syntax-validated in CI and intentionally do not bypass CAPTCHA, WAF, provider throttling or other anti-abuse controls.
+
+The final authenticated live run requires real local provider sessions and therefore is **not claimed as executed by CI**. Until that gate passes with real Gemini/Qwen/DeepSeek accounts, P8 is not final-live VERIFIED and the overall initiative must not be described as fully DONE / VERIFIED or shipped.
 
 Live acceptance must use authenticated provider sessions only where required and must never treat provider anti-abuse controls as something to bypass.
 
