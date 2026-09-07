@@ -1310,7 +1310,9 @@ fn map_browser_provider_error(error: BrowserProviderError) -> GatewayError {
         BrowserProviderError::ModelRecipeStale { .. } => {
             GatewayError::BrowserModelRecipeStale(legacy_text.clone())
         }
-        BrowserProviderError::Transport(_) | BrowserProviderError::TransportUnavailable { .. } => {
+        BrowserProviderError::Transport(_)
+        | BrowserProviderError::TransportUnavailable { .. }
+        | BrowserProviderError::AuthGenerationStale { .. } => {
             GatewayError::BrowserTransport(legacy_text)
         }
         BrowserProviderError::Classified { .. } => {

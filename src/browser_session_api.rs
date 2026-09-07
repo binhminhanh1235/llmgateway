@@ -1,6 +1,6 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
-    browser_provider_runtime,
+    browser_auth_runtime, browser_provider_runtime,
     browser_session::{BrowserSessionError, BrowserSessionStore},
     browser_session_runtime,
 };
@@ -63,6 +63,13 @@ pub async fn begin_browser_login(
     let Some(store) = store() else {
         return unavailable();
     };
+    if let Some(Err(error)) = browser_auth_runtime::invalidate(&session_id) {
+        return json_error(
+            StatusCode::CONFLICT,
+            "browser_auth_generation_error",
+            &error.to_string(),
+        );
+    }
     invalidate_session_lifecycle(&session_id);
     match store.begin_login(&session_id).await {
         Ok(login) => json_response(StatusCode::OK, json!(login), None),
@@ -156,6 +163,13 @@ pub async fn reset_browser_session(
     let Some(store) = store() else {
         return unavailable();
     };
+    if let Some(Err(error)) = browser_auth_runtime::invalidate(&session_id) {
+        return json_error(
+            StatusCode::CONFLICT,
+            "browser_auth_generation_error",
+            &error.to_string(),
+        );
+    }
     invalidate_session_lifecycle(&session_id);
     match store.reset(&session_id).await {
         Ok(session) => json_response(

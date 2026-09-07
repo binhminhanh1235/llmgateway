@@ -1,6 +1,6 @@
 use crate::{
     api::{authorize, json_error, json_response, AppState},
-    browser_provider_runtime, browser_runtime,
+    browser_auth_runtime, browser_provider_runtime, browser_runtime,
     chromium_driver::{ChromiumDriver, ChromiumDriverError},
     chromium_driver_runtime,
 };
@@ -24,6 +24,13 @@ pub async fn launch_chromium_login(
     let Some(driver) = driver() else {
         return unavailable();
     };
+    if let Some(Err(error)) = browser_auth_runtime::invalidate(&session_id) {
+        return json_error(
+            StatusCode::CONFLICT,
+            "browser_auth_generation_error",
+            &error.to_string(),
+        );
+    }
     invalidate_session_lifecycle(&session_id);
     if let Some(runtime) = browser_runtime::get() {
         if let Err(error) = runtime.prepare_interactive(&session_id).await {

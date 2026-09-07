@@ -785,6 +785,15 @@
   const geminiApplyFetchFrame = (state, part) => {
     const update = geminiParseFetchUpdate(part);
     if (update.errorCode && update.errorCode !== 0) {
+      if (update.errorCode === 1037) {
+        throw new Error("RATE_LIMITED: Gemini web usage limit exceeded (error code 1037)");
+      }
+      if (update.errorCode === 1052) {
+        throw new Error("MODEL_RECIPE_STALE: Gemini StreamGenerate rejected the selected model recipe (error code 1052)");
+      }
+      if (update.errorCode === 1155) {
+        throw new Error("UPSTREAM_OVERLOADED: Gemini StreamGenerate returned transient rejection (error code 1155)");
+      }
       throw new Error("BROWSER_FETCH_REJECTED: Gemini StreamGenerate returned error code " + update.errorCode);
     }
     if (update.text) state.latest = update.text;
@@ -841,6 +850,12 @@
     if (bootstrap.status === 401 || bootstrap.status === 403) {
       throw new Error("LOGIN_REQUIRED: Gemini browser session bootstrap was rejected");
     }
+    if (bootstrap.status === 429) {
+      throw new Error("RATE_LIMITED: Gemini browser bootstrap returned HTTP 429");
+    }
+    if (bootstrap.status === 503) {
+      throw new Error("UPSTREAM_OVERLOADED: Gemini browser bootstrap returned HTTP 503");
+    }
     if (!bootstrap.ok) {
       throw new Error("BROWSER_FETCH_REJECTED: Gemini browser bootstrap returned HTTP " + bootstrap.status);
     }
@@ -876,6 +891,12 @@
     if (response.status === 401 || response.status === 403) {
       throw new Error("LOGIN_REQUIRED: Gemini StreamGenerate rejected browser session");
     }
+    if (response.status === 429) {
+      throw new Error("RATE_LIMITED: Gemini StreamGenerate returned HTTP 429");
+    }
+    if (response.status === 503) {
+      throw new Error("UPSTREAM_OVERLOADED: Gemini StreamGenerate returned HTTP 503");
+    }
     if (!response.ok) {
       throw new Error("BROWSER_FETCH_REJECTED: Gemini StreamGenerate returned HTTP " + response.status);
     }
@@ -906,10 +927,14 @@
     state.ready = new Promise((resolve) => { state.resolveReady = resolve; });
     geminiFetchJobs.set(streamId, state);
     state.worker = geminiPumpFetch(state, response).catch((error) => {
-      state.error = {
-        code: /^STREAM_CANCELLED:/i.test(String(error?.message || error)) ? "cancelled" : "browser_fetch_rejected",
-        message: String(error?.message || error)
-      };
+      const message = String(error?.message || error);
+      let code = "browser_fetch_rejected";
+      if (/^STREAM_CANCELLED:/i.test(message)) code = "cancelled";
+      else if (/^LOGIN_REQUIRED:/i.test(message)) code = "login_required";
+      else if (/^RATE_LIMITED:/i.test(message)) code = "rate_limited";
+      else if (/^UPSTREAM_OVERLOADED:/i.test(message)) code = "upstream_overloaded";
+      else if (/^MODEL_RECIPE_STALE:/i.test(message)) code = "model_recipe_stale";
+      state.error = { code, message };
       state.done = true;
       state.progressSeq += 1;
       state.progressPhase = state.error.code === "cancelled" ? "cancelled" : "failed";

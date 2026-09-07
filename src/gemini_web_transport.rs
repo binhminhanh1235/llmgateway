@@ -7,6 +7,7 @@ use crate::{
         BrowserlessCapabilities, BROWSER_ADAPTER_CONTRACT_VERSION,
     },
     browser_provider_runtime, conversation_runtime,
+    execution::{ExecutionFailure, ExecutionPhase, FailureClass, FailureScope, ReplaySafety},
 };
 use async_trait::async_trait;
 use axum::http::Response as HttpResponse;
@@ -67,6 +68,7 @@ struct GeminiModelRecipe {
 #[derive(Clone, Debug)]
 struct GeminiModelCatalogSnapshot {
     discovered_at: Instant,
+    auth_generation: u64,
     #[allow(dead_code)]
     wire_session_id: String,
     models: Vec<GeminiModelRecipe>,
@@ -111,6 +113,123 @@ struct StableTextEmitter {
     latest: String,
 }
 
+fn gemini_classified_error(
+    source: BrowserProviderError,
+    class: FailureClass,
+    retryable: bool,
+    phase: ExecutionPhase,
+    scope: FailureScope,
+    diagnostic: impl Into<String>,
+    cooldown_secs: i64,
+    human_action_required: bool,
+) -> BrowserProviderError {
+    let mut failure = ExecutionFailure::new(
+        class,
+        retryable,
+        if phase == ExecutionPhase::PreSubmit {
+            ReplaySafety::Safe
+        } else {
+            ReplaySafety::ProbablySafe
+        },
+        phase,
+        scope,
+        diagnostic,
+    )
+    .with_cooldown(cooldown_secs);
+    if human_action_required {
+        failure = failure.requiring_human_action();
+    }
+    BrowserProviderError::Classified {
+        failure: Box::new(failure),
+        source: Box::new(source),
+    }
+}
+
+fn gemini_auth_error(
+    account_id: &str,
+    message: impl Into<String>,
+    class: FailureClass,
+    phase: ExecutionPhase,
+) -> BrowserProviderError {
+    let message = message.into();
+    gemini_classified_error(
+        BrowserProviderError::AdapterIncompatible {
+            account_id: account_id.to_string(),
+            code: if class == FailureClass::AuthIncomplete {
+                "auth_incomplete".into()
+            } else {
+                "login_required".into()
+            },
+            message,
+        },
+        class,
+        true,
+        phase,
+        FailureScope::Request,
+        "Gemini browser authentication must be refreshed before execution can continue",
+        0,
+        true,
+    )
+}
+
+fn gemini_rate_limited(message: impl Into<String>, phase: ExecutionPhase) -> BrowserProviderError {
+    gemini_classified_error(
+        BrowserProviderError::Transport(message.into()),
+        FailureClass::RateLimited,
+        true,
+        phase,
+        FailureScope::Account,
+        "Gemini web account is rate limited",
+        60,
+        false,
+    )
+}
+
+fn gemini_upstream_overloaded(
+    message: impl Into<String>,
+    phase: ExecutionPhase,
+) -> BrowserProviderError {
+    gemini_classified_error(
+        BrowserProviderError::Transport(message.into()),
+        FailureClass::UpstreamOverloaded,
+        true,
+        phase,
+        FailureScope::Transport,
+        "Gemini web upstream transiently rejected the request",
+        5,
+        false,
+    )
+}
+
+fn gemini_upstream_5xx(message: impl Into<String>, phase: ExecutionPhase) -> BrowserProviderError {
+    gemini_classified_error(
+        BrowserProviderError::Transport(message.into()),
+        FailureClass::Upstream5xx,
+        true,
+        phase,
+        FailureScope::Transport,
+        "Gemini web upstream returned a server error",
+        5,
+        false,
+    )
+}
+
+fn gemini_http_status_error(
+    status: u16,
+    account_id: &str,
+    operation: &str,
+    phase: ExecutionPhase,
+) -> BrowserProviderError {
+    let message = format!("Gemini {operation} returned HTTP {status}");
+    match status {
+        401 | 403 => gemini_auth_error(account_id, message, FailureClass::AuthExpired, phase),
+        429 => gemini_rate_limited(message, phase),
+        503 => gemini_upstream_overloaded(message, phase),
+        500..=599 => gemini_upstream_5xx(message, phase),
+        _ => BrowserProviderError::Transport(message),
+    }
+}
+
 impl GeminiWebHttpAdapter {
     pub fn new() -> Result<Self, BrowserProviderError> {
         let client = Client::builder()
@@ -135,26 +254,47 @@ impl GeminiWebHttpAdapter {
         &self,
         session_id: &str,
         account_id: &str,
+        expected_generation: Option<u64>,
     ) -> Result<BrowserAuthMaterial, BrowserProviderError> {
-        let material = Self::vault()?
-            .load(session_id)
-            .map_err(|error| BrowserProviderError::AdapterIncompatible {
-                account_id: account_id.to_string(),
-                code: "login_required".into(),
-                message: format!(
+        let vault = Self::vault()?;
+        let current_generation = vault.current_generation(session_id).map_err(|error| {
+            gemini_auth_error(
+                account_id,
+                format!("Gemini auth generation is unavailable: {error}"),
+                FailureClass::AuthIncomplete,
+                ExecutionPhase::PreSubmit,
+            )
+        })?;
+        if let Some(expected) = expected_generation {
+            if current_generation != expected {
+                return Err(BrowserProviderError::AuthGenerationStale {
+                    session_id: session_id.to_string(),
+                    observed: expected,
+                    current: current_generation,
+                    phase: ExecutionPhase::PreSubmit,
+                });
+            }
+        }
+        let material = vault.load(session_id).map_err(|error| {
+            gemini_auth_error(
+                account_id,
+                format!(
                     "Gemini browserless auth material is unavailable; login with browser again: {error}"
                 ),
-            })?;
+                FailureClass::AuthIncomplete,
+                ExecutionPhase::PreSubmit,
+            )
+        })?;
         if material
             .cookie_value_for_host(GEMINI_HOST, "__Secure-1PSID")
             .is_none()
         {
-            return Err(BrowserProviderError::AdapterIncompatible {
-                account_id: account_id.to_string(),
-                code: "login_required".into(),
-                message: "Gemini auth snapshot is missing __Secure-1PSID; login with browser again"
-                    .into(),
-            });
+            return Err(gemini_auth_error(
+                account_id,
+                "Gemini auth snapshot is missing __Secure-1PSID; login with browser again",
+                FailureClass::AuthIncomplete,
+                ExecutionPhase::PreSubmit,
+            ));
         }
         Ok(material)
     }
@@ -167,11 +307,12 @@ impl GeminiWebHttpAdapter {
     ) -> Result<GeminiInitSession, BrowserProviderError> {
         let cookie_header = material.cookie_header_for_host(GEMINI_HOST);
         if cookie_header.is_empty() {
-            return Err(BrowserProviderError::AdapterIncompatible {
-                account_id: account_id.to_string(),
-                code: "login_required".into(),
-                message: "Gemini auth snapshot has no cookies valid for gemini.google.com".into(),
-            });
+            return Err(gemini_auth_error(
+                account_id,
+                "Gemini auth snapshot has no cookies valid for gemini.google.com",
+                FailureClass::AuthIncomplete,
+                ExecutionPhase::PreSubmit,
+            ));
         }
 
         let mut request = self
@@ -190,22 +331,13 @@ impl GeminiWebHttpAdapter {
             .await
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
         let status = response.status();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Err(BrowserProviderError::AdapterIncompatible {
-                account_id: account_id.to_string(),
-                code: "login_required".into(),
-                message: format!("Gemini session bootstrap rejected saved auth with HTTP {status}"),
-            });
-        }
-        if status.as_u16() == 429 {
-            return Err(BrowserProviderError::Transport(
-                "Gemini session bootstrap was rate limited (HTTP 429)".into(),
-            ));
-        }
         if !status.is_success() {
-            return Err(BrowserProviderError::Transport(format!(
-                "Gemini session bootstrap returned HTTP {status}"
-            )));
+            return Err(gemini_http_status_error(
+                status.as_u16(),
+                account_id,
+                "session bootstrap",
+                ExecutionPhase::PreSubmit,
+            ));
         }
 
         let html = response
@@ -213,12 +345,12 @@ impl GeminiWebHttpAdapter {
             .await
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
         let access_token = extract_embedded_json_string(&html, "SNlM0e").ok_or_else(|| {
-            BrowserProviderError::AdapterIncompatible {
-                account_id: account_id.to_string(),
-                code: "login_required".into(),
-                message: "Gemini bootstrap returned no SNlM0e token; saved login is expired or the web protocol changed"
-                    .into(),
-            }
+            gemini_auth_error(
+                account_id,
+                "Gemini bootstrap returned no SNlM0e token; saved login is expired or the web protocol changed",
+                FailureClass::AuthExpired,
+                ExecutionPhase::PreSubmit,
+            )
         })?;
 
         Ok(GeminiInitSession {
@@ -238,23 +370,51 @@ impl GeminiWebHttpAdapter {
         binding: &BrowserAccountBinding,
         account_id: &str,
         force: bool,
+        expected_generation: Option<u64>,
     ) -> Result<GeminiModelCatalogSnapshot, BrowserProviderError> {
-        if !force {
+        let current_generation = Self::vault()?
+            .current_generation(&binding.session)
+            .map_err(|error| {
+                gemini_auth_error(
+                    account_id,
+                    format!("Gemini model catalog auth generation is unavailable: {error}"),
+                    FailureClass::AuthIncomplete,
+                    ExecutionPhase::PreSubmit,
+                )
+            })?;
+        if let Some(expected) = expected_generation {
+            if current_generation != expected {
+                return Err(BrowserProviderError::AuthGenerationStale {
+                    session_id: binding.session.clone(),
+                    observed: expected,
+                    current: current_generation,
+                    phase: ExecutionPhase::PreSubmit,
+                });
+            }
+        }
+        if !force && Self::vault()?.contains(&binding.session) {
             if let Some(cached) = self.model_catalogs.read().await.get(account_id).cloned() {
-                if cached.discovered_at.elapsed() <= MODEL_CATALOG_TTL {
+                if cached.discovered_at.elapsed() <= MODEL_CATALOG_TTL
+                    && cached.auth_generation == current_generation
+                {
                     return Ok(cached);
                 }
             }
         }
 
-        let material = self.auth_material(&binding.session, account_id)?;
+        let material = self.auth_material(&binding.session, account_id, expected_generation)?;
         let timeout_duration =
             Duration::from_millis(binding.probe_timeout_ms.unwrap_or(8_000).max(3_000));
         let session = self
             .init_session(&material, account_id, timeout_duration)
             .await?;
         let snapshot = self
-            .fetch_model_catalog(&session, account_id, timeout_duration)
+            .fetch_model_catalog(
+                &session,
+                account_id,
+                timeout_duration,
+                material.generation,
+            )
             .await?;
         self.model_catalogs
             .write()
@@ -271,6 +431,7 @@ impl GeminiWebHttpAdapter {
         session: &GeminiInitSession,
         account_id: &str,
         timeout_duration: Duration,
+        auth_generation: u64,
     ) -> Result<GeminiModelCatalogSnapshot, BrowserProviderError> {
         let wire_session_id = Uuid::new_v4().to_string().to_uppercase();
         let batch_header = serde_json::to_string(&json!([
@@ -340,17 +501,13 @@ impl GeminiWebHttpAdapter {
             .await
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
         let status = response.status();
-        if matches!(status.as_u16(), 401 | 403) {
-            return Err(BrowserProviderError::AdapterIncompatible {
-                account_id: account_id.to_string(),
-                code: "login_required".into(),
-                message: format!("Gemini model discovery rejected saved auth with HTTP {status}"),
-            });
-        }
         if !status.is_success() {
-            return Err(BrowserProviderError::Transport(format!(
-                "Gemini model discovery returned HTTP {status}"
-            )));
+            return Err(gemini_http_status_error(
+                status.as_u16(),
+                account_id,
+                "model discovery",
+                ExecutionPhase::PreSubmit,
+            ));
         }
         let raw = response
             .bytes()
@@ -367,6 +524,7 @@ impl GeminiWebHttpAdapter {
 
         Ok(GeminiModelCatalogSnapshot {
             discovered_at: Instant::now(),
+            auth_generation,
             wire_session_id,
             models,
         })
@@ -380,7 +538,12 @@ impl GeminiWebHttpAdapter {
             return Ok(None);
         }
         let snapshot = self
-            .model_catalog(&request.binding, &request.account.id, false)
+            .model_catalog(
+                &request.binding,
+                &request.account.id,
+                false,
+                Some(request.auth_generation),
+            )
             .await?;
         let recipe = find_model_recipe(&snapshot, &request.route.model).ok_or_else(|| {
             BrowserProviderError::ModelUnavailable {
@@ -478,22 +641,13 @@ impl GeminiWebHttpAdapter {
             .await
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
         let status = response.status();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Err(BrowserProviderError::AdapterIncompatible {
-                account_id: request.account.id.clone(),
-                code: "login_required".into(),
-                message: format!("Gemini StreamGenerate rejected saved auth with HTTP {status}"),
-            });
-        }
-        if status.as_u16() == 429 {
-            return Err(BrowserProviderError::Transport(
-                "Gemini web usage endpoint was rate limited (HTTP 429)".into(),
-            ));
-        }
         if !status.is_success() {
-            return Err(BrowserProviderError::Transport(format!(
-                "Gemini StreamGenerate returned HTTP {status}"
-            )));
+            return Err(gemini_http_status_error(
+                status.as_u16(),
+                &request.account.id,
+                "StreamGenerate",
+                ExecutionPhase::Submitted,
+            ));
         }
         Ok(response)
     }
@@ -971,7 +1125,7 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
         binding: &BrowserAccountBinding,
         force: bool,
     ) -> Result<Vec<BrowserDiscoveredModel>, BrowserProviderError> {
-        let snapshot = self.model_catalog(binding, account_id, force).await?;
+        let snapshot = self.model_catalog(binding, account_id, force, None).await?;
         Ok(snapshot
             .models
             .iter()
@@ -992,7 +1146,7 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
         binding: &BrowserAccountBinding,
     ) -> BrowserAdapterDiagnostics {
         let result = async {
-            let material = self.auth_material(&binding.session, account_id)?;
+            let material = self.auth_material(&binding.session, account_id, None)?;
             self.init_session(
                 &material,
                 account_id,
@@ -1017,6 +1171,23 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
                 target_url_prefix: Some(GEMINI_INIT_URL.into()),
                 configured_models: binding.models.clone(),
             },
+            Err(error)
+                if matches!(
+                    error.execution_failure().class,
+                    FailureClass::AuthExpired | FailureClass::AuthIncomplete
+                ) => BrowserAdapterDiagnostics {
+                    account_id: account_id.to_string(),
+                    provider_kind: "browser-gemini".into(),
+                    adapter_id: Some(self.adapter_id().into()),
+                    adapter_version: Some(GEMINI_ADAPTER_VERSION.into()),
+                    contract_version: Some(BROWSER_ADAPTER_CONTRACT_VERSION),
+                    expected_contract_version: BROWSER_ADAPTER_CONTRACT_VERSION,
+                    status: "login_required".into(),
+                    message: error.to_string(),
+                    page_signature: None,
+                    target_url_prefix: Some(GEMINI_INIT_URL.into()),
+                    configured_models: binding.models.clone(),
+                },
             Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
                 BrowserAdapterDiagnostics {
                     account_id: account_id.to_string(),
@@ -1056,7 +1227,11 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
         &self,
         request: BrowserAdapterRequest,
     ) -> Result<reqwest::Response, BrowserProviderError> {
-        let material = self.auth_material(&request.session_id, &request.account.id)?;
+        let material = self.auth_material(
+            &request.session_id,
+            &request.account.id,
+            Some(request.auth_generation),
+        )?;
         let mut session = self
             .init_session(
                 &material,
@@ -1077,6 +1252,28 @@ impl BrowserProviderAdapter for GeminiWebHttpAdapter {
 
         let mut attempts = 0;
         loop {
+            let current_generation = Self::vault()?
+                .current_generation(&request.session_id)
+                .map_err(|error| {
+                    gemini_auth_error(
+                        &request.account.id,
+                        format!("Gemini auth generation could not be verified: {error}"),
+                        FailureClass::AuthIncomplete,
+                        ExecutionPhase::PreSubmit,
+                    )
+                })?;
+            if current_generation != material.generation {
+                return Err(BrowserProviderError::AuthGenerationStale {
+                    session_id: request.session_id.clone(),
+                    observed: material.generation,
+                    current: current_generation,
+                    phase: if attempts == 0 {
+                        ExecutionPhase::PreSubmit
+                    } else {
+                        ExecutionPhase::Submitted
+                    },
+                });
+            }
             let selection = self.resolve_model_selection(&request).await?;
             let response = self
                 .submit_generation(
@@ -1218,15 +1415,17 @@ fn find_model_recipe(
 
 fn generation_error(error_code: i64, account_id: &str, model: &str) -> BrowserProviderError {
     match error_code {
-        USAGE_LIMIT_EXCEEDED => {
-            BrowserProviderError::Transport("Gemini web usage limit exceeded".into())
-        }
+        USAGE_LIMIT_EXCEEDED => gemini_rate_limited(
+            "Gemini web usage limit exceeded (error code 1037)",
+            ExecutionPhase::Submitted,
+        ),
         MODEL_HEADER_INVALID => BrowserProviderError::ModelRecipeStale {
             account_id: account_id.to_string(),
             model: model.to_string(),
         },
-        UPSTREAM_TRANSIENT_REJECTION => BrowserProviderError::Transport(
-            "Gemini StreamGenerate returned transient rejection (error code 1155)".into(),
+        UPSTREAM_TRANSIENT_REJECTION => gemini_upstream_overloaded(
+            "Gemini StreamGenerate returned transient rejection (error code 1155)",
+            ExecutionPhase::Submitted,
         ),
         _ => BrowserProviderError::Transport(format!(
             "Gemini StreamGenerate returned error code {error_code}"
@@ -1235,16 +1434,10 @@ fn generation_error(error_code: i64, account_id: &str, model: &str) -> BrowserPr
 }
 
 fn is_gemini_transient_error(error: &BrowserProviderError) -> bool {
-    match error {
-        BrowserProviderError::Transport(msg) => {
-            msg.contains("1155")
-                || msg.contains("transient rejection")
-                || msg.contains("HTTP 502")
-                || msg.contains("HTTP 503")
-                || msg.contains("HTTP 504")
-        }
-        _ => false,
-    }
+    matches!(
+        error.execution_failure().class,
+        FailureClass::UpstreamOverloaded | FailureClass::Upstream5xx | FailureClass::NetworkTransient
+    )
 }
 
 fn model_header_value(
@@ -2004,6 +2197,7 @@ mod tests {
     fn unknown_model_is_rejected_by_recipe_resolver() {
         let snapshot = GeminiModelCatalogSnapshot {
             discovered_at: Instant::now(),
+            auth_generation: 1,
             wire_session_id: "SESSION".into(),
             models: vec![GeminiModelRecipe {
                 external_id: "gemini-web-pro".into(),
@@ -2047,6 +2241,7 @@ mod tests {
         let adapter = GeminiWebHttpAdapter::new().unwrap();
         let snapshot = GeminiModelCatalogSnapshot {
             discovered_at: Instant::now(),
+            auth_generation: 1,
             wire_session_id: "SESSION".into(),
             models: vec![],
         };
@@ -2126,4 +2321,46 @@ mod tests {
         assert_eq!(update.text, "hello");
         assert!(update.completed);
     }
+    #[test]
+    fn gemini_auth_expiry_rate_limit_and_overload_are_distinct_typed_failures() {
+        let auth = gemini_http_status_error(
+            401,
+            "account-a",
+            "StreamGenerate",
+            ExecutionPhase::Submitted,
+        );
+        let rate = gemini_http_status_error(
+            429,
+            "account-a",
+            "StreamGenerate",
+            ExecutionPhase::Submitted,
+        );
+        let overloaded = gemini_http_status_error(
+            503,
+            "account-a",
+            "StreamGenerate",
+            ExecutionPhase::Submitted,
+        );
+        assert_eq!(auth.execution_failure().class, FailureClass::AuthExpired);
+        assert!(auth.execution_failure().human_action_required);
+        assert_eq!(rate.execution_failure().class, FailureClass::RateLimited);
+        assert_eq!(rate.execution_failure().scope, FailureScope::Account);
+        assert!(!rate.execution_failure().human_action_required);
+        assert_eq!(
+            overloaded.execution_failure().class,
+            FailureClass::UpstreamOverloaded
+        );
+        assert!(is_gemini_transient_error(&overloaded));
+        assert!(!is_gemini_transient_error(&rate));
+    }
+
+    #[test]
+    fn usage_limit_code_is_rate_limit_not_auth_failure() {
+        let error = generation_error(USAGE_LIMIT_EXCEEDED, "account-a", "gemini-web-pro");
+        let failure = error.execution_failure();
+        assert_eq!(failure.class, FailureClass::RateLimited);
+        assert_eq!(failure.scope, FailureScope::Account);
+        assert!(!failure.human_action_required);
+    }
+
 }

@@ -180,6 +180,7 @@ pub struct ChromiumVerifyView {
     pub authenticated: bool,
     pub session_id: String,
     pub ready_match: Option<String>,
+    pub auth_generation: Option<u64>,
     pub auth_material_captured: bool,
     pub auth_material_error: Option<String>,
     pub browser_closed_after_capture: bool,
@@ -558,7 +559,12 @@ impl ChromiumDriver {
         let authenticated = status.ready_match.is_some();
         let session = self.sessions.session(session_id).await?;
         let mut auth_material_captured = false;
-        let mut auth_material_error = None;
+        let observed_auth_generation = self.auth_vault.current_generation(session_id);
+        let mut auth_generation = observed_auth_generation.as_ref().ok().copied();
+        let mut auth_material_error = observed_auth_generation
+            .as_ref()
+            .err()
+            .map(ToString::to_string);
 
         if authenticated {
             if session.status == STATUS_READY {
@@ -573,8 +579,17 @@ impl ChromiumDriver {
             )
             .await
             {
-                Ok(Ok(material)) => match self.auth_vault.store(&material) {
-                    Ok(()) => auth_material_captured = true,
+                Ok(Ok(material)) => match observed_auth_generation.as_ref() {
+                    Ok(observed) => match self.auth_vault.store_if_current(&material, *observed) {
+                        Ok(stored) => {
+                            auth_material_captured = true;
+                            auth_generation = Some(stored.generation);
+                        }
+                        Err(error) => {
+                            auth_generation = self.auth_vault.current_generation(session_id).ok();
+                            auth_material_error = Some(error.to_string());
+                        }
+                    },
                     Err(error) => auth_material_error = Some(error.to_string()),
                 },
                 Ok(Err(error)) => auth_material_error = Some(error.to_string()),
@@ -610,6 +625,7 @@ impl ChromiumDriver {
             authenticated,
             session_id: session_id.to_string(),
             ready_match: status.ready_match.clone(),
+            auth_generation,
             auth_material_captured,
             auth_material_error,
             browser_closed_after_capture: false,

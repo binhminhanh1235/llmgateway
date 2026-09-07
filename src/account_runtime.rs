@@ -910,6 +910,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forty_request_browserless_stress_is_bounded_by_admission() {
+        let registry = Arc::new(AccountRuntimeRegistry::default());
+        let policy = ProviderRuntimePolicy::browserless_preferred();
+        let first = registry
+            .acquire(
+                "gemini",
+                "account-a",
+                policy,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(39));
+        let mut tasks = Vec::new();
+        for _ in 0..39 {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                registry
+                    .acquire(
+                        "gemini",
+                        "account-a",
+                        policy,
+                        Duration::from_secs(1),
+                        Duration::from_secs(1),
+                    )
+                    .await
+            }));
+        }
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = registry.snapshot("gemini", "account-a").unwrap();
+                if snapshot.queue_depth == policy.max_queue_depth
+                    && snapshot.rejection_count >= 7
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let snapshot = registry.snapshot("gemini", "account-a").unwrap();
+        assert_eq!(snapshot.in_flight, 1);
+        assert_eq!(snapshot.concurrency_limit, 1);
+        assert_eq!(snapshot.queue_depth, policy.max_queue_depth);
+        assert!(snapshot.rejection_count >= 7);
+
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if registry
+                    .snapshot("gemini", "account-a")
+                    .is_some_and(|snapshot| snapshot.queue_depth == 0)
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(first);
+    }
+
+    #[tokio::test]
     async fn overload_reduces_concurrency_and_recovery_is_hysteretic() {
         let registry = AccountRuntimeRegistry::default();
         let p = policy(4, 4, 4);

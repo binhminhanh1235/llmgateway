@@ -153,6 +153,7 @@ pub struct BrowserAccountTransportState {
     pub effective_recorded_at: Option<String>,
     pub effective_reason: String,
     pub auth_state: String,
+    pub auth_generation: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -272,6 +273,7 @@ pub struct BrowserAdapterRequest {
     pub profile_dir: String,
     pub binding: BrowserAccountBinding,
     pub thread_id: Option<String>,
+    pub auth_generation: u64,
 }
 
 #[derive(Debug, Error)]
@@ -307,6 +309,13 @@ pub enum BrowserProviderError {
     TransportUnavailable {
         account_id: String,
         transport: String,
+    },
+    #[error("browser auth generation for session '{session_id}' changed from {observed} to {current} during execution")]
+    AuthGenerationStale {
+        session_id: String,
+        observed: u64,
+        current: u64,
+        phase: ExecutionPhase,
     },
     #[error("{source}")]
     Classified {
@@ -347,6 +356,70 @@ impl BrowserProviderError {
             )
             .with_resource_id(session_id.clone())
             .with_cooldown(2),
+            Self::AuthGenerationStale {
+                session_id,
+                phase,
+                ..
+            } => ExecutionFailure::new(
+                FailureClass::AuthExpired,
+                true,
+                if *phase == ExecutionPhase::PreSubmit {
+                    ReplaySafety::Safe
+                } else {
+                    ReplaySafety::Unsafe
+                },
+                *phase,
+                FailureScope::Request,
+                "request auth generation became stale before completion",
+            )
+            .with_resource_id(session_id.clone())
+            .with_cooldown(0),
+            Self::AdapterIncompatible { code, .. } if code == "login_required" => {
+                ExecutionFailure::new(
+                    FailureClass::AuthExpired,
+                    true,
+                    ReplaySafety::Safe,
+                    ExecutionPhase::PreSubmit,
+                    FailureScope::Request,
+                    "browser account authentication expired",
+                )
+                .with_cooldown(0)
+                .requiring_human_action()
+            }
+            Self::AdapterIncompatible { code, .. } if code == "auth_incomplete" => {
+                ExecutionFailure::new(
+                    FailureClass::AuthIncomplete,
+                    true,
+                    ReplaySafety::Safe,
+                    ExecutionPhase::PreSubmit,
+                    FailureScope::Request,
+                    "browser account authentication snapshot is incomplete",
+                )
+                .with_cooldown(0)
+                .requiring_human_action()
+            }
+            Self::AdapterIncompatible { code, .. } if code == "rate_limited" => {
+                ExecutionFailure::new(
+                    FailureClass::RateLimited,
+                    true,
+                    ReplaySafety::ProbablySafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Account,
+                    "browser-backed account was rate limited by the provider",
+                )
+                .with_cooldown(60)
+            }
+            Self::AdapterIncompatible { code, .. } if code == "upstream_overloaded" => {
+                ExecutionFailure::new(
+                    FailureClass::UpstreamOverloaded,
+                    true,
+                    ReplaySafety::ProbablySafe,
+                    ExecutionPhase::Submitted,
+                    FailureScope::Transport,
+                    "browser-backed provider transiently rejected the selected transport",
+                )
+                .with_cooldown(5)
+            }
             Self::AdapterIncompatible { code, .. } if code == "model_binding_conflict" => {
                 ExecutionFailure::new(
                     FailureClass::SessionStateDesync,
@@ -995,6 +1068,7 @@ impl BrowserProviderRegistry {
             }
             BrowserTransportMode::Auto => BrowserTransportPolicy::BrowserOnly,
         };
+        let auth_generation = self.auth_generation(&binding.session);
         let auth_state = if browserless.requires_auth_snapshot
             && self.auth_material_available(&binding.session)
         {
@@ -1086,6 +1160,7 @@ impl BrowserProviderRegistry {
             effective_recorded_at,
             effective_reason,
             auth_state,
+            auth_generation,
         })
     }
 
@@ -1253,6 +1328,12 @@ impl BrowserProviderRegistry {
 
     fn auth_material_available(&self, session_id: &str) -> bool {
         browser_auth_runtime::get().is_some_and(|vault| vault.contains(session_id))
+    }
+
+    fn auth_generation(&self, session_id: &str) -> u64 {
+        browser_auth_runtime::get()
+            .and_then(|vault| vault.current_generation(session_id).ok())
+            .unwrap_or(0)
     }
 
     fn direct_adapter(
@@ -1754,6 +1835,43 @@ impl BrowserProviderRegistry {
         Ok(())
     }
 
+    async fn recover_auth_generation(
+        &self,
+        provider: &ProviderConfig,
+        account: &AccountConfig,
+        binding: &BrowserAccountBinding,
+        observed_generation: u64,
+    ) -> bool {
+        browser_auth_runtime::recover_generation_if_stale(
+            &binding.session,
+            observed_generation,
+            || async {
+                let Some(execution_guard) = self
+                    .ensure_account_cdp_session_ready(provider, account, binding)
+                    .await
+                else {
+                    return false;
+                };
+                let already_advanced = self.auth_generation(&binding.session) > observed_generation;
+                let verified = if already_advanced {
+                    true
+                } else if let Some(driver) = chromium_driver_runtime::get() {
+                    driver
+                        .verify(&binding.session)
+                        .await
+                        .is_ok_and(|verification| {
+                            verification.authenticated && verification.auth_material_captured
+                        })
+                } else {
+                    false
+                };
+                drop(execution_guard);
+                verified
+            },
+        )
+        .await
+    }
+
     async fn execute_transport(
         &self,
         provider: &ProviderConfig,
@@ -1765,6 +1883,16 @@ impl BrowserProviderRegistry {
         transport: &str,
         operation: BrowserAdapterOperation,
     ) -> Result<reqwest::Response, BrowserProviderError> {
+        let current_generation = self.auth_generation(&binding.session);
+        if request.auth_generation != current_generation {
+            return Err(BrowserProviderError::AuthGenerationStale {
+                session_id: binding.session.clone(),
+                observed: request.auth_generation,
+                current: current_generation,
+                phase: ExecutionPhase::PreSubmit,
+            });
+        }
+        let owned_generation = request.auth_generation;
         let key = RuntimeHealthKey::transport(&provider.id, &account.id, transport);
         let permit = match self.runtime_health.try_acquire_all(&[key]).await {
             Ok(permit) => permit,
@@ -1783,6 +1911,21 @@ impl BrowserProviderRegistry {
 
         match executed {
             Ok(response) => {
+                let current_generation = self.auth_generation(&binding.session);
+                if current_generation != owned_generation {
+                    self.runtime_health.release(permit).await;
+                    return Err(BrowserProviderError::AuthGenerationStale {
+                        session_id: binding.session.clone(),
+                        observed: owned_generation,
+                        current: current_generation,
+                        phase: ExecutionPhase::Submitted,
+                    });
+                }
+                let response = wrap_response_with_auth_generation(
+                    response,
+                    binding.session.clone(),
+                    owned_generation,
+                )?;
                 self.runtime_health.record_success(permit).await;
                 Ok(response)
             }
@@ -1952,7 +2095,7 @@ impl BrowserProviderRegistry {
             });
         }
 
-        let adapter_request = BrowserAdapterRequest {
+        let mut adapter_request = BrowserAdapterRequest {
             provider: provider.clone(),
             account: account.clone(),
             route: route.clone(),
@@ -1961,6 +2104,7 @@ impl BrowserProviderRegistry {
             profile_dir: session.profile_dir.clone(),
             binding: binding.clone(),
             thread_id: thread_id.map(str::to_string),
+            auth_generation: self.auth_generation(&binding.session),
         };
 
         let mut used_adapter = browser_adapter.clone();
@@ -1978,7 +2122,7 @@ impl BrowserProviderRegistry {
             let direct = direct_adapter.expect("direct adapter checked above");
             used_adapter = direct.clone();
             used_transport = "direct_http";
-            let direct_result = self
+            let mut direct_result = self
                 .execute_transport(
                     provider,
                     account,
@@ -1990,6 +2134,45 @@ impl BrowserProviderRegistry {
                     BrowserAdapterOperation::Chat,
                 )
                 .await;
+            let initial_auth_failure = direct_result.as_ref().err().is_some_and(|error| {
+                matches!(
+                    error.execution_failure().class,
+                    FailureClass::AuthExpired | FailureClass::AuthIncomplete
+                )
+            });
+            if initial_auth_failure
+                && direct_result.as_ref().err().is_some_and(|error| {
+                    error.execution_failure().allows_silent_fallback(false)
+                })
+                && self
+                    .recover_auth_generation(
+                        provider,
+                        account,
+                        &binding,
+                        adapter_request.auth_generation,
+                    )
+                    .await
+            {
+                adapter_request.auth_generation = self.auth_generation(&binding.session);
+                direct_result = self
+                    .execute_transport(
+                        provider,
+                        account,
+                        route,
+                        &binding,
+                        direct.clone(),
+                        adapter_request.clone(),
+                        "direct_http",
+                        BrowserAdapterOperation::Chat,
+                    )
+                    .await;
+            }
+            let final_auth_failure = direct_result.as_ref().err().is_some_and(|error| {
+                matches!(
+                    error.execution_failure().class,
+                    FailureClass::AuthExpired | FailureClass::AuthIncomplete
+                )
+            });
             let dynamic_model = self
                 .discovered_models
                 .read()
@@ -1999,7 +2182,8 @@ impl BrowserProviderRegistry {
                 && !binding.models.iter().any(|model| model == &route.model);
             let direct_failure_can_open_browser =
                 direct_failure_can_open_browser(&provider.kind, binding.transport_mode);
-            let safe_fallback_candidate = direct_failure_can_open_browser
+            let safe_fallback_candidate = !final_auth_failure
+                && direct_failure_can_open_browser
                 && direct_result.as_ref().err().is_some_and(|error| {
                     matches!(
                         legacy_browser_provider_error(error),
@@ -2100,8 +2284,19 @@ impl BrowserProviderRegistry {
                 .await;
                 self.invalidate_diagnostics(&account.id).await;
             }
-            Err(BrowserProviderError::AdapterIncompatible { code, message, .. }) => {
-                let status = if code == "login_required" {
+            Err(error)
+                if matches!(
+                    legacy_browser_provider_error(error),
+                    BrowserProviderError::AdapterIncompatible { .. }
+                ) =>
+            {
+                let BrowserProviderError::AdapterIncompatible { code, message, .. } =
+                    legacy_browser_provider_error(error)
+                else {
+                    unreachable!("adapter error guard checked above")
+                };
+                let status = if matches!(code.as_str(), "login_required" | "auth_incomplete") {
+                    let _ = browser_auth_runtime::invalidate(&binding.session);
                     let _ = self
                         .mark_login_required(
                             &account.id,
@@ -2111,6 +2306,10 @@ impl BrowserProviderRegistry {
                     "login_required"
                 } else if code == "browser_challenge_required" {
                     "browser_fallback_required"
+                } else if code == "rate_limited" {
+                    "rate_limited"
+                } else if code == "upstream_overloaded" {
+                    "upstream_overloaded"
                 } else {
                     "adapter_incompatible"
                 };
@@ -2153,6 +2352,44 @@ impl BrowserProviderRegistry {
             )
         })
     }
+}
+
+fn wrap_response_with_auth_generation(
+    response: reqwest::Response,
+    session_id: String,
+    generation: u64,
+) -> Result<reqwest::Response, BrowserProviderError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut body = response.bytes_stream();
+    let stream = async_stream::stream! {
+        while let Some(chunk) = body.next().await {
+            let current = browser_auth_runtime::get()
+                .and_then(|vault| vault.current_generation(&session_id).ok())
+                .unwrap_or(generation);
+            if current != generation {
+                yield Err(std::io::Error::other(format!(
+                    "auth_generation_stale: session '{session_id}' changed from {generation} to {current} after response start"
+                )));
+                return;
+            }
+            match chunk {
+                Ok(bytes) => yield Ok(bytes),
+                Err(error) => {
+                    yield Err(std::io::Error::other(error));
+                    return;
+                }
+            }
+        }
+    };
+    let mut builder = HttpResponse::builder().status(status);
+    if let Some(target) = builder.headers_mut() {
+        *target = headers;
+    }
+    let response = builder
+        .body(reqwest::Body::wrap_stream(stream))
+        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+    Ok(reqwest::Response::from(response))
 }
 
 struct BrowserFallbackStopGuard {
@@ -3515,6 +3752,10 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         if let Some(context) = context.as_object_mut() {
             context.insert("transport".into(), Value::String("browser_fetch".into()));
             context.insert(
+                "auth_generation".into(),
+                Value::from(request.auth_generation),
+            );
+            context.insert(
                 "thread_id_present".into(),
                 Value::Bool(request.thread_id.is_some()),
             );
@@ -3613,6 +3854,12 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         object.insert("model".into(), Value::String(request.route.model.clone()));
 
         let mut context = self.context(&request.binding, Some(&request.route.model));
+        if let Some(context) = context.as_object_mut() {
+            context.insert(
+                "auth_generation".into(),
+                Value::from(request.auth_generation),
+            );
+        }
         let thread_affinity = request
             .thread_id
             .as_deref()
@@ -4148,6 +4395,9 @@ if (__operation === "browser_fetch") {
     else if (/^BROWSER_FETCH_CHALLENGED:/i.test(__message)) __code = "browser_challenge_required";
     else if (/^BROWSER_FETCH_WAF_REJECTED:/i.test(__message)) __code = "upstream_waf_rejected";
     else if (/^LOGIN_REQUIRED:/i.test(__message)) __code = "login_required";
+    else if (/^RATE_LIMITED:/i.test(__message)) __code = "rate_limited";
+    else if (/^UPSTREAM_OVERLOADED:/i.test(__message)) __code = "upstream_overloaded";
+    else if (/^MODEL_RECIPE_STALE:/i.test(__message)) __code = "model_recipe_stale";
     else if (/^INVALID_REQUEST:/i.test(__message)) __code = "invalid_request";
     return { meta: __meta, probe: __probe, error: { code: __code, message: __message } };
   }
@@ -4172,6 +4422,9 @@ if (__operation === "chat_stream_start") {
       else if (/^BROWSER_FETCH_CHALLENGED:/i.test(__message)) __code = "browser_challenge_required";
       else if (/^BROWSER_FETCH_WAF_REJECTED:/i.test(__message)) __code = "upstream_waf_rejected";
       else if (/^LOGIN_REQUIRED:/i.test(__message)) __code = "login_required";
+      else if (/^RATE_LIMITED:/i.test(__message)) __code = "rate_limited";
+      else if (/^UPSTREAM_OVERLOADED:/i.test(__message)) __code = "upstream_overloaded";
+      else if (/^MODEL_RECIPE_STALE:/i.test(__message)) __code = "model_recipe_stale";
       else if (/^INVALID_REQUEST:/i.test(__message)) __code = "invalid_request";
     }
     return {
@@ -4200,6 +4453,9 @@ try {
   if (/^ADAPTER_INCOMPATIBLE:/i.test(__message)) __code = "adapter_incompatible";
   else if (/^(MODEL_NOT_FOUND|MODEL_PICKER_NOT_FOUND):/i.test(__message)) __code = "model_unavailable";
   else if (/^LOGIN_REQUIRED:/i.test(__message)) __code = "login_required";
+  else if (/^RATE_LIMITED:/i.test(__message)) __code = "rate_limited";
+  else if (/^UPSTREAM_OVERLOADED:/i.test(__message)) __code = "upstream_overloaded";
+  else if (/^MODEL_RECIPE_STALE:/i.test(__message)) __code = "model_recipe_stale";
   else if (/^RESPONSE_TIMEOUT:/i.test(__message)) __code = "response_timeout";
   else if (/^INVALID_REQUEST:/i.test(__message)) __code = "invalid_request";
   return { meta: __meta, probe: __probe, error: { code: __code, message: __message } };
@@ -4363,6 +4619,10 @@ fn contract_error_to_provider_error(
             account_id: account_id.to_string(),
             model: model.to_string(),
         }),
+        "model_recipe_stale" => Err(BrowserProviderError::ModelRecipeStale {
+            account_id: account_id.to_string(),
+            model: model.to_string(),
+        }),
         "contract_missing"
         | "contract_version_mismatch"
         | "adapter_incompatible"
@@ -4372,7 +4632,9 @@ fn contract_error_to_provider_error(
         | "browser_fetch_unsupported"
         | "browser_challenge_required"
         | "browser_fetch_rejected"
-        | "upstream_waf_rejected" => Err(BrowserProviderError::AdapterIncompatible {
+        | "upstream_waf_rejected"
+        | "rate_limited"
+        | "upstream_overloaded" => Err(BrowserProviderError::AdapterIncompatible {
             account_id: account_id.to_string(),
             code: error.code,
             message: error.message,
@@ -4420,10 +4682,12 @@ fn direct_error_allows_browser_fallback(
 
 fn browser_fetch_error_allows_ui_fallback(error: &BrowserProviderError) -> bool {
     let failure = error.execution_failure();
-    !matches!(
-        failure.phase,
-        ExecutionPhase::Committed | ExecutionPhase::Terminal
-    ) && failure.allows_silent_fallback(false)
+    failure.class != FailureClass::RateLimited
+        && !matches!(
+            failure.phase,
+            ExecutionPhase::Committed | ExecutionPhase::Terminal
+        )
+        && failure.allows_silent_fallback(false)
 }
 
 fn cdp_session_status_probeable(status: &str) -> bool {
@@ -5697,4 +5961,57 @@ mod browser_transport_policy_tests {
             Err(BrowserProviderError::InvalidTransportPolicy(_))
         ));
     }
+    #[test]
+    fn stale_auth_generation_is_explicitly_rejected_before_submit() {
+        let error = BrowserProviderError::AuthGenerationStale {
+            session_id: "gemini-session".into(),
+            observed: 7,
+            current: 8,
+            phase: ExecutionPhase::PreSubmit,
+        };
+        let failure = error.execution_failure();
+        assert_eq!(failure.class, FailureClass::AuthExpired);
+        assert_eq!(failure.phase, ExecutionPhase::PreSubmit);
+        assert_eq!(failure.replay_safety, ReplaySafety::Safe);
+        assert!(failure.allows_silent_fallback(false));
+    }
+
+    #[test]
+    fn auth_generation_failure_is_request_scoped_and_does_not_poison_transport_health() {
+        let error = BrowserProviderError::AuthGenerationStale {
+            session_id: "gemini-session".into(),
+            observed: 4,
+            current: 5,
+            phase: ExecutionPhase::Submitted,
+        };
+        let failure = error
+            .execution_failure()
+            .with_context("gemini", "account-a", "gemini-web-pro", "direct_http");
+        assert_eq!(failure.class, FailureClass::AuthExpired);
+        assert_eq!(failure.scope, FailureScope::Request);
+        assert!(RuntimeHealthKey::from_failure(&failure).is_empty());
+        assert_eq!(failure.replay_safety, ReplaySafety::Unsafe);
+        assert!(!failure.allows_silent_fallback(false));
+        assert!(!failure.allows_silent_fallback(true));
+    }
+
+    #[test]
+    fn rate_limit_is_account_scoped_and_does_not_fall_back_to_same_account_ui() {
+        let error = BrowserProviderError::AdapterIncompatible {
+            account_id: "account-a".into(),
+            code: "rate_limited".into(),
+            message: "RATE_LIMITED: provider quota".into(),
+        };
+        let failure = error
+            .execution_failure()
+            .with_context("gemini", "account-a", "gemini-web-pro", "browser_fetch");
+        assert_eq!(failure.class, FailureClass::RateLimited);
+        assert_eq!(failure.scope, FailureScope::Account);
+        assert!(!browser_fetch_error_allows_ui_fallback(&error));
+        assert_eq!(
+            RuntimeHealthKey::from_failure(&failure),
+            vec![RuntimeHealthKey::account("gemini", "account-a")]
+        );
+    }
+
 }

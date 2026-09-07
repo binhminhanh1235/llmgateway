@@ -1328,6 +1328,13 @@ function geminiFixtureFrame(answer = "gemini browser fetch ok") {
   return ")]}'\n" + String(frame.length + 1) + "\n" + frame + "\n";
 }
 
+function geminiFixtureErrorFrame(errorCode) {
+  const part = Array(6).fill(null);
+  part[5] = [null, null, [[null, [Number(errorCode)]]]];
+  const frame = JSON.stringify([part]);
+  return ")]}'\n" + String(frame.length + 1) + "\n" + frame + "\n";
+}
+
 async function testQwenBrowserFetchBuffered() {
   const oldFetch = globalThis.fetch;
   const input = new FakeTextAreaElement();
@@ -1492,6 +1499,68 @@ async function testGeminiBrowserFetchBufferedAndModelIsolation() {
   }
 }
 
+async function testGeminiBrowserFetchTypedFailures() {
+  const oldFetch = globalThis.fetch;
+  installPage({
+    host: "gemini.google.com",
+    nodes: { "div[aria-label='Enter a prompt for Gemini']": new FakeElement() }
+  });
+  const adapter = loadAdapter("adapters/gemini-web.js");
+  const request = {
+    model: "gemini-web-default",
+    stream: false,
+    messages: [{ role: "user", content: "classify provider failure" }]
+  };
+  const context = {
+    transport: "browser_fetch",
+    thread_id_present: false,
+    first_byte_timeout_ms: 1000
+  };
+
+  try {
+    for (const [status, expected] of [
+      [401, /LOGIN_REQUIRED:/],
+      [429, /RATE_LIMITED:/],
+      [503, /UPSTREAM_OVERLOADED:/]
+    ]) {
+      globalThis.fetch = async (url) => {
+        if (String(url) === "/app") {
+          return fakeFetchResponse('<script>{"SNlM0e":"token-fetch","cfb2h":"build-fetch","FdrFJe":"sid-fetch","TuX5cc":"en"}</script>', {
+            contentType: "text/html"
+          });
+        }
+        if (String(url).includes("StreamGenerate")) {
+          return fakeFetchResponse("", { status });
+        }
+        throw new Error("unexpected Gemini typed-failure fixture URL " + url);
+      };
+      await assert.rejects(() => adapter.browserFetch(request, context), expected);
+    }
+
+    for (const [errorCode, expected] of [
+      [1037, /RATE_LIMITED:/],
+      [1052, /MODEL_RECIPE_STALE:/],
+      [1155, /UPSTREAM_OVERLOADED:/]
+    ]) {
+      globalThis.fetch = async (url) => {
+        if (String(url) === "/app") {
+          return fakeFetchResponse('<script>{"SNlM0e":"token-fetch","cfb2h":"build-fetch","FdrFJe":"sid-fetch","TuX5cc":"en"}</script>', {
+            contentType: "text/html"
+          });
+        }
+        if (String(url).includes("StreamGenerate")) {
+          const frame = geminiFixtureErrorFrame(errorCode);
+          return fakeFetchResponse(frame, { chunks: [frame] });
+        }
+        throw new Error("unexpected Gemini typed-code fixture URL " + url);
+      };
+      await assert.rejects(() => adapter.browserFetch(request, context), expected);
+    }
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+}
+
 async function testBrowserFetchRejectsSemanticLossBeforeSubmission() {
   const oldFetch = globalThis.fetch;
   let calls = 0;
@@ -1558,5 +1627,6 @@ await testMidRequestLoginExpiry();
 await testQwenBrowserFetchBuffered();
 await testQwenBrowserFetchStreamingAndCancellation();
 await testGeminiBrowserFetchBufferedAndModelIsolation();
+await testGeminiBrowserFetchTypedFailures();
 await testBrowserFetchRejectsSemanticLossBeforeSubmission();
 console.log("built-in Gemini/ChatGPT/Qwen/DeepSeek/MiMo + browser-fetch fake-page adapter fixtures passed");
