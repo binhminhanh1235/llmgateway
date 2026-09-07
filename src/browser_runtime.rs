@@ -1,5 +1,5 @@
 use crate::chromium_driver::{ChromiumDriver, ChromiumDriverError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
@@ -90,6 +90,16 @@ struct RuntimeEntry {
 struct RuntimeState {
     entries: BTreeMap<String, RuntimeEntry>,
     tick: u64,
+    launch_count: u64,
+    reclaim_count: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct BrowserRuntimeMetrics {
+    pub running_browsers: usize,
+    pub active_leases: usize,
+    pub launch_count: u64,
+    pub reclaim_count: u64,
 }
 
 impl RuntimeState {
@@ -102,12 +112,26 @@ impl RuntimeState {
         self.entries.values().filter(|entry| entry.running).count()
     }
 
+    fn metrics(&self) -> BrowserRuntimeMetrics {
+        BrowserRuntimeMetrics {
+            running_browsers: self.running_count(),
+            active_leases: self.entries.values().map(|entry| entry.active_leases).sum(),
+            launch_count: self.launch_count,
+            reclaim_count: self.reclaim_count,
+        }
+    }
+
+    fn note_reclaim(&mut self) {
+        self.reclaim_count = self.reclaim_count.saturating_add(1);
+    }
+
     fn reserve(
         &mut self,
         session_id: &str,
         mode: BrowserRuntimeMode,
         now: Instant,
     ) -> GenerationToken {
+        self.launch_count = self.launch_count.saturating_add(1);
         let tick = self.next_tick();
         let browser_generation = self
             .entries
@@ -378,6 +402,10 @@ impl BrowserRuntimeSupervisor {
             .is_some_and(|entry| entry.running)
     }
 
+    pub fn metrics(&self) -> BrowserRuntimeMetrics {
+        self.lock_state().metrics()
+    }
+
     pub fn acquire_lease(self: &Arc<Self>, session_id: &str) -> Option<BrowserRuntimeLease> {
         let token = self
             .lock_state()
@@ -550,11 +578,10 @@ impl BrowserRuntimeSupervisor {
 
         for (session_id, generation) in candidates {
             if self.driver.suspend(&session_id).await.is_ok() {
-                self.lock_state().mark_stopped_if_generation(
-                    &session_id,
-                    generation,
-                    Instant::now(),
-                );
+                let mut state = self.lock_state();
+                state.mark_stopped_if_generation(&session_id, generation, Instant::now());
+                state.note_reclaim();
+                drop(state);
                 reclaimed.push(session_id);
             }
         }
@@ -574,8 +601,9 @@ impl BrowserRuntimeSupervisor {
                 return Ok(false);
             };
             self.driver.suspend(&victim_id).await?;
-            self.lock_state()
-                .mark_stopped_if_generation(&victim_id, generation, Instant::now());
+            let mut state = self.lock_state();
+            state.mark_stopped_if_generation(&victim_id, generation, Instant::now());
+            state.note_reclaim();
         }
     }
 
@@ -809,6 +837,41 @@ mod tests {
         let reclaimable = state.reclaimable(now, Duration::from_secs(45), Duration::from_secs(300));
         assert_eq!(reclaimable.len(), 1);
         assert_eq!(reclaimable[0].0, "session-a");
+    }
+
+    #[test]
+    fn runtime_metrics_track_processes_leases_launches_and_reclaims() {
+        let mut state = RuntimeState::default();
+        let now = Instant::now();
+        assert_eq!(state.metrics(), BrowserRuntimeMetrics::default());
+
+        let token = state.reserve("session-a", BrowserRuntimeMode::Background, now);
+        assert!(state.complete_launch("session-a", token.browser, now));
+        let lease = state.acquire_lease("session-a", now).unwrap();
+
+        assert_eq!(
+            state.metrics(),
+            BrowserRuntimeMetrics {
+                running_browsers: 1,
+                active_leases: 1,
+                launch_count: 1,
+                reclaim_count: 0,
+            }
+        );
+
+        state.release_lease("session-a", lease, now);
+        state.mark_stopped_if_generation("session-a", token.browser, now);
+        state.note_reclaim();
+
+        assert_eq!(
+            state.metrics(),
+            BrowserRuntimeMetrics {
+                running_browsers: 0,
+                active_leases: 0,
+                launch_count: 1,
+                reclaim_count: 1,
+            }
+        );
     }
 
     #[test]
