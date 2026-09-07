@@ -287,7 +287,7 @@ x=json.load(sys.stdin)
 assert x["running"] is True, x
 assert x["managed"] is False, x
 assert x["debugger_reachable"] is True, x
-assert x["ready_match"] == "http://127.0.0.1:18084/ready", x
+assert x["ready_match"] == "https://chat.qwen.ai/", x
 '
 
 # Simulate a Chromium crash. The stale DevToolsActivePort remains on disk.
