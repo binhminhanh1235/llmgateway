@@ -73,6 +73,8 @@ pub async fn browser_account_runtime_diagnostics(
         .adapter_diagnostics(&provider.kind, &account_id)
         .await;
     let last_execution = registry.last_transport_execution(&account_id).await;
+    let account_runtime =
+        registry.account_runtime_snapshot(&provider.id, &provider.kind, &account_id);
     let refresh_required = registry.model_catalog_refresh_required(&account_id);
     let model_catalog = match state.catalog.models().await {
         Ok(models) => {
@@ -150,6 +152,7 @@ pub async fn browser_account_runtime_diagnostics(
             "adapter": adapter,
             "model_catalog": model_catalog,
             "last_execution": last_execution,
+            "account_runtime": account_runtime,
             "browser": browser,
             "effective_transport": effective_transport,
             "direct_ready": direct_ready,

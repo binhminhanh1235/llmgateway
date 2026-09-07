@@ -1,4 +1,5 @@
 use crate::{
+    account_runtime::{AccountAdmissionPermit, AccountRuntimeRegistry, ProviderRuntimePolicy},
     browser_provider::{BrowserProviderError, BrowserProviderRegistry},
     browser_provider_runtime,
     catalog::ModelCatalog,
@@ -36,6 +37,7 @@ pub struct Gateway {
     pub live_config: LiveConfig,
     pub router: Router,
     pub execution_traces: Arc<ExecutionTraceStore>,
+    account_runtimes: Arc<AccountRuntimeRegistry>,
     client: Client,
 }
 
@@ -215,6 +217,29 @@ fn upstream_stream_error_sse(message: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("data: {payload}\n\n"))
 }
 
+fn hold_account_admission(
+    response: reqwest::Response,
+    permit: AccountAdmissionPermit,
+) -> reqwest::Response {
+    let status = response.status();
+    let version = response.version();
+    let headers = response.headers().clone();
+    let mut upstream = response.bytes_stream();
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        while let Some(item) = upstream.next().await {
+            yield item;
+        }
+    };
+    let mut response = HttpResponse::builder()
+        .status(status)
+        .version(version)
+        .body(reqwest::Body::wrap_stream(stream))
+        .expect("admission response builder uses validated upstream metadata");
+    *response.headers_mut() = headers;
+    reqwest::Response::from(response)
+}
+
 #[derive(Debug, Error)]
 pub enum GatewayError {
     #[error("{0}")]
@@ -279,6 +304,24 @@ impl Gateway {
         execution_traces: Arc<ExecutionTraceStore>,
         runtime_health: Arc<RuntimeHealthGraph>,
     ) -> Result<Self, GatewayError> {
+        Self::with_runtime_fabric(
+            config,
+            live_config,
+            catalog,
+            execution_traces,
+            runtime_health,
+            Arc::new(AccountRuntimeRegistry::default()),
+        )
+    }
+
+    pub fn with_runtime_fabric(
+        config: Arc<AppConfig>,
+        live_config: LiveConfig,
+        catalog: Arc<ModelCatalog>,
+        execution_traces: Arc<ExecutionTraceStore>,
+        runtime_health: Arc<RuntimeHealthGraph>,
+        account_runtimes: Arc<AccountRuntimeRegistry>,
+    ) -> Result<Self, GatewayError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))
@@ -295,12 +338,27 @@ impl Gateway {
             live_config,
             router,
             execution_traces,
+            account_runtimes,
             client,
         })
     }
 
     pub fn config_snapshot(&self) -> Arc<AppConfig> {
         self.live_config.snapshot()
+    }
+
+    fn account_runtime_policy(
+        &self,
+        provider: &ProviderConfig,
+        account: &AccountConfig,
+    ) -> ProviderRuntimePolicy {
+        if BrowserProviderRegistry::is_browser_kind(&provider.kind) {
+            browser_provider_runtime::get()
+                .map(|registry| registry.account_runtime_policy(&provider.kind, &account.id))
+                .unwrap_or_else(ProviderRuntimePolicy::serialized_browser)
+        } else {
+            ProviderRuntimePolicy::api_default()
+        }
     }
 
     pub fn effective_client_config(
@@ -587,11 +645,64 @@ impl Gateway {
             let selected_transport = selected_transport_label(provider);
             let logical_candidate = format!("{}/{}/{}", account.provider, account.id, route.model);
             let attempt_started = Instant::now();
+            let admission_policy = self.account_runtime_policy(provider, account);
+            let account_admission = match self
+                .account_runtimes
+                .acquire(
+                    &provider.id,
+                    &account.id,
+                    admission_policy,
+                    budget_tracker.max_queue_wait(),
+                    budget_tracker.remaining(),
+                )
+                .await
+            {
+                Ok(permit) => permit,
+                Err(rejection) => {
+                    self.router
+                        .release_runtime_health(runtime_health_permit)
+                        .await;
+                    let failure = rejection.execution_failure(
+                        &provider.id,
+                        &account.id,
+                        &route.model,
+                        selected_transport,
+                    );
+                    let error_text = rejection.to_string();
+                    self.record_execution_attempt(AttemptRecord {
+                        request_id: &request_id,
+                        attempt_index,
+                        route_id: &route.id,
+                        account_id: &account.id,
+                        model: &route.model,
+                        status_code: None,
+                        outcome: "admission_rejected",
+                        retryable: true,
+                        duration_ms: attempt_started.elapsed().as_millis(),
+                        error: Some(&error_text),
+                        failure_class: Some(failure.class.as_str()),
+                        execution_phase: failure.phase.as_str(),
+                        replay_safety: failure.replay_safety.as_str(),
+                        committed: false,
+                        selected_transport: Some(selected_transport),
+                        recovery_reason: recovery_reason.as_deref(),
+                        logical_candidate: Some(&logical_candidate),
+                    })
+                    .await;
+                    recovery_reason = Some(failure.class.as_str().to_string());
+                    last_error = Some(GatewayError::Classified {
+                        failure: Box::new(failure),
+                        source: Box::new(GatewayError::Transport(error_text)),
+                    });
+                    continue;
+                }
+            };
             match self
                 .send_route_chat(provider, account, &route, &upstream_body, thread_id)
                 .await
             {
                 Ok(response) if response.status().is_success() => {
+                    account_admission.observe_success();
                     let status = response.status();
                     let duration_ms = attempt_started.elapsed().as_millis();
                     let adaptive_latency_ms = duration_ms.min(u64::MAX as u128) as u64;
@@ -661,6 +772,7 @@ impl Gateway {
                         self.complete_execution(&request_id, "success", Some(&route.id), None)
                             .await;
                     }
+                    let response = hold_account_admission(response, account_admission);
                     return Ok(RoutedResponse {
                         response,
                         route,
@@ -691,6 +803,7 @@ impl Gateway {
                         selected_transport,
                         BrowserProviderRegistry::is_browser_kind(&provider.kind),
                     );
+                    account_admission.observe_failure(failure.class);
                     let retryable = failure.allows_silent_fallback(false);
                     let cooldown = failure
                         .suggested_cooldown_secs
@@ -805,6 +918,7 @@ impl Gateway {
                         &route.model,
                         selected_transport,
                     );
+                    account_admission.observe_failure(failure.class);
                     let retryable = failure.allows_silent_fallback(false);
                     if let Some((route_cooldown_secs, adaptive_failure)) =
                         route_failure_policy_for_failure(&failure)

@@ -8,6 +8,9 @@ pub enum FailureClass {
     AuthExpired,
     AuthIncomplete,
     HumanActionRequired,
+    AdmissionRejected,
+    QueueOverflow,
+    QueueTimeout,
     RateLimited,
     UpstreamOverloaded,
     WafRejected,
@@ -31,6 +34,9 @@ impl FailureClass {
             Self::AuthExpired => "auth_expired",
             Self::AuthIncomplete => "auth_incomplete",
             Self::HumanActionRequired => "human_action_required",
+            Self::AdmissionRejected => "admission_rejected",
+            Self::QueueOverflow => "queue_overflow",
+            Self::QueueTimeout => "queue_timeout",
             Self::RateLimited => "rate_limited",
             Self::UpstreamOverloaded => "upstream_overloaded",
             Self::WafRejected => "waf_rejected",
@@ -278,6 +284,16 @@ impl ExecutionBudgetTracker {
         }
         self.provider_switches += 1;
         true
+    }
+
+    pub fn max_queue_wait(&self) -> Duration {
+        self.budget.max_queue_wait
+    }
+
+    pub fn remaining(&self) -> Duration {
+        self.budget
+            .overall_deadline
+            .saturating_sub(self.started_at.elapsed())
     }
 
     #[allow(dead_code)]

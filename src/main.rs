@@ -1,4 +1,5 @@
 mod account_intelligence_api;
+mod account_runtime;
 mod admin;
 mod admin_api;
 mod api;
@@ -55,6 +56,7 @@ mod ui;
 mod usage_api;
 
 use account_intelligence_api::account_intelligence;
+use account_runtime::AccountRuntimeRegistry;
 use admin_api::{set_account, set_account_model, set_model};
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
@@ -173,9 +175,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "Chromium driver was already initialized")?;
 
     let runtime_health = Arc::new(RuntimeHealthGraph::default());
-    let browser_providers = Arc::new(BrowserProviderRegistry::with_runtime_health(
+    let account_runtimes = Arc::new(AccountRuntimeRegistry::default());
+    let browser_providers = Arc::new(BrowserProviderRegistry::with_runtime_fabric(
         browser_provider_config,
         runtime_health.clone(),
+        account_runtimes.clone(),
     )?);
     let browser_provider_bindings = browser_providers.binding_count();
     browser_provider_runtime::install(browser_providers.clone())
@@ -285,12 +289,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let gateway = Arc::new(Gateway::with_runtime_health(
+    let gateway = Arc::new(Gateway::with_runtime_fabric(
         config.clone(),
         live_config.clone(),
         catalog.clone(),
         execution_traces,
         runtime_health,
+        account_runtimes,
     )?);
     match gateway.restore_adaptive_from_traces().await {
         Ok(restored) if restored > 0 => {

@@ -1,4 +1,5 @@
 use crate::{
+    account_runtime::{AccountRuntimeRegistry, AccountRuntimeSnapshot, ProviderRuntimePolicy},
     browser_auth_runtime, browser_session_runtime,
     chatgpt_web_transport::ChatGptWebHttpAdapter,
     chromium_driver_runtime,
@@ -608,6 +609,7 @@ pub struct BrowserProviderRegistry {
     discovered_models: Arc<StdRwLock<BTreeMap<String, BTreeSet<String>>>>,
     model_catalog_refresh_required: Arc<StdRwLock<BTreeSet<String>>>,
     runtime_health: Arc<RuntimeHealthGraph>,
+    account_runtimes: Arc<AccountRuntimeRegistry>,
 }
 
 impl BrowserProviderConfig {
@@ -721,6 +723,18 @@ impl BrowserProviderRegistry {
         config: BrowserProviderConfig,
         runtime_health: Arc<RuntimeHealthGraph>,
     ) -> Result<Self, BrowserProviderError> {
+        Self::with_runtime_fabric(
+            config,
+            runtime_health,
+            Arc::new(AccountRuntimeRegistry::default()),
+        )
+    }
+
+    pub fn with_runtime_fabric(
+        config: BrowserProviderConfig,
+        runtime_health: Arc<RuntimeHealthGraph>,
+        account_runtimes: Arc<AccountRuntimeRegistry>,
+    ) -> Result<Self, BrowserProviderError> {
         let http = Arc::new(HttpBrowserAdapter::new()?);
         let cdp = Arc::new(CdpBrowserAdapter::custom()?);
         let gemini = Arc::new(CdpBrowserAdapter::gemini()?);
@@ -758,6 +772,7 @@ impl BrowserProviderRegistry {
             discovered_models: Arc::new(StdRwLock::new(BTreeMap::new())),
             model_catalog_refresh_required: Arc::new(StdRwLock::new(BTreeSet::new())),
             runtime_health,
+            account_runtimes,
         })
     }
 
@@ -765,12 +780,64 @@ impl BrowserProviderRegistry {
         self.config_snapshot().bindings.len()
     }
 
+    pub fn account_runtime_policy(
+        &self,
+        provider_kind: &str,
+        account_id: &str,
+    ) -> ProviderRuntimePolicy {
+        let config = self.config_snapshot();
+        let Some(binding) = config.bindings.get(account_id) else {
+            return ProviderRuntimePolicy::serialized_browser();
+        };
+        let direct_capable = binding.transport_mode != BrowserTransportMode::BrowserOnly
+            && self.direct_adapter(provider_kind, binding).is_some();
+        if direct_capable {
+            ProviderRuntimePolicy::browserless_preferred()
+        } else {
+            ProviderRuntimePolicy::serialized_browser()
+        }
+    }
+
+    pub fn account_runtime_snapshot(
+        &self,
+        provider_id: &str,
+        provider_kind: &str,
+        account_id: &str,
+    ) -> AccountRuntimeSnapshot {
+        self.account_runtimes.snapshot_or_create(
+            provider_id,
+            account_id,
+            self.account_runtime_policy(provider_kind, account_id),
+        )
+    }
+
     pub fn reload(&self, config: BrowserProviderConfig) -> Result<(), BrowserProviderError> {
-        let mut guard = self
-            .config
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = config;
+        let previous = self.config_snapshot();
+        let removed = previous
+            .bindings
+            .keys()
+            .filter(|account_id| !config.bindings.contains_key(*account_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let changed = previous
+            .bindings
+            .keys()
+            .chain(config.bindings.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        {
+            let mut guard = self
+                .config
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = config;
+        }
+        for account_id in changed {
+            self.account_runtimes.bump_account_generation(&account_id);
+        }
+        for account_id in removed {
+            self.account_runtimes.stop_account(&account_id);
+        }
         Ok(())
     }
 
@@ -1434,6 +1501,36 @@ impl BrowserProviderRegistry {
         false
     }
 
+    async fn ensure_account_cdp_session_ready(
+        &self,
+        provider: &ProviderConfig,
+        account: &AccountConfig,
+        binding: &BrowserAccountBinding,
+    ) -> bool {
+        let policy = self.account_runtime_policy(&provider.kind, &account.id);
+        let session_id = binding.session.clone();
+        let browser_was_live = self.cdp_session_live(&session_id).await;
+        let result = self
+            .account_runtimes
+            .serialize_lifecycle(&provider.id, &account.id, policy, |_| async {
+                if self.cdp_session_live(&session_id).await {
+                    true
+                } else {
+                    self.ensure_cdp_session_ready(&session_id).await
+                }
+            })
+            .await;
+        match result {
+            Ok(ready) => ready,
+            Err(_) => {
+                if !browser_was_live {
+                    stop_browser_runtime_soon(session_id);
+                }
+                false
+            }
+        }
+    }
+
     async fn mark_direct_state_unsynced(
         &self,
         request: &BrowserAdapterRequest,
@@ -1710,7 +1807,8 @@ impl BrowserProviderRegistry {
             let browser_was_live =
                 safe_fallback_candidate && self.cdp_session_live(&binding.session).await;
             let safe_browser_fallback = if safe_fallback_candidate {
-                self.ensure_cdp_session_ready(&binding.session).await
+                self.ensure_account_cdp_session_ready(provider, account, &binding)
+                    .await
             } else {
                 false
             };
