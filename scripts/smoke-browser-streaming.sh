@@ -102,6 +102,22 @@ JSON=(-H "Content-Type: application/json")
 
 curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/browser-account-setup   "${AUTH[@]}" "${JSON[@]}"   -d '{"provider":"qwen","account_id":"qwen-stream","label":"Qwen Stream CI","priority":5}'   >/tmp/llmgateway-browser-streaming-create.json
 
+# This regression owns the headless UI/CDP streaming contract specifically.
+# P5 browser-fetch streaming is covered separately, so pin this account to
+# browser-only instead of allowing Auto to select browser_fetch.
+curl -fsS -X PATCH \
+  http://127.0.0.1:7331/_llmgateway/accounts/qwen-stream/transport \
+  "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"transport_policy":"browser-only"}' \
+  >/tmp/llmgateway-browser-streaming-transport.json
+python3 <<'PY'
+import json
+with open("/tmp/llmgateway-browser-streaming-transport.json", encoding="utf-8") as f:
+    transport = json.load(f)
+assert transport["desired_policy"] == "browser-only", transport
+assert transport["configured_mode"] == "browser-only", transport
+PY
+
 LAUNCH=$(curl -fsS -X POST   http://127.0.0.1:7331/_llmgateway/browser-sessions/qwen-stream/driver/launch   "${AUTH[@]}")
 BROWSER_PID=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["pid"] or "")')
 PROFILE_DIR=$(printf '%s' "$LAUNCH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["launch"]["profile_dir"])')
