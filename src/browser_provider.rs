@@ -1586,13 +1586,12 @@ impl BrowserProviderRegistry {
             return false;
         }
 
-        if provider_kind == "browser-http" && self.auth_material_available(&binding.session) {
+        let auth_material_available = self.auth_material_available(&binding.session);
+        if provider_kind == "browser-http" && auth_material_available {
             return true;
         }
 
-        if self.direct_adapter(provider_kind, &binding).is_some()
-            && self.auth_material_available(&binding.session)
-        {
+        if self.direct_adapter(provider_kind, &binding).is_some() && auth_material_available {
             let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
             if matches!(
                 diagnostics.status.as_str(),
@@ -1606,21 +1605,23 @@ impl BrowserProviderRegistry {
             Some(adapter) => adapter,
             None => return false,
         };
+        let background_recoverable = browser_runtime_available()
+            && browser_session_background_recoverable(
+                &session.status,
+                auth_material_available,
+            );
         if adapter.is_cdp() {
-            if !cdp_session_status_probeable(&session.status) {
+            if !cdp_session_status_probeable(&session.status) && !background_recoverable {
                 return false;
             }
             if self.cdp_session_live(&binding.session).await {
                 let diagnostics = self.adapter_diagnostics(provider_kind, account_id).await;
                 return diagnostics.status == "ready";
             }
-            return browser_runtime_available()
-                && browser_session_background_recoverable(&session.status);
+            return background_recoverable;
         }
 
-        session.status == "ready"
-            || (browser_runtime_available()
-                && browser_session_background_recoverable(&session.status))
+        session.status == "ready" || background_recoverable
     }
 
     async fn cdp_session_live(&self, session_id: &str) -> bool {
@@ -2095,15 +2096,18 @@ impl BrowserProviderRegistry {
 
         let direct_adapter = self.direct_adapter(&provider.kind, &binding).cloned();
         let tool_calls_requested = request_requires_tool_calls(body);
+        let auth_material_available = self.auth_material_available(&binding.session);
         let direct_snapshot_ready = direct_adapter
             .as_ref()
             .is_some_and(|adapter| !tool_calls_requested || adapter.supports_tool_calls())
-            && self.auth_material_available(&binding.session);
-        let auth_snapshot_ready = (provider.kind == "browser-http"
-            && self.auth_material_available(&binding.session))
-            || direct_snapshot_ready;
-        let background_recoverable =
-            browser_runtime_available() && browser_session_background_recoverable(&session.status);
+            && auth_material_available;
+        let auth_snapshot_ready =
+            (provider.kind == "browser-http" && auth_material_available) || direct_snapshot_ready;
+        let background_recoverable = browser_runtime_available()
+            && browser_session_background_recoverable(
+                &session.status,
+                auth_material_available,
+            );
         if !session.enabled
             || (session.status != "ready" && !auth_snapshot_ready && !background_recoverable)
         {
@@ -4725,8 +4729,12 @@ fn browser_runtime_available() -> bool {
         && chromium_driver_runtime::get().is_some_and(|driver| driver.enabled())
 }
 
-fn browser_session_background_recoverable(status: &str) -> bool {
+fn browser_session_background_recoverable(
+    status: &str,
+    auth_material_available: bool,
+) -> bool {
     matches!(status, "ready" | "degraded")
+        || (status == "stopped" && auth_material_available)
 }
 
 fn read_debugger_port(profile_dir: &str) -> Result<u16, BrowserProviderError> {
@@ -4985,18 +4993,34 @@ mod tests {
     }
 
     #[test]
-    fn only_ready_or_degraded_sessions_can_auto_start_headless() {
+    fn authenticated_stopped_sessions_can_auto_start_headless() {
         for status in ["ready", "degraded"] {
-            assert!(browser_session_background_recoverable(status), "{status}");
+            assert!(
+                browser_session_background_recoverable(status, false),
+                "{status}"
+            );
+            assert!(
+                browser_session_background_recoverable(status, true),
+                "{status}"
+            );
         }
+        assert!(browser_session_background_recoverable("stopped", true));
+        assert!(!browser_session_background_recoverable("stopped", false));
+
         for status in [
             "starting",
-            "stopped",
             "failed",
             "requires_attention",
             "login_required",
         ] {
-            assert!(!browser_session_background_recoverable(status), "{status}");
+            assert!(
+                !browser_session_background_recoverable(status, false),
+                "{status}"
+            );
+            assert!(
+                !browser_session_background_recoverable(status, true),
+                "{status}"
+            );
         }
     }
 
