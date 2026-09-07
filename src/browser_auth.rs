@@ -243,11 +243,6 @@ impl BrowserAuthVault {
         Ok(stored)
     }
 
-    pub fn store(&self, material: &BrowserAuthMaterial) -> Result<(), BrowserAuthVaultError> {
-        let current = self.current_generation(&material.session_id)?;
-        self.store_if_current(material, current).map(|_| ())
-    }
-
     fn store_material_unlocked(
         &self,
         material: &BrowserAuthMaterial,

@@ -17,10 +17,6 @@ pub fn get() -> Option<&'static Arc<BrowserAuthVault>> {
     VAULT.get()
 }
 
-pub fn current_generation(session_id: &str) -> Option<Result<u64, BrowserAuthVaultError>> {
-    get().map(|vault| vault.current_generation(session_id))
-}
-
 pub fn invalidate(session_id: &str) -> Option<Result<u64, BrowserAuthVaultError>> {
     get().map(|vault| vault.invalidate(session_id))
 }
