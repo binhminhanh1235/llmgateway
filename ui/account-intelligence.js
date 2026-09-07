@@ -54,13 +54,19 @@
       }
 
       const effectiveTransport = account.browser_transport?.effective_transport || null;
-      const directHttp = effectiveTransport === "direct-http";
+      const readiness = account.readiness || {};
+      const runtime = account.account_runtime || {};
+      const directHttp = effectiveTransport === "direct-http" || readiness.browser_direct_ready === true;
       const browserFallback = effectiveTransport === "browser-fallback";
+      const browserWarm = readiness.browser_running === true;
       const transportLabel = directHttp
         ? "Direct HTTP"
-        : (browserFallback ? "Browser fallback" : (account.transport === "browser" ? "Browser" : "API"));
+        : (browserFallback
+          ? "Browser fallback"
+          : (account.transport === "browser"
+            ? (browserWarm ? "Headless active" : "Browser cold")
+            : "API"));
       const state = classify(account, effectiveTransport);
-      const readiness = account.readiness || {};
       const session = account.browser_session;
       const adapter = account.browser_adapter;
       const credential = account.transport === "api"
@@ -72,12 +78,26 @@
       const routeCount = Number(readiness.route_count ?? (account.route_ids || []).length);
       const healthyRoutes = Number(readiness.healthy_route_count ?? routeCount);
       const routeText = routeCount ? `${healthyRoutes}/${routeCount} routes healthy` : "dynamic routes";
+      const inFlight = Number(runtime.in_flight ?? 0);
+      const queueDepth = Number(runtime.queue_depth ?? 0);
+      const concurrencyLimit = Number(runtime.concurrency_limit ?? 0);
+      const maxQueueDepth = Number(runtime.max_queue_depth ?? 0);
+      const runtimeText = queueDepth > 0
+        ? `Queue ${queueDepth}/${maxQueueDepth}`
+        : `In flight ${inFlight}/${concurrencyLimit}`;
+      const runtimeGeneration = Number(runtime.generation ?? 0);
+      const authGeneration = Number(account.browser_transport?.auth_generation ?? 0);
+      const generationText = account.transport === "browser"
+        ? `Runtime g${runtimeGeneration} · Auth g${authGeneration}`
+        : `Runtime g${runtimeGeneration}`;
 
       strip.innerHTML = `
         <span class="account-intel-chip transport-${escapeAttr(directHttp ? "direct-http" : account.transport)}">${escapeHtml(transportLabel)}</span>
         <span class="account-intel-chip state-${escapeAttr(state.level)}"><span class="account-intel-dot"></span>${escapeHtml(state.label)}</span>
         <span class="account-intel-detail">${escapeHtml(credential)}</span>
         ${adapterText ? `<span class="account-intel-detail">${escapeHtml(adapterText)}</span>` : ""}
+        <span class="account-intel-detail">${escapeHtml(runtimeText)}</span>
+        <span class="account-intel-detail">${escapeHtml(generationText)}</span>
         <span class="account-intel-detail">${escapeHtml(routeText)}</span>`;
 
       const reasons = Array.isArray(readiness.reasons) ? readiness.reasons.join(", ") : "";
@@ -89,11 +109,25 @@
 
   function classify(account, effectiveTransport = null) {
     const readiness = account.readiness || {};
+    const runtime = account.account_runtime || {};
     const status = readiness.effective_status || account.routing_state || "unavailable";
     const reasons = new Set(readiness.reasons || []);
 
     if (reasons.has("account_disabled") || !account.enabled) {
       return { level: "muted", label: "Disabled", note: "This account is disabled" };
+    }
+    if (runtime.admission_state === "draining") {
+      return { level: "warning", label: "Draining", note: "New work is paused while active requests finish" };
+    }
+    if (runtime.admission_state === "stopped") {
+      return { level: "muted", label: "Runtime stopped", note: "This account runtime is not admitting requests" };
+    }
+    if (Number(runtime.queue_depth || 0) > 0) {
+      return {
+        level: "warning",
+        label: "Queued",
+        note: `${runtime.queue_depth} request(s) waiting behind the account concurrency limit`,
+      };
     }
     if (status === "ready") {
       return {
@@ -106,7 +140,7 @@
     }
     if (status === "degraded") {
       if (reasons.has("quota_pressure")) return { level: "warning", label: "Quota pressure", note: "Still routable, but quota pressure is elevated" };
-      if (reasons.has("route_cooldown")) return { level: "warning", label: "Degraded", note: "One or more routes are cooling down" };
+      if (reasons.has("route_cooldown")) return { level: "warning", label: "Cooling down", note: "One or more routes are cooling down" };
       return { level: "warning", label: "Degraded", note: [...reasons].join(", ") || "Available with reduced confidence" };
     }
 
