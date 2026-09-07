@@ -1,0 +1,103 @@
+{
+  "headers": {
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": [
+      "mid-conversation-output-config-2026-07-01",
+      "mid-conversation-system-clear-at-2026-08-21, prompt-caching-2024-07-31"
+    ]
+  },
+  "body": {
+    "model": "deepseek-web/deepseek-web-default",
+    "max_tokens": 4096,
+    "stream": true,
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "stop_sequences": ["<END>"],
+    "system": [
+      {
+        "type": "text",
+        "text": "You are Claude Code. Work carefully and use tools when needed.",
+        "cache_control": {"type": "ephemeral"}
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Inspect src/lib.rs and explain the issue."}
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {"type": "text", "text": "I will inspect the file."},
+          {
+            "type": "tool_use",
+            "id": "toolu_fixture_read",
+            "name": "read_file",
+            "input": {"path": "src/lib.rs"}
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_fixture_read",
+            "content": [
+              {"type": "text", "text": "pub fn broken() { todo!() }"}
+            ]
+          }
+        ]
+      },
+      {
+        "role": "system",
+        "clear_at": "next_user_message",
+        "content": "Keep the next reply concise."
+      },
+      {
+        "role": "system",
+        "content": [],
+        "output_config": {"effort": "low"}
+      },
+      {
+        "role": "user",
+        "content": "Now propose the smallest safe fix."
+      }
+    ],
+    "tools": [
+      {
+        "name": "read_file",
+        "description": "Read a UTF-8 repository file",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {"type": "string"}
+          },
+          "required": ["path"]
+        },
+        "cache_control": {"type": "ephemeral"}
+      }
+    ],
+    "tool_choice": {
+      "type": "auto",
+      "disable_parallel_tool_use": true
+    },
+    "thinking": {
+      "type": "adaptive"
+    },
+    "output_config": {
+      "effort": "high"
+    },
+    "cache_control": {
+      "type": "ephemeral"
+    },
+    "metadata": {
+      "user_id": "claude-code-fixture"
+    },
+    "future_optional_beta": {
+      "enabled": true
+    }
+  }
+}
