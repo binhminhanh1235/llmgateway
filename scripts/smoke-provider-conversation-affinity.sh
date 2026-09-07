@@ -349,6 +349,19 @@ assert all(row[2] > 0 for row in rows), rows
 db.close()
 PY
 
+# P7: built-in virtual models must prefer the healthy browser candidate while
+# it is available, not just llmgateway-auto.
+for VIRTUAL_MODEL in llmgateway-best llmgateway-coding; do
+  EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain     "${AUTH[@]}" "${JSON[@]}"     -d "{\"model\":\"$VIRTUAL_MODEL\",\"body\":{\"messages\":[{\"role\":\"user\",\"content\":\"virtual model healthy browser\"}]}}")
+  printf '%s' "$EXPLAIN" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] == "gemini-affinity-route", x
+candidate=next(c for c in x["candidates"] if c["route_id"] == "gemini-affinity-route")
+assert candidate["eligible"] is True, candidate
+'
+done
+
 # P7: canonical local thread context must survive a provider/account switch.
 # Start on Gemini, disable that logical candidate, then continue the same thread
 # through the API fallback. The fake API encodes the number of received messages
@@ -360,6 +373,45 @@ grep -qi '^x-llmgateway-route: gemini-affinity-route' /tmp/affinity-c1.headers
 
 DISABLE_GEMINI=$(curl -fsS -X PATCH   http://127.0.0.1:7331/_llmgateway/browser-account-setup/gemini-affinity   "${AUTH[@]}" "${JSON[@]}" -d '{"enabled":false}')
 printf '%s' "$DISABLE_GEMINI" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["enabled"] is False, x'
+
+# P7: virtual-model continuity must reroute to the alternate logical candidate
+# instead of treating the browser provider failure as a model failure.
+for VIRTUAL_MODEL in llmgateway-best llmgateway-coding; do
+  EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain     "${AUTH[@]}" "${JSON[@]}"     -d "{\"model\":\"$VIRTUAL_MODEL\",\"body\":{\"messages\":[{\"role\":\"user\",\"content\":\"virtual model provider failover\"}]}}")
+  printf '%s' "$EXPLAIN" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] == "api-route", x
+gemini=next(c for c in x["candidates"] if c["route_id"] == "gemini-affinity-route")
+assert gemini["eligible"] is False, gemini
+assert "account_disabled" in gemini["exclusion_reasons"], gemini
+'
+done
+
+# P8: when every eligible logical candidate is unavailable, route explain must
+# return no selected route rather than looping through transports indefinitely.
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/accounts/api-account   "${AUTH[@]}" "${JSON[@]}" -d '{"enabled":false}' >/tmp/provider-runtime-disable-api.json
+python3 - /tmp/provider-runtime-disable-api.json <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1],encoding="utf-8"))
+assert x["enabled"] is False, x
+PY
+for VIRTUAL_MODEL in llmgateway-auto llmgateway-best llmgateway-coding; do
+  EXPLAIN=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain     "${AUTH[@]}" "${JSON[@]}"     -d "{\"model\":\"$VIRTUAL_MODEL\",\"body\":{\"messages\":[{\"role\":\"user\",\"content\":\"all candidates unavailable\"}]}}")
+  printf '%s' "$EXPLAIN" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] is None, x
+assert x["candidates"], x
+assert all(not candidate["eligible"] for candidate in x["candidates"]), x
+'
+done
+curl -fsS -X PATCH http://127.0.0.1:7331/_llmgateway/accounts/api-account   "${AUTH[@]}" "${JSON[@]}" -d '{"enabled":true}' >/tmp/provider-runtime-enable-api.json
+python3 - /tmp/provider-runtime-enable-api.json <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1],encoding="utf-8"))
+assert x["enabled"] is True, x
+PY
 
 curl -fsS -D /tmp/affinity-c2.headers -o /tmp/affinity-c2.json   -X POST "http://127.0.0.1:7331/v1/threads/$THREAD_C/messages"   "${AUTH[@]}" "${JSON[@]}"   -d '{"content":"canonical-after-failover","stream":false}'
 grep -qi '^x-llmgateway-route: api-route' /tmp/affinity-c2.headers
