@@ -559,6 +559,21 @@ impl BrowserProviderError {
     }
 }
 
+fn request_requires_tool_calls(body: &Value) -> bool {
+    let has_tools = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty());
+    let tools_disabled = body
+        .get("tool_choice")
+        .is_some_and(|choice| match choice {
+            Value::String(value) => value == "none",
+            Value::Object(object) => object.get("type").and_then(Value::as_str) == Some("none"),
+            _ => false,
+        });
+    has_tools && !tools_disabled
+}
+
 fn legacy_browser_provider_error(error: &BrowserProviderError) -> &BrowserProviderError {
     let mut current = error;
     while let BrowserProviderError::Classified { source, .. } = current {
@@ -681,6 +696,10 @@ pub trait BrowserProviderAdapter: Send + Sync {
     }
 
     fn supports_browser_fetch(&self) -> bool {
+        false
+    }
+
+    fn supports_tool_calls(&self) -> bool {
         false
     }
 
@@ -2077,8 +2096,11 @@ impl BrowserProviderRegistry {
         })?;
 
         let direct_adapter = self.direct_adapter(&provider.kind, &binding).cloned();
-        let direct_snapshot_ready =
-            direct_adapter.is_some() && self.auth_material_available(&binding.session);
+        let tool_calls_requested = request_requires_tool_calls(body);
+        let direct_snapshot_ready = direct_adapter
+            .as_ref()
+            .is_some_and(|adapter| !tool_calls_requested || adapter.supports_tool_calls())
+            && self.auth_material_available(&binding.session);
         let auth_snapshot_ready = (provider.kind == "browser-http"
             && self.auth_material_available(&binding.session))
             || direct_snapshot_ready;
@@ -3648,6 +3670,10 @@ impl BrowserProviderAdapter for CdpBrowserAdapter {
         self.spec.browser_fetch
     }
 
+    fn supports_tool_calls(&self) -> bool {
+        self.spec.builtin_script.is_some()
+    }
+
     async fn diagnose(
         &self,
         account_id: &str,
@@ -4987,6 +5013,22 @@ mod tests {
         assert!(!BrowserProviderRegistry::is_browser_kind(
             "openai-compatible"
         ));
+    }
+
+    #[test]
+    fn tool_requests_require_tool_capable_transport() {
+        assert!(request_requires_tool_calls(&json!({
+            "tools":[{"type":"function","function":{"name":"read_file"}}]
+        })));
+        assert!(request_requires_tool_calls(&json!({
+            "tools":[{"type":"function","function":{"name":"read_file"}}],
+            "tool_choice":"auto"
+        })));
+        assert!(!request_requires_tool_calls(&json!({
+            "tools":[{"type":"function","function":{"name":"read_file"}}],
+            "tool_choice":"none"
+        })));
+        assert!(!request_requires_tool_calls(&json!({"messages":[]})));
     }
 
     #[test]
