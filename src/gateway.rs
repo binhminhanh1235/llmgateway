@@ -364,9 +364,9 @@ impl Gateway {
         account: &AccountConfig,
     ) -> AccountRuntimeSnapshot {
         let policy = self.account_runtime_policy(provider, account);
-        let snapshot =
-            self.account_runtimes
-                .snapshot_or_create(&provider.id, &account.id, policy);
+        let snapshot = self
+            .account_runtimes
+            .snapshot_or_create(&provider.id, &account.id, policy);
         if account.enabled {
             snapshot
         } else {
