@@ -316,6 +316,16 @@ assert b["readiness"]["browser_ready"] is True, b
 assert b["readiness"]["browser_session_status"] == "ready", b
 '
 
+# P7: Qwen is a coding-capable member of llmgateway-coding.
+CODING_READY=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain   "${AUTH[@]}" "${JSON[@]}"   -d '{"model":"llmgateway-coding","body":{"messages":[{"role":"user","content":"coding browser healthy"}]}}')
+printf '%s' "$CODING_READY" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] == "qwen-ci-route", x
+q=next(c for c in x["candidates"] if c["route_id"] == "qwen-ci-route")
+assert q["eligible"] is True, q
+'
+
 curl -fsS -D /tmp/llmgateway-browser-account-ux-browser.headers   -o /tmp/llmgateway-browser-account-ux-browser.json   -X POST http://127.0.0.1:7331/v1/chat/completions   "${AUTH[@]}" "${JSON[@]}"   -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"browser hot route"}]}'
 grep -qi '^x-llmgateway-route: qwen-ci-route' /tmp/llmgateway-browser-account-ux-browser.headers
 python3 - /tmp/llmgateway-browser-account-ux-browser.json <<'PY'
@@ -338,6 +348,18 @@ printf '%s' "$DISABLE" | python3 -c 'import json,sys; x=json.load(sys.stdin); as
 
 curl -fsS -D /tmp/llmgateway-browser-account-ux-api.headers   -o /tmp/llmgateway-browser-account-ux-api.json   -X POST http://127.0.0.1:7331/v1/chat/completions   "${AUTH[@]}" "${JSON[@]}"   -d '{"model":"llmgateway-auto","stream":false,"messages":[{"role":"user","content":"fallback after disable"}]}'
 grep -qi '^x-llmgateway-route: api-route' /tmp/llmgateway-browser-account-ux-api.headers
+
+# P7: disabling the preferred Qwen account must keep llmgateway-coding alive
+# through the alternate API route.
+CODING_FALLBACK=$(curl -fsS -X POST http://127.0.0.1:7331/_llmgateway/routes/explain   "${AUTH[@]}" "${JSON[@]}"   -d '{"model":"llmgateway-coding","body":{"messages":[{"role":"user","content":"coding provider failover"}]}}')
+printf '%s' "$CODING_FALLBACK" | python3 -c '
+import json,sys
+x=json.load(sys.stdin)
+assert x["selected_route"] == "api-route", x
+q=next(c for c in x["candidates"] if c["route_id"] == "qwen-ci-route")
+assert q["eligible"] is False, q
+assert "account_disabled" in q["exclusion_reasons"], q
+'
 
 ENABLE=$(curl -fsS -X PATCH   http://127.0.0.1:7331/_llmgateway/browser-account-setup/qwen-ci   "${AUTH[@]}" "${JSON[@]}" -d '{"enabled":true}')
 printf '%s' "$ENABLE" | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x["enabled"] is True and x["restart_required"] is False, x'
