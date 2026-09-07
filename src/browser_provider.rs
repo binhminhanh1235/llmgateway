@@ -4727,8 +4727,7 @@ fn browser_runtime_available() -> bool {
 }
 
 fn browser_session_background_recoverable(status: &str, auth_material_available: bool) -> bool {
-    matches!(status, "ready" | "degraded")
-        || (status == "stopped" && auth_material_available)
+    matches!(status, "ready" | "degraded") || (status == "stopped" && auth_material_available)
 }
 
 fn read_debugger_port(profile_dir: &str) -> Result<u16, BrowserProviderError> {
