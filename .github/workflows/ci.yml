@@ -35,6 +35,7 @@ jobs:
       - run: node scripts/test-browser-adapter-fixtures.mjs
       - run: python3 -m unittest skills/llmgateway/tests/test_llmgateway_agent.py
       - run: bash -n scripts/live-browserless-acceptance.sh
+      - run: bash -n scripts/live-claude-code-compat.sh
       - run: bash -n scripts/live-gemini-model-selection.sh
       - run: bash -n scripts/live-qwen-browserless-acceptance.sh
       - run: bash -n scripts/live-mimo-browserless-acceptance.sh
