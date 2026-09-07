@@ -658,7 +658,7 @@ mod tests {
         });
         let (_, openai) = to_openai_request(&request).unwrap();
         assert_eq!(openai["messages"][1], json!({"role":"system","content":""}));
-        assert_eq!(openai["messages"][2]["content"][0]["text"], "turn two");
+        assert_eq!(openai["messages"][2]["content"], "turn two");
     }
 
     #[test]
