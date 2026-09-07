@@ -371,6 +371,13 @@ impl BrowserRuntimeSupervisor {
         self.lock_state().invalidate(session_id, Instant::now());
     }
 
+    pub fn is_running(&self, session_id: &str) -> bool {
+        self.lock_state()
+            .entries
+            .get(session_id)
+            .is_some_and(|entry| entry.running)
+    }
+
     pub fn acquire_lease(self: &Arc<Self>, session_id: &str) -> Option<BrowserRuntimeLease> {
         let token = self
             .lock_state()
