@@ -377,7 +377,16 @@ fn auth_material_equivalent(left: &BrowserAuthMaterial, right: &BrowserAuthMater
 
 fn normalized_auth_cookies(
     material: &BrowserAuthMaterial,
-) -> Vec<(String, String, String, String, u64, bool, bool, Option<String>)> {
+) -> Vec<(
+    String,
+    String,
+    String,
+    String,
+    u64,
+    bool,
+    bool,
+    Option<String>,
+)> {
     let mut cookies = material
         .cookies
         .iter()
