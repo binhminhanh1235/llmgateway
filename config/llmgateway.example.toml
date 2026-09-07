@@ -144,7 +144,9 @@ enabled = false
 startup_timeout_seconds = 15
 # v0.27 reconciles SQLite lifecycle state with the real Chromium/CDP runtime.
 # A previously-ready profile is safely relaunched after an unexpected browser crash.
-# Deliberately stopped / login-required / attention sessions are never auto-launched.
+# Browserless idle Chromium is suspended without changing session readiness. Authenticated stopped
+# sessions may be revived on demand for tool-capable fallback; login-required / attention / failed
+# sessions are never auto-launched.
 auto_recover = true
 reconcile_interval_seconds = 15
 extra_args = []
