@@ -21,7 +21,15 @@ use reqwest::{
     Client, RequestBuilder, Response,
 };
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, Weak,
+    },
+    time::Duration,
+};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 const DEEPSEEK_HOST: &str = "chat.deepseek.com";
@@ -34,9 +42,331 @@ const COMPLETION_PATH: &str = "/api/v0/chat/completion";
 const DEEPSEEK_ADAPTER_VERSION: &str = "experimental-1";
 const DEFAULT_CLIENT_VERSION: &str = "2.0.0";
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DeepSeekConversationKey {
+    provider_id: String,
+    account_id: String,
+    thread_id: String,
+}
+
+impl DeepSeekConversationKey {
+    fn new(provider_id: &str, account_id: &str, thread_id: Option<&str>) -> Self {
+        Self {
+            provider_id: provider_id.to_string(),
+            account_id: account_id.to_string(),
+            thread_id: thread_id.unwrap_or("__account__").to_string(),
+        }
+    }
+
+    fn from_request(request: &BrowserAdapterRequest) -> Self {
+        Self::new(
+            &request.provider.id,
+            &request.account.id,
+            request.thread_id.as_deref(),
+        )
+    }
+}
+
+#[derive(Default)]
+struct DeepSeekConversationRuntime {
+    slots: AsyncMutex<HashMap<DeepSeekConversationKey, Weak<DeepSeekConversationSlot>>>,
+}
+
+#[derive(Default)]
+struct DeepSeekConversationSlot {
+    lease: Arc<AsyncMutex<()>>,
+    epoch: AtomicU64,
+    dirty: AtomicBool,
+    active_leases: AtomicUsize,
+}
+
+struct DeepSeekConversationLease {
+    slot: Arc<DeepSeekConversationSlot>,
+    _guard: OwnedMutexGuard<()>,
+    epoch: u64,
+}
+
+impl DeepSeekConversationRuntime {
+    async fn acquire(&self, request: &BrowserAdapterRequest) -> DeepSeekConversationLease {
+        self.acquire_key(DeepSeekConversationKey::from_request(request))
+            .await
+    }
+
+    async fn acquire_key(&self, key: DeepSeekConversationKey) -> DeepSeekConversationLease {
+        let slot = {
+            let mut slots = self.slots.lock().await;
+            slots.retain(|_, slot| slot.strong_count() > 0);
+            if let Some(slot) = slots.get(&key).and_then(Weak::upgrade) {
+                slot
+            } else {
+                let slot = Arc::new(DeepSeekConversationSlot::default());
+                slots.insert(key, Arc::downgrade(&slot));
+                slot
+            }
+        };
+        let guard = slot.lease.clone().lock_owned().await;
+        let epoch = slot.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        slot.active_leases.fetch_add(1, Ordering::AcqRel);
+        DeepSeekConversationLease {
+            slot,
+            _guard: guard,
+            epoch,
+        }
+    }
+}
+
+impl DeepSeekConversationLease {
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    fn is_current(&self) -> bool {
+        self.slot.epoch.load(Ordering::Acquire) == self.epoch
+    }
+
+    fn synchronize_persisted_epoch(&mut self, persisted_epoch: u64) {
+        let target = persisted_epoch.saturating_add(1);
+        loop {
+            let current = self.slot.epoch.load(Ordering::Acquire);
+            if current >= target {
+                self.epoch = self.epoch.max(current);
+                return;
+            }
+            if self
+                .slot
+                .epoch
+                .compare_exchange_weak(current, target, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.epoch = target;
+                return;
+            }
+        }
+    }
+
+    fn advance_epoch(&mut self) -> u64 {
+        let epoch = self.slot.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.epoch = epoch;
+        epoch
+    }
+
+    fn mark_dirty(&self) {
+        if self.is_current() {
+            self.slot.dirty.store(true, Ordering::Release);
+        }
+    }
+
+    fn mark_clean(&self) {
+        if self.is_current() {
+            self.slot.dirty.store(false, Ordering::Release);
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.slot.dirty.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for DeepSeekConversationLease {
+    fn drop(&mut self) {
+        let previous = self.slot.active_leases.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
+}
+
+#[derive(Debug)]
+enum DeepSeekAttemptFailure {
+    Retryable(String),
+    Fatal(String),
+}
+
+impl DeepSeekAttemptFailure {
+    fn message(&self) -> &str {
+        match self {
+            Self::Retryable(message) | Self::Fatal(message) => message,
+        }
+    }
+
+    fn retryable_precommit(&self) -> bool {
+        matches!(self, Self::Retryable(_))
+    }
+}
+
+fn should_retry_fresh_session(
+    emitted_client_output: bool,
+    already_retried: bool,
+    failure: &DeepSeekAttemptFailure,
+) -> bool {
+    !emitted_client_output && !already_retried && failure.retryable_precommit()
+}
+
+async fn consume_deepseek_response(
+    response: Response,
+) -> Result<DeepSeekStreamState, DeepSeekAttemptFailure> {
+    let mut decoder = DeepSeekSseDecoder::default();
+    let mut state = DeepSeekStreamState::default();
+    let mut upstream = response.bytes_stream();
+    while let Some(chunk) = upstream.next().await {
+        let chunk = chunk.map_err(|error| {
+            DeepSeekAttemptFailure::Retryable(format!(
+                "upstream_stream_dropped: DeepSeek direct stream body error: {error}"
+            ))
+        })?;
+        let updates = decoder
+            .push(&chunk)
+            .map_err(DeepSeekAttemptFailure::Fatal)?;
+        for update in updates {
+            state
+                .apply(update)
+                .map_err(DeepSeekAttemptFailure::Fatal)?;
+        }
+    }
+    let updates = decoder.finish().map_err(DeepSeekAttemptFailure::Fatal)?;
+    for update in updates {
+        state
+            .apply(update)
+            .map_err(DeepSeekAttemptFailure::Fatal)?;
+    }
+    state
+        .validate_completion()
+        .map_err(DeepSeekAttemptFailure::Retryable)?;
+    Ok(state)
+}
+
+fn apply_stream_updates(
+    state: &mut DeepSeekStreamState,
+    updates: Vec<DeepSeekFrameUpdate>,
+) -> Result<Vec<(String, String)>, DeepSeekAttemptFailure> {
+    updates
+        .into_iter()
+        .map(|update| state.apply(update).map_err(DeepSeekAttemptFailure::Fatal))
+        .collect()
+}
+
+fn stream_delta_bytes(
+    completion_id: &str,
+    model: &str,
+    created: i64,
+    emitted_role: &mut bool,
+    output: String,
+    reasoning: String,
+) -> Bytes {
+    let mut delta = json!({});
+    if !*emitted_role {
+        *emitted_role = true;
+        delta["role"] = Value::String("assistant".into());
+    }
+    if !output.is_empty() {
+        delta["content"] = Value::String(output);
+    }
+    if !reasoning.is_empty() {
+        delta["reasoning_content"] = Value::String(reasoning);
+    }
+    let event = json!({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": Value::Null}]
+    });
+    Bytes::from(format!("data: {event}\n\n"))
+}
+
+struct DeepSeekTerminalGuard {
+    request: BrowserAdapterRequest,
+    chat_session_id: String,
+    lease: Option<DeepSeekConversationLease>,
+    finalized: bool,
+}
+
+impl DeepSeekTerminalGuard {
+    fn new(
+        request: BrowserAdapterRequest,
+        chat_session_id: String,
+        lease: DeepSeekConversationLease,
+    ) -> Self {
+        Self {
+            request,
+            chat_session_id,
+            lease: Some(lease),
+            finalized: false,
+        }
+    }
+
+    fn lease(&self) -> &DeepSeekConversationLease {
+        self.lease.as_ref().expect("DeepSeek lease is present")
+    }
+
+    fn session_id(&self) -> &str {
+        &self.chat_session_id
+    }
+
+    fn set_session_id(&mut self, chat_session_id: String) {
+        self.chat_session_id = chat_session_id;
+    }
+
+    fn advance_epoch(&mut self) -> u64 {
+        self.lease
+            .as_mut()
+            .expect("DeepSeek lease is present")
+            .advance_epoch()
+    }
+
+    async fn checkpoint_dirty(&mut self, reason: &str) -> Result<(), BrowserProviderError> {
+        let lease = self.lease();
+        lease.mark_dirty();
+        DeepSeekWebHttpAdapter::mark_conversation_dirty_state(
+            &self.request,
+            &self.chat_session_id,
+            lease.epoch(),
+            reason,
+        )
+        .await
+    }
+
+    async fn finalize_dirty(&mut self, reason: &str) -> Result<(), BrowserProviderError> {
+        self.checkpoint_dirty(reason).await?;
+        self.finalized = true;
+        Ok(())
+    }
+
+    fn finalize_clean(&mut self) {
+        self.lease().mark_clean();
+        self.finalized = true;
+    }
+}
+
+impl Drop for DeepSeekTerminalGuard {
+    fn drop(&mut self) {
+        if self.finalized {
+            return;
+        }
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        lease.mark_dirty();
+        let request = self.request.clone();
+        let chat_session_id = self.chat_session_id.clone();
+        let epoch = lease.epoch();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            drop(handle.spawn(async move {
+                let _ = DeepSeekWebHttpAdapter::mark_conversation_dirty_state(
+                    &request,
+                    &chat_session_id,
+                    epoch,
+                    "client_cancelled_or_stream_aborted",
+                )
+                .await;
+                drop(lease);
+            }));
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DeepSeekWebHttpAdapter {
     client: Client,
+    runtime: Arc<DeepSeekConversationRuntime>,
 }
 
 #[derive(Clone, Debug)]
@@ -486,7 +816,10 @@ impl DeepSeekWebHttpAdapter {
             .connect_timeout(Duration::from_secs(5))
             .build()
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            runtime: Arc::new(DeepSeekConversationRuntime::default()),
+        })
     }
 
     fn vault() -> Result<&'static Arc<BrowserAuthVault>, BrowserProviderError> {
@@ -782,6 +1115,7 @@ impl DeepSeekWebHttpAdapter {
     async fn native_conversation(
         &self,
         request: &BrowserAdapterRequest,
+        lease: &mut DeepSeekConversationLease,
     ) -> Result<Option<DeepSeekNativeConversation>, BrowserProviderError> {
         let Some(thread_id) = request.thread_id.as_deref() else {
             return Ok(None);
@@ -793,6 +1127,25 @@ impl DeepSeekWebHttpAdapter {
             .provider_conversation_state(thread_id, &request.provider.id, &request.account.id)
             .await
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+
+        if let Some(persisted_epoch) = state
+            .as_ref()
+            .and_then(|value| value.get("conversation_epoch"))
+            .and_then(Value::as_u64)
+        {
+            lease.synchronize_persisted_epoch(persisted_epoch);
+        }
+
+        if lease.is_dirty()
+            || state
+                .as_ref()
+                .and_then(|value| value.get("dirty"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            lease.mark_dirty();
+            return Ok(None);
+        }
 
         if state
             .as_ref()
@@ -957,7 +1310,11 @@ impl DeepSeekWebHttpAdapter {
         request_parent_id: Option<u32>,
         state: &DeepSeekStreamState,
         model: &DeepSeekModelSelection,
+        lease: &DeepSeekConversationLease,
     ) -> Result<(), BrowserProviderError> {
+        if !lease.is_current() {
+            return Ok(());
+        }
         let Some(thread_id) = request.thread_id.as_deref() else {
             return Ok(());
         };
@@ -980,7 +1337,7 @@ impl DeepSeekWebHttpAdapter {
                 &request.provider.id,
                 &request.account.id,
                 &json!({
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "transport": "deepseek-http",
                     "model_external_id": model.external_id,
                     "chat_session_id": chat_session_id,
@@ -988,8 +1345,59 @@ impl DeepSeekWebHttpAdapter {
                     "request_parent_id": request_parent_id,
                     "response_message_id": state.response_message_id,
                     "response_id": state.response_message_id,
-                    "next_parent_id": state.response_message_id
+                    "next_parent_id": state.response_message_id,
+                    "conversation_epoch": lease.epoch(),
+                    "dirty": false,
+                    "quarantined": false
                 }),
+            )
+            .await
+            .map_err(|error| BrowserProviderError::Transport(error.to_string()))
+    }
+
+    async fn mark_conversation_dirty_state(
+        request: &BrowserAdapterRequest,
+        chat_session_id: &str,
+        epoch: u64,
+        reason: &str,
+    ) -> Result<(), BrowserProviderError> {
+        let Some(thread_id) = request.thread_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(store) = conversation_runtime::get() else {
+            return Ok(());
+        };
+        let current = store
+            .provider_conversation_state(thread_id, &request.provider.id, &request.account.id)
+            .await
+            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        if current
+            .as_ref()
+            .and_then(|value| value.get("conversation_epoch"))
+            .and_then(Value::as_u64)
+            .is_some_and(|current_epoch| current_epoch > epoch)
+        {
+            return Ok(());
+        }
+        let mut next = current
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        next.insert("schema_version".into(), json!(2));
+        next.insert("transport".into(), json!("deepseek-http"));
+        next.insert("conversation_epoch".into(), json!(epoch));
+        next.insert("dirty".into(), json!(true));
+        next.insert("quarantined".into(), json!(true));
+        next.insert("dirty_reason".into(), json!(reason));
+        if !chat_session_id.trim().is_empty() {
+            next.insert("chat_session_id".into(), json!(chat_session_id));
+            next.insert("conversation_id".into(), json!(chat_session_id));
+        }
+        store
+            .upsert_provider_conversation_state(
+                thread_id,
+                &request.provider.id,
+                &request.account.id,
+                &Value::Object(next),
             )
             .await
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))
@@ -999,197 +1407,263 @@ impl DeepSeekWebHttpAdapter {
         &self,
         request: &BrowserAdapterRequest,
         response: Response,
-        chat_session_id: String,
-        request_parent_id: Option<u32>,
+        mut terminal: DeepSeekTerminalGuard,
+        mut request_parent_id: Option<u32>,
         model: DeepSeekModelSelection,
+        material: BrowserAuthMaterial,
+        access_token: String,
+        fresh_prompt: String,
     ) -> Result<Response, BrowserProviderError> {
-        let mut decoder = DeepSeekSseDecoder::default();
-        let mut state = DeepSeekStreamState::default();
-        let mut upstream = response.bytes_stream();
-        while let Some(chunk) = upstream.next().await {
-            let chunk =
-                chunk.map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-            for update in decoder
-                .push(&chunk)
-                .map_err(BrowserProviderError::Transport)?
-            {
-                state
-                    .apply(update)
-                    .map_err(BrowserProviderError::Transport)?;
+        let mut response = response;
+        let mut retried = false;
+        loop {
+            match consume_deepseek_response(response).await {
+                Ok(state) => {
+                    Self::persist_conversation_state(
+                        request,
+                        terminal.session_id(),
+                        request_parent_id,
+                        &state,
+                        &model,
+                        terminal.lease(),
+                    )
+                    .await?;
+                    terminal.finalize_clean();
+
+                    let mut message = json!({"role": "assistant", "content": state.output});
+                    if !state.reasoning.is_empty() {
+                        message["reasoning_content"] = Value::String(state.reasoning);
+                    }
+                    let body = json!({
+                        "id": format!("chatcmpl-{}", Uuid::new_v4()),
+                        "object": "chat.completion",
+                        "created": Utc::now().timestamp(),
+                        "model": request.route.model,
+                        "choices": [{
+                            "index": 0,
+                            "message": message,
+                            "finish_reason": "stop"
+                        }]
+                    });
+                    let response = HttpResponse::builder()
+                        .status(200)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(reqwest::Body::from(body.to_string()))
+                        .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+                    return Ok(reqwest::Response::from(response));
+                }
+                Err(failure) if should_retry_fresh_session(false, retried, &failure) => {
+                    terminal.checkpoint_dirty(failure.message()).await?;
+                    terminal.advance_epoch();
+                    let chat_session_id = self
+                        .create_session(request, &material, &access_token)
+                        .await?;
+                    terminal.set_session_id(chat_session_id.clone());
+                    request_parent_id = None;
+                    response = self
+                        .submit_completion(
+                            request,
+                            &material,
+                            &access_token,
+                            &chat_session_id,
+                            None,
+                            &fresh_prompt,
+                            &model,
+                        )
+                        .await?;
+                    retried = true;
+                }
+                Err(failure) => {
+                    let message = failure.message().to_string();
+                    terminal.finalize_dirty(&message).await?;
+                    return Err(BrowserProviderError::Transport(message));
+                }
             }
         }
-        for update in decoder.finish().map_err(BrowserProviderError::Transport)? {
-            state
-                .apply(update)
-                .map_err(BrowserProviderError::Transport)?;
-        }
-        state
-            .validate_completion()
-            .map_err(BrowserProviderError::Transport)?;
-        Self::persist_conversation_state(
-            request,
-            &chat_session_id,
-            request_parent_id,
-            &state,
-            &model,
-        )
-        .await?;
-
-        let mut message = json!({"role": "assistant", "content": state.output});
-        if !state.reasoning.is_empty() {
-            message["reasoning_content"] = Value::String(state.reasoning);
-        }
-        let body = json!({
-            "id": format!("chatcmpl-{}", Uuid::new_v4()),
-            "object": "chat.completion",
-            "created": Utc::now().timestamp(),
-            "model": request.route.model,
-            "choices": [{
-                "index": 0,
-                "message": message,
-                "finish_reason": "stop"
-            }]
-        });
-        let response = HttpResponse::builder()
-            .status(200)
-            .header(CONTENT_TYPE, "application/json")
-            .body(reqwest::Body::from(body.to_string()))
-            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-        Ok(reqwest::Response::from(response))
     }
 
     fn streaming_response(
         &self,
         request: &BrowserAdapterRequest,
         response: Response,
-        chat_session_id: String,
-        request_parent_id: Option<u32>,
+        mut terminal: DeepSeekTerminalGuard,
+        mut request_parent_id: Option<u32>,
         model_selection: DeepSeekModelSelection,
+        material: BrowserAuthMaterial,
+        access_token: String,
+        fresh_prompt: String,
     ) -> Result<Response, BrowserProviderError> {
+        let adapter = self.clone();
         let request = request.clone();
         let model = request.route.model.clone();
         let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
         let created = Utc::now().timestamp();
-        let mut upstream = response.bytes_stream();
 
         let stream = async_stream::stream! {
-            let mut decoder = DeepSeekSseDecoder::default();
-            let mut state = DeepSeekStreamState::default();
-            let mut emitted_role = false;
+            let mut response = response;
+            let mut retried = false;
 
-            while let Some(chunk) = upstream.next().await {
-                let chunk = match chunk {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        yield Err(std::io::Error::other(format!(
-                            "upstream_stream_dropped: DeepSeek direct stream body error: {error}"
-                        )));
-                        return;
-                    }
-                };
-                let updates = match decoder.push(&chunk) {
-                    Ok(updates) => updates,
-                    Err(error) => {
-                        yield Err(std::io::Error::other(error));
-                        return;
-                    }
-                };
-                for update in updates {
-                    let (output, reasoning) = match state.apply(update) {
-                        Ok(delta) => delta,
+            'attempt: loop {
+                let mut decoder = DeepSeekSseDecoder::default();
+                let mut state = DeepSeekStreamState::default();
+                let mut emitted_role = false;
+                let mut emitted_client_output = false;
+                let mut upstream = response.bytes_stream();
+                let mut failure: Option<DeepSeekAttemptFailure> = None;
+
+                while let Some(chunk) = upstream.next().await {
+                    let chunk = match chunk {
+                        Ok(chunk) => chunk,
                         Err(error) => {
-                            yield Err(std::io::Error::other(error));
-                            return;
+                            failure = Some(DeepSeekAttemptFailure::Retryable(format!(
+                                "upstream_stream_dropped: DeepSeek direct stream body error: {error}"
+                            )));
+                            break;
                         }
                     };
-                    if !output.is_empty() || !reasoning.is_empty() {
-                        let mut delta = json!({});
-                        if !emitted_role {
-                            emitted_role = true;
-                            delta["role"] = Value::String("assistant".into());
+                    let updates = match decoder.push(&chunk) {
+                        Ok(updates) => updates,
+                        Err(error) => {
+                            failure = Some(DeepSeekAttemptFailure::Fatal(error));
+                            break;
                         }
-                        if !output.is_empty() {
-                            delta["content"] = Value::String(output);
+                    };
+                    let deltas = match apply_stream_updates(&mut state, updates) {
+                        Ok(deltas) => deltas,
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
                         }
-                        if !reasoning.is_empty() {
-                            delta["reasoning_content"] = Value::String(reasoning);
+                    };
+                    for (output, reasoning) in deltas {
+                        if output.is_empty() && reasoning.is_empty() {
+                            continue;
                         }
-                        let event = json!({
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{"index": 0, "delta": delta, "finish_reason": Value::Null}]
-                        });
-                        yield Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {event}\n\n")));
+                        emitted_client_output = true;
+                        yield Ok::<Bytes, std::io::Error>(stream_delta_bytes(
+                            &completion_id,
+                            &model,
+                            created,
+                            &mut emitted_role,
+                            output,
+                            reasoning,
+                        ));
                     }
                 }
-            }
 
-            let updates = match decoder.finish() {
-                Ok(updates) => updates,
-                Err(error) => {
-                    yield Err(std::io::Error::other(error));
+                if failure.is_none() {
+                    match decoder.finish() {
+                        Ok(updates) => match apply_stream_updates(&mut state, updates) {
+                            Ok(deltas) => {
+                                for (output, reasoning) in deltas {
+                                    if output.is_empty() && reasoning.is_empty() {
+                                        continue;
+                                    }
+                                    emitted_client_output = true;
+                                    yield Ok(stream_delta_bytes(
+                                        &completion_id,
+                                        &model,
+                                        created,
+                                        &mut emitted_role,
+                                        output,
+                                        reasoning,
+                                    ));
+                                }
+                            }
+                            Err(error) => failure = Some(error),
+                        },
+                        Err(error) => {
+                            failure = Some(DeepSeekAttemptFailure::Fatal(error));
+                        }
+                    }
+                }
+
+                if failure.is_none() {
+                    if let Err(error) = state.validate_completion() {
+                        failure = Some(DeepSeekAttemptFailure::Retryable(error));
+                    }
+                }
+
+                if let Some(failure) = failure {
+                    if should_retry_fresh_session(emitted_client_output, retried, &failure) {
+                        if let Err(error) = terminal.checkpoint_dirty(failure.message()).await {
+                            yield Err(std::io::Error::other(error.to_string()));
+                            return;
+                        }
+                        terminal.advance_epoch();
+                        let chat_session_id = match adapter
+                            .create_session(&request, &material, &access_token)
+                            .await
+                        {
+                            Ok(chat_session_id) => chat_session_id,
+                            Err(error) => {
+                                yield Err(std::io::Error::other(error.to_string()));
+                                return;
+                            }
+                        };
+                        terminal.set_session_id(chat_session_id.clone());
+                        request_parent_id = None;
+                        response = match adapter
+                            .submit_completion(
+                                &request,
+                                &material,
+                                &access_token,
+                                &chat_session_id,
+                                None,
+                                &fresh_prompt,
+                                &model_selection,
+                            )
+                            .await
+                        {
+                            Ok(response) => response,
+                            Err(error) => {
+                                yield Err(std::io::Error::other(error.to_string()));
+                                return;
+                            }
+                        };
+                        retried = true;
+                        continue 'attempt;
+                    }
+
+                    let message = failure.message().to_string();
+                    if let Err(cleanup_error) = terminal.finalize_dirty(&message).await {
+                        yield Err(std::io::Error::other(format!(
+                            "{message}; DeepSeek dirty-state cleanup failed: {cleanup_error}"
+                        )));
+                    } else {
+                        yield Err(std::io::Error::other(message));
+                    }
                     return;
                 }
-            };
-            for update in updates {
-                let (output, reasoning) = match state.apply(update) {
-                    Ok(delta) => delta,
-                    Err(error) => {
-                        yield Err(std::io::Error::other(error));
-                        return;
-                    }
-                };
-                if !output.is_empty() || !reasoning.is_empty() {
-                    let mut delta = json!({});
-                    if !emitted_role {
-                        emitted_role = true;
-                        delta["role"] = Value::String("assistant".into());
-                    }
-                    if !output.is_empty() {
-                        delta["content"] = Value::String(output);
-                    }
-                    if !reasoning.is_empty() {
-                        delta["reasoning_content"] = Value::String(reasoning);
-                    }
-                    let event = json!({
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{"index": 0, "delta": delta, "finish_reason": Value::Null}]
-                    });
-                    yield Ok(Bytes::from(format!("data: {event}\n\n")));
+
+                if let Err(error) = Self::persist_conversation_state(
+                    &request,
+                    terminal.session_id(),
+                    request_parent_id,
+                    &state,
+                    &model_selection,
+                    terminal.lease(),
+                )
+                .await
+                {
+                    let message = error.to_string();
+                    let _ = terminal.finalize_dirty(&message).await;
+                    yield Err(std::io::Error::other(message));
+                    return;
                 }
-            }
+                terminal.finalize_clean();
 
-            if let Err(error) = state.validate_completion() {
-                yield Err(std::io::Error::other(error));
+                let final_event = json!({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                });
+                yield Ok(Bytes::from(format!("data: {final_event}\n\n")));
+                yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
                 return;
             }
-            if let Err(error) = Self::persist_conversation_state(
-                &request,
-                &chat_session_id,
-                request_parent_id,
-                &state,
-                &model_selection,
-            )
-            .await
-            {
-                yield Err(std::io::Error::other(error.to_string()));
-                return;
-            }
-
-            let final_event = json!({
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-            });
-            yield Ok(Bytes::from(format!("data: {final_event}\n\n")));
-            yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
         };
 
         let response = HttpResponse::builder()
@@ -1292,11 +1766,17 @@ impl BrowserProviderAdapter for DeepSeekWebHttpAdapter {
         request: BrowserAdapterRequest,
     ) -> Result<Response, BrowserProviderError> {
         let model = resolve_model(&request.account.id, &request.route.model)?;
-        let native = self.native_conversation(&request).await?;
-        let prompt = serialize_prompt(&request.body, native.is_some())?;
+        let fresh_prompt = serialize_prompt(&request.body, false)?;
         let (material, access_token) = self
             .access_token(&request.account.id, &request.binding)
             .await?;
+        let mut lease = self.runtime.acquire(&request).await;
+        let native = self.native_conversation(&request, &mut lease).await?;
+        let prompt = if native.is_some() {
+            serialize_prompt(&request.body, true)?
+        } else {
+            fresh_prompt.clone()
+        };
         let (chat_session_id, request_parent_id) = if let Some(native) = native {
             (native.chat_session_id, Some(native.response_message_id))
         } else {
@@ -1306,6 +1786,8 @@ impl BrowserProviderAdapter for DeepSeekWebHttpAdapter {
                 None,
             )
         };
+        let terminal =
+            DeepSeekTerminalGuard::new(request.clone(), chat_session_id.clone(), lease);
         let upstream = self
             .submit_completion(
                 &request,
@@ -1327,21 +1809,28 @@ impl BrowserProviderAdapter for DeepSeekWebHttpAdapter {
             self.streaming_response(
                 &request,
                 upstream,
-                chat_session_id,
+                terminal,
                 request_parent_id,
                 model,
+                material,
+                access_token,
+                fresh_prompt,
             )
         } else {
             self.buffered_response(
                 &request,
                 upstream,
-                chat_session_id,
+                terminal,
                 request_parent_id,
                 model,
+                material,
+                access_token,
+                fresh_prompt,
             )
             .await
         }
     }
+
 }
 
 fn deepseek_models() -> Vec<BrowserDiscoveredModel> {
@@ -1808,6 +2297,91 @@ mod tests {
         });
         assert_eq!(body["parent_message_id"], json!(2));
         assert!(body["parent_message_id"].is_u64());
+    }
+
+    #[tokio::test]
+    async fn conversation_lease_serializes_burst_for_same_account_thread() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::{sync::Barrier, time::sleep};
+
+        let runtime = Arc::new(DeepSeekConversationRuntime::default());
+        let key = DeepSeekConversationKey::new("provider", "account", Some("thread"));
+        let barrier = Arc::new(Barrier::new(8));
+        let in_section = Arc::new(AtomicUsize::new(0));
+        let max_in_section = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+
+        for _ in 0..8 {
+            let runtime = runtime.clone();
+            let key = key.clone();
+            let barrier = barrier.clone();
+            let in_section = in_section.clone();
+            let max_in_section = max_in_section.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let _lease = runtime.acquire_key(key).await;
+                let active = in_section.fetch_add(1, Ordering::AcqRel) + 1;
+                max_in_section.fetch_max(active, Ordering::AcqRel);
+                sleep(Duration::from_millis(10)).await;
+                in_section.fetch_sub(1, Ordering::AcqRel);
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(max_in_section.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn aborted_conversation_holder_releases_lease() {
+        use std::future::pending;
+        use tokio::{sync::oneshot, time::timeout};
+
+        let runtime = Arc::new(DeepSeekConversationRuntime::default());
+        let key = DeepSeekConversationKey::new("provider", "account", Some("thread"));
+        let task_runtime = runtime.clone();
+        let task_key = key.clone();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _lease = task_runtime.acquire_key(task_key).await;
+            let _ = entered_tx.send(());
+            pending::<()>().await;
+        });
+        entered_rx.await.unwrap();
+        task.abort();
+        let _ = task.await;
+
+        let lease = timeout(Duration::from_secs(1), runtime.acquire_key(key))
+            .await
+            .expect("lease must be released after cancellation");
+        assert_eq!(lease.slot.active_leases.load(Ordering::Acquire), 1);
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn conversation_epoch_advances_and_dirty_state_is_recoverable() {
+        let runtime = DeepSeekConversationRuntime::default();
+        let key = DeepSeekConversationKey::new("provider", "account", Some("thread"));
+        let mut lease = runtime.acquire_key(key).await;
+        let first_epoch = lease.epoch();
+        lease.mark_dirty();
+        assert!(lease.is_dirty());
+        let retry_epoch = lease.advance_epoch();
+        assert!(retry_epoch > first_epoch);
+        assert!(lease.is_current());
+        lease.mark_clean();
+        assert!(!lease.is_dirty());
+    }
+
+    #[test]
+    fn fresh_session_retry_is_only_allowed_before_client_visible_commit() {
+        let retryable = DeepSeekAttemptFailure::Retryable("empty stream".into());
+        let fatal = DeepSeekAttemptFailure::Fatal("schema mismatch".into());
+        assert!(should_retry_fresh_session(false, false, &retryable));
+        assert!(!should_retry_fresh_session(true, false, &retryable));
+        assert!(!should_retry_fresh_session(false, true, &retryable));
+        assert!(!should_retry_fresh_session(false, false, &fatal));
     }
 
     #[test]
