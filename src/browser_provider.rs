@@ -2101,10 +2101,7 @@ impl BrowserProviderRegistry {
         let auth_snapshot_ready =
             (provider.kind == "browser-http" && auth_material_available) || direct_snapshot_ready;
         let background_recoverable = browser_runtime_available()
-            && browser_session_background_recoverable(
-                &session.status,
-                auth_material_available,
-            );
+            && browser_session_background_recoverable(&session.status, auth_material_available);
         if !session.enabled
             || (session.status != "ready" && !auth_snapshot_ready && !background_recoverable)
         {
@@ -4988,20 +4985,27 @@ mod tests {
     #[test]
     fn authenticated_stopped_sessions_can_auto_start_headless() {
         for status in ["ready", "degraded"] {
-            assert!(browser_session_background_recoverable(status, false), "{status}");
-            assert!(browser_session_background_recoverable(status, true), "{status}");
+            assert!(
+                browser_session_background_recoverable(status, false),
+                "{status}"
+            );
+            assert!(
+                browser_session_background_recoverable(status, true),
+                "{status}"
+            );
         }
         assert!(browser_session_background_recoverable("stopped", true));
         assert!(!browser_session_background_recoverable("stopped", false));
 
-        for status in [
-            "starting",
-            "failed",
-            "requires_attention",
-            "login_required",
-        ] {
-            assert!(!browser_session_background_recoverable(status, false), "{status}");
-            assert!(!browser_session_background_recoverable(status, true), "{status}");
+        for status in ["starting", "failed", "requires_attention", "login_required"] {
+            assert!(
+                !browser_session_background_recoverable(status, false),
+                "{status}"
+            );
+            assert!(
+                !browser_session_background_recoverable(status, true),
+                "{status}"
+            );
         }
     }
 
