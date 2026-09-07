@@ -394,7 +394,7 @@ impl ChromiumDriver {
         {
             Ok(port) => port,
             Err(error) => {
-                let _ = self.stop(session_id).await;
+                let _ = self.stop_unlocked(session_id).await;
                 let _ = self
                     .sessions
                     .mark_failed(session_id, &error.to_string())
@@ -411,7 +411,7 @@ impl ChromiumDriver {
         }
 
         if let Err(error) = write_debugger_port(&devtools_file, debugger_port) {
-            let _ = self.stop(session_id).await;
+            let _ = self.stop_unlocked(session_id).await;
             let _ = self
                 .sessions
                 .mark_failed(session_id, &error.to_string())
@@ -737,6 +737,13 @@ impl ChromiumDriver {
         self.driver_session(session_id)?;
         let lifecycle_lock = self.session_lifecycle_lock(session_id).await;
         let _lifecycle_guard = lifecycle_lock.lock().await;
+        self.stop_unlocked(session_id).await
+    }
+
+    async fn stop_unlocked(
+        &self,
+        session_id: &str,
+    ) -> Result<ChromiumStatusView, ChromiumDriverError> {
         let before = self.status(session_id).await?;
         let mut process = {
             let mut processes = self.processes.lock().await;
