@@ -50,6 +50,15 @@ def expression_request(expression):
     except Exception:
         return {}
 
+def expression_context(expression):
+    match = re.search(r"const __context = (.*?);\n", expression, re.S)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(1))
+    except Exception:
+        return {}
+
 def write_marker(name, value="1"):
     try:
         with open(os.path.join(profile, name), "w", encoding="utf-8") as f:
@@ -149,8 +158,23 @@ def envelope_for(expression, target_id):
 
     if 'const __operation = "chat_stream_start"' in expression:
         request = expression_request(expression)
+        context = expression_context(expression)
+        browser_fetch = context.get("transport") == "browser_fetch"
         current_url = target_url_for(target_id)
         parsed_current = urlparse(current_url)
+        if browser_fetch and provider == "gemini" and context.get("thread_id_present"):
+            append_marker(
+                "browser-fetch-unsupported.log",
+                f"provider={provider} target={target_id} reason=native-thread",
+            )
+            return {
+                "meta": meta,
+                "probe": probe,
+                "error": {
+                    "code": "browser_fetch_unsupported",
+                    "message": "BROWSER_FETCH_UNSUPPORTED: fake Gemini native thread requires UI transport",
+                },
+            }
         if (
             provider == "gemini"
             and parsed_current.hostname == "gemini.google.com"
@@ -173,8 +197,12 @@ def envelope_for(expression, target_id):
                 "recovery-history-order.log",
                 f"target={target_id} url={current_url} baseline_at={baseline_at} submit_at={submit_at}",
             )
-        append_marker("browser-requests.jsonl", json.dumps({"target_id": target_id, "messages": request.get("messages", [])}, ensure_ascii=False))
-        append_marker("stream-debug.log", f"start provider={provider} target={target_id} url={current_url}")
+        request_log = "browser-fetch-requests.jsonl" if browser_fetch else "browser-requests.jsonl"
+        append_marker(request_log, json.dumps({"target_id": target_id, "messages": request.get("messages", [])}, ensure_ascii=False))
+        append_marker(
+            "stream-debug.log",
+            f"start provider={provider} target={target_id} url={current_url} transport={'browser_fetch' if browser_fetch else 'browser_runtime'}",
+        )
         prompt_text = json.dumps(request.get("messages", []), ensure_ascii=False)
         if "force-browser-stream-fallback" in prompt_text:
             write_marker("stream-start-failed", "forced")
@@ -196,6 +224,7 @@ def envelope_for(expression, target_id):
                 "provider": provider,
                 "target_id": target_id,
                 "force_poll_error": "force-browser-stream-poll-error" in prompt_text,
+                "browser_fetch": browser_fetch,
             }
         write_marker("stream-started", stream_id)
         return {
@@ -237,12 +266,14 @@ def envelope_for(expression, target_id):
             stream_provider = state["provider"]
             stream_target_id = state["target_id"]
             force_poll_error = state.get("force_poll_error", False)
+            browser_fetch = state.get("browser_fetch", False)
 
         write_marker("stream-poll-count", poll)
         completion_id = "chatcmpl_browser_stream"
         if poll == 1:
             append_marker("stream-debug.log", f"poll1-before provider={stream_provider} target={stream_target_id} url={target_url_for(stream_target_id)}")
-            ensure_native_conversation(stream_target_id, stream_provider)
+            if not browser_fetch:
+                ensure_native_conversation(stream_target_id, stream_provider)
             append_marker("stream-debug.log", f"poll1-after provider={stream_provider} target={stream_target_id} url={target_url_for(stream_target_id)}")
             events = [{
                 "id": completion_id,
@@ -302,6 +333,49 @@ def envelope_for(expression, target_id):
                 state["cancelled"] = True
         write_marker("stream-cancelled", stream_id or "missing")
         return {"meta": meta, "stream": {"cancelled": state is not None}}
+
+    if 'const __operation = "browser_fetch"' in expression:
+        request = expression_request(expression)
+        context = expression_context(expression)
+        if provider == "gemini" and context.get("thread_id_present"):
+            append_marker(
+                "browser-fetch-unsupported.log",
+                f"provider={provider} target={target_id} reason=native-thread",
+            )
+            return {
+                "meta": meta,
+                "probe": probe,
+                "error": {
+                    "code": "browser_fetch_unsupported",
+                    "message": "BROWSER_FETCH_UNSUPPORTED: fake Gemini native thread requires UI transport",
+                },
+            }
+        append_marker(
+            "browser-fetch-requests.jsonl",
+            json.dumps(
+                {"target_id": target_id, "messages": request.get("messages", [])},
+                ensure_ascii=False,
+            ),
+        )
+        return {
+            "meta": meta,
+            "probe": probe,
+            "result": {
+                "status": 200,
+                "content_type": "application/json",
+                "body": {
+                    "id": "chatcmpl_browser_fetch",
+                    "object": "chat.completion",
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "browser-fetch-ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
+                },
+            },
+        }
 
     if 'const __operation = "chat"' in expression:
         request = expression_request(expression)
