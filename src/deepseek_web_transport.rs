@@ -216,16 +216,12 @@ async fn consume_deepseek_response(
             .push(&chunk)
             .map_err(DeepSeekAttemptFailure::Fatal)?;
         for update in updates {
-            state
-                .apply(update)
-                .map_err(DeepSeekAttemptFailure::Fatal)?;
+            state.apply(update).map_err(DeepSeekAttemptFailure::Fatal)?;
         }
     }
     let updates = decoder.finish().map_err(DeepSeekAttemptFailure::Fatal)?;
     for update in updates {
-        state
-            .apply(update)
-            .map_err(DeepSeekAttemptFailure::Fatal)?;
+        state.apply(update).map_err(DeepSeekAttemptFailure::Fatal)?;
     }
     state
         .validate_completion()
@@ -1786,8 +1782,7 @@ impl BrowserProviderAdapter for DeepSeekWebHttpAdapter {
                 None,
             )
         };
-        let terminal =
-            DeepSeekTerminalGuard::new(request.clone(), chat_session_id.clone(), lease);
+        let terminal = DeepSeekTerminalGuard::new(request.clone(), chat_session_id.clone(), lease);
         let upstream = self
             .submit_completion(
                 &request,
@@ -1830,7 +1825,6 @@ impl BrowserProviderAdapter for DeepSeekWebHttpAdapter {
             .await
         }
     }
-
 }
 
 fn deepseek_models() -> Vec<BrowserDiscoveredModel> {
