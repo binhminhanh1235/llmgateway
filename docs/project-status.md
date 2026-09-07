@@ -413,6 +413,10 @@ Baseline:
 - P3 exact-head CI #1921 / run `34080215157` — PASS;
 - P3 Linux job `101613966406` — PASS full Rust checks/tests, complete routing/browser/streaming/execution smoke chain và Docker;
 - P3 Windows job `101613966584` — PASS check/tests/Chromium-driver smoke.
+- P4 Invisible Browser Runtime — DONE / VERIFIED tại `2f0ad33dac21c963df999247a3af4c018ce26e46`;
+- P4 exact-head CI #1941 / run `34087147618` — PASS;
+- P4 Linux job `101633248671` — PASS full Rust checks/tests, complete provider/browser/routing/execution smoke chain, invisible-runtime + CDP reliability acceptance và Docker;
+- P4 Windows job `101633248569` — PASS check/tests/Chromium-driver smoke.
 
 P1 hiện có provider-neutral runtime health graph theo account/transport/session, breaker CLOSED/OPEN/HALF_OPEN, bounded half-open probe, exponential cooldown + jitter, hysteresis và transport isolation. Browser-backed account có thể quarantine `direct_http` mà không tự động làm mất `browser_runtime` khỏe. Account-scoped failure vẫn giữ route cooldown compatibility.
 
@@ -420,7 +424,9 @@ P2 bổ sung provider-neutral per-account runtime ownership: bounded/deadline-aw
 
 P3 bổ sung deterministic DeepSeek conversation runtime ngay tại adapter boundary: provider/account/thread lease giữ tới terminal cleanup, monotonic conversation epoch, persisted dirty/quarantine state, fresh-session recovery đúng một lần trước client-visible commit, và tuyệt đối không retry sau khi content/reasoning đã được emit. Cancellation/aborted stream quarantine state trước khi nhả lease; request sau đó không reuse uncertain native conversation. Deterministic tests gồm burst serialization, cancellation release, epoch recovery, retry-safety và integrated 8-request empty-stream recovery fixture. P3 không đưa DeepSeek-specific parsing/state vào Gateway/Router và không bắt đầu P4.
 
-**P3 DONE / VERIFIED trên working branch only. P4 chưa bắt đầu.** Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
+P4 bổ sung provider-neutral invisible browser supervisor: normal execution dùng true headless Chromium on-demand, visible browser chỉ dành cho explicit login/re-auth/human action, successful verify đóng browser visible sau khi capture auth, lifecycle cold-start là single-flight và generation-safe, browser process có bounded global budget + idle/TTL/LRU reclaim, và active response/stream giữ lease tới terminal cleanup. CDP recovery ưu tiên reuse/reacquire target trước restart; stream wrapper giữ nguyên error source chain; legacy non-CDP `browser-http` không bị ép acquire Chromium lease. Deterministic P4 acceptance bao gồm invisible lifecycle, conversation affinity, ChatGPT recovery, streaming/cancellation, account UX, CDP reliability/restart reuse và full regression chain.
+
+**P4 DONE / VERIFIED trên working branch only. P5 chưa bắt đầu.** Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
 
 ## 18. Open work đáng chú ý
 

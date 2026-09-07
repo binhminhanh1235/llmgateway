@@ -160,13 +160,13 @@ Phase progress:
 - P1 Runtime Health Graph & Breakers — **DONE / VERIFIED on `feat/provider-runtime-fabric` only** at `9b351c707ed99fc3f3383987dc4f68bcd2eb1164`; CI #1908 / run `34074083568` PASS on Linux + Windows, including full Rust checks/tests, routing/browser/streaming/execution-trace smokes, Docker, scoped transport isolation, bounded HALF_OPEN probes, hysteresis, cooldown+jitter, and route-trace compatibility;
 - P2 Account Runtime & Admission Control — **DONE / VERIFIED on `feat/provider-runtime-fabric` only** at `c4a663797c015183fa2e4f06f387b119794d212b`; CI #1915 / run `34078114968` PASS on Linux + Windows, including full Rust checks/tests, routing/browser/streaming/execution smokes, Docker, bounded deadline-aware admission, typed overload rejection, adaptive per-account concurrency, single-flight lifecycle, generation safety, and account runtime diagnostics;
 - P3 DeepSeek Deterministic Stream State — **DONE / VERIFIED on `feat/provider-runtime-fabric` only** at `401adfc913813478b4f55403de6b7367a3aa553c`; CI #1921 / run `34080215157` PASS on Linux + Windows, including full Rust checks/tests, complete routing/browser/streaming/execution smokes, Docker, same-conversation lease serialization, monotonic epochs, dirty-session quarantine, cancellation cleanup, and one safe fresh-session recovery before client-visible commit;
-- P4 Invisible Browser Runtime;
+- P4 Invisible Browser Runtime — **DONE / VERIFIED on `feat/provider-runtime-fabric` only** at `2f0ad33dac21c963df999247a3af4c018ce26e46`; CI #1941 / run `34087147618` PASS on Linux + Windows, including full Rust checks/tests, complete provider/browser/routing/execution smokes, Docker, true headless on-demand lifecycle, hard visible-browser policy, single-flight cold start, active-lease protection, idle/TTL/LRU reclaim, CDP recovery and legacy non-CDP bridge compatibility;
 - P5 Browser Fetch Transport;
 - P6 Auth Generations & Gemini Hardening;
 - P7 Logical Route / Transport Separation & Virtual-Model Continuity;
 - P8 Chaos, Resource & Live Acceptance.
 
-**P0, P1, P2 and P3 are verified on the working branch, but the initiative remains NOT ON MAIN. Do not describe Provider Runtime Fabric as shipped on `main` until explicit merge approval. P4 has not started.**
+**P0, P1, P2, P3 and P4 are verified on the working branch, but the initiative remains NOT ON MAIN. Do not describe Provider Runtime Fabric as shipped on `main` until explicit merge approval. P5 has not started.**
 
 ---
 

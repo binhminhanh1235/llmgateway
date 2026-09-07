@@ -7,7 +7,7 @@ Working branch:
 `feat/provider-runtime-fabric`
 
 Status:
-`P0 + P1 + P2 + P3 DONE / VERIFIED — initiative remains NOT ON MAIN`
+`P0 + P1 + P2 + P3 + P4 DONE / VERIFIED — initiative remains NOT ON MAIN`
 
 ## 1. Goal
 
@@ -631,7 +631,7 @@ P3 verification — 2026-09-07:
 - deterministic coverage includes same-conversation burst serialization, cancellation lease release, epoch advance/recovery, no retry after commit, and an integrated 8-request burst fixture with exactly one simulated empty pre-commit recovery and no overlap;
 - the P3 diff from the P2 docs head is confined to `src/deepseek_web_transport.rs`; Gateway/Router/common execution remain provider-neutral and P4 was not started.
 
-**P3 is DONE / VERIFIED on the working branch only. P4 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
+**P3 is DONE / VERIFIED on the working branch only. P4 verification is recorded below. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
 
 ### P4 — Invisible Browser Runtime
 
@@ -653,6 +653,23 @@ Acceptance:
 - idle browser is reclaimed;
 - concurrent cold starts launch one browser only;
 - CDP reset can recover without unnecessary full restart where possible.
+
+P4 verification — 2026-09-07:
+
+- verified code head: `2f0ad33dac21c963df999247a3af4c018ce26e46`;
+- exact code-head tree: `72750b7d0979bfd2709b4d4175da7945f04fb0c8`;
+- full CI: #1941 / run `34087147618` — SUCCESS;
+- Linux job `101633248671` — SUCCESS, including `cargo fmt --all -- --check`, `RUSTFLAGS="-D warnings" cargo check --all-targets`, `cargo clippy --all-targets`, `cargo test --all-targets`, the complete provider/browser/routing/execution smoke chain, P4 invisible-runtime and CDP reliability acceptance, and Docker build;
+- Windows job `101633248569` — SUCCESS, including PowerShell validation, `cargo check --all-targets`, `cargo test --all-targets`, and Chromium-driver Windows smoke;
+- managed browser accounts are cold by default; gateway startup does not eagerly launch Chromium for configured accounts, while ordinary execution acquires an on-demand background lease and launches true headless Chromium;
+- automatic visible launch is hard-disabled for background traffic; explicit login/re-authentication remains interactive, and successful verify captures auth then closes the visible browser before normal work resumes;
+- per-session lifecycle is single-flight and generation-safe, concurrent cold requests share one startup, stream/cancellation lifetime holds the browser lease, and stale callbacks cannot mutate a newer runtime generation;
+- runtime resource controls enforce bounded running-browser count, idle/TTL reclaim and least-recently-used eviction without stopping a browser that still has an active execution lease;
+- CDP readiness/recovery reuses or reacquires a healthy target before escalating to a managed headless restart, and browser stream error sources survive the lease wrapper so downstream diagnostics retain the provider-boundary cause;
+- legacy non-CDP `browser-http` bridges remain outside Chromium lifecycle ownership, preserving the pre-P4 compatibility boundary;
+- deterministic smoke coverage verifies invisible post-login closure, headless cold start, conversation affinity, ChatGPT recovery, browser streaming/cancellation, account UX, CDP reliability/restart reuse, routing intelligence and the complete regression chain.
+
+**P4 is DONE / VERIFIED on the working branch only. P5 has not started. The Provider Runtime Fabric initiative remains NOT ON MAIN and must not be described as shipped.**
 
 ### P5 — Browser Fetch Transport
 
