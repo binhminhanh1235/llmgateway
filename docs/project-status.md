@@ -408,13 +408,19 @@ Baseline:
 - P2 Account Runtime & Admission Control — DONE / VERIFIED tại `c4a663797c015183fa2e4f06f387b119794d212b`;
 - P2 exact-head CI #1915 / run `34078114968` — PASS;
 - P2 Linux job `101608110226` — PASS full Rust checks/tests, routing/browser/streaming/execution smoke chain và Docker;
-- P2 Windows job `101608110289` — PASS check/tests/Chromium-driver smoke.
+- P2 Windows job `101608110289` — PASS check/tests/Chromium-driver smoke;
+- P3 DeepSeek Deterministic Stream State — DONE / VERIFIED tại `401adfc913813478b4f55403de6b7367a3aa553c`;
+- P3 exact-head CI #1921 / run `34080215157` — PASS;
+- P3 Linux job `101613966406` — PASS full Rust checks/tests, complete routing/browser/streaming/execution smoke chain và Docker;
+- P3 Windows job `101613966584` — PASS check/tests/Chromium-driver smoke.
 
 P1 hiện có provider-neutral runtime health graph theo account/transport/session, breaker CLOSED/OPEN/HALF_OPEN, bounded half-open probe, exponential cooldown + jitter, hysteresis và transport isolation. Browser-backed account có thể quarantine `direct_http` mà không tự động làm mất `browser_runtime` khỏe. Account-scoped failure vẫn giữ route cooldown compatibility.
 
 P2 bổ sung provider-neutral per-account runtime ownership: bounded/deadline-aware admission queue, in-flight/concurrency ownership, conservative provider capability policy, adaptive concurrency, response-lifetime permits, single-flight browser lifecycle, per-session Chromium serialization, generation-safe reload/reset/stop và structured account runtime diagnostics. Overload/rejection đi qua typed common failures để Gateway reroute/fail mà Router không cần biết provider-specific transport details. P2 tiếp tục tái sử dụng P1 `RuntimeHealthGraph` thay vì tạo health system cạnh tranh.
 
-**P2 DONE / VERIFIED trên working branch only. P3 chưa bắt đầu.** Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
+P3 bổ sung deterministic DeepSeek conversation runtime ngay tại adapter boundary: provider/account/thread lease giữ tới terminal cleanup, monotonic conversation epoch, persisted dirty/quarantine state, fresh-session recovery đúng một lần trước client-visible commit, và tuyệt đối không retry sau khi content/reasoning đã được emit. Cancellation/aborted stream quarantine state trước khi nhả lease; request sau đó không reuse uncertain native conversation. Deterministic tests gồm burst serialization, cancellation release, epoch recovery, retry-safety và integrated 8-request empty-stream recovery fixture. P3 không đưa DeepSeek-specific parsing/state vào Gateway/Router và không bắt đầu P4.
+
+**P3 DONE / VERIFIED trên working branch only. P4 chưa bắt đầu.** Không mô tả initiative này là shipped và không merge branch vào `main` nếu chưa có explicit approval.
 
 ## 18. Open work đáng chú ý
 
