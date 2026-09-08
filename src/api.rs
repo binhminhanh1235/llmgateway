@@ -9,7 +9,7 @@ use crate::{
 };
 use axum::{
     body::{to_bytes, Body},
-    extract::{Path, Request, State},
+    extract::{rejection::JsonRejection, Path, Request, State},
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         HeaderMap, HeaderValue, Response, StatusCode,
@@ -322,12 +322,43 @@ pub async fn openai_responses(
     }
 }
 
+pub const ANTHROPIC_MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ClaudeCodeRequestContext {
+    session_id: Option<String>,
+    agent_id: Option<String>,
+    parent_agent_id: Option<String>,
+}
+
+impl ClaudeCodeRequestContext {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        Self {
+            session_id: trimmed_header(headers, "x-claude-code-session-id"),
+            agent_id: trimmed_header(headers, "x-claude-code-agent-id"),
+            parent_agent_id: trimmed_header(headers, "x-claude-code-parent-agent-id"),
+        }
+    }
+
+    fn thread_id(&self) -> Option<String> {
+        self.session_id
+            .as_deref()
+            .map(|session_id| format!("claude-code:{session_id}"))
+    }
+}
+
 pub async fn anthropic_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response<Body> {
-    let access = match authorize_client(&headers, &state) {
+    let boundary_request_id = fresh_request_id();
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(rejection) => return anthropic_json_rejection(rejection, &boundary_request_id),
+    };
+
+    let access = match authorize_anthropic_client(&headers, &state, &boundary_request_id) {
         Ok(access) => access,
         Err(response) => return response,
     };
@@ -347,7 +378,12 @@ pub async fn anthropic_messages(
     ) {
         Ok(value) => value,
         Err(message) => {
-            return json_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message)
+            return anthropic_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                &message,
+                &boundary_request_id,
+            )
         }
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
@@ -355,7 +391,7 @@ pub async fn anthropic_messages(
         .client_policies
         .enforce_model(&access, &requested_model)
     {
-        return client_policy_error(error);
+        return anthropic_client_policy_error(error, &boundary_request_id);
     }
     let reservation = match state
         .client_policies
@@ -363,17 +399,78 @@ pub async fn anthropic_messages(
         .await
     {
         Ok(reservation) => reservation,
-        Err(error) => return client_policy_error(error),
+        Err(error) => return anthropic_client_policy_error(error, &boundary_request_id),
     };
 
-    match state
-        .gateway
-        .execute_openai_chat_for_client(&requested_model, &openai_body, access.policy())
-        .await
-    {
+    let claude = ClaudeCodeRequestContext::from_headers(&headers);
+    if claude.session_id.is_some() || claude.agent_id.is_some() || claude.parent_agent_id.is_some() {
+        tracing::debug!(
+            request_id = %boundary_request_id,
+            claude_code_session_id = claude.session_id.as_deref().unwrap_or(""),
+            claude_code_agent_id = claude.agent_id.as_deref().unwrap_or(""),
+            claude_code_parent_agent_id = claude.parent_agent_id.as_deref().unwrap_or(""),
+            "received Claude Code Anthropic request"
+        );
+    }
+
+    let compatibility_thread = if let Some(thread_id) = claude.thread_id() {
+        match state
+            .conversations
+            .ensure_compatibility_thread(&thread_id, "Claude Code session", &requested_model)
+            .await
+        {
+            Ok(context) => Some((thread_id, context.sticky_route)),
+            Err(error) => {
+                return anthropic_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "api_error",
+                    &error.to_string(),
+                    &boundary_request_id,
+                )
+            }
+        }
+    } else {
+        None
+    };
+
+    let routed = if let Some((thread_id, preferred_route)) = compatibility_thread.as_ref() {
+        state
+            .gateway
+            .execute_openai_chat_with_thread_affinity_for_client(
+                &requested_model,
+                &openai_body,
+                preferred_route.as_deref(),
+                thread_id,
+                access.policy(),
+            )
+            .await
+    } else {
+        state
+            .gateway
+            .execute_openai_chat_for_client(&requested_model, &openai_body, access.policy())
+            .await
+    };
+
+    match routed {
         Ok(routed) => {
             let route_id = routed.route.id.clone();
             let request_id = routed.request_id.clone();
+
+            if let Some((thread_id, _)) = compatibility_thread.as_ref() {
+                if let Err(error) = state
+                    .conversations
+                    .update_thread_route_and_model(thread_id, &route_id, &requested_model)
+                    .await
+                {
+                    return anthropic_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "api_error",
+                        &error.to_string(),
+                        &request_id,
+                    );
+                }
+            }
+
             if is_stream {
                 let response = state.gateway.trace_stream_response(
                     routed.response,
@@ -381,7 +478,11 @@ pub async fn anthropic_messages(
                     route_id.clone(),
                     routed.started_at,
                 );
-                let stream = anthropic::openai_stream_to_anthropic(response, requested_model);
+                let stream = anthropic::openai_stream_to_anthropic(
+                    response,
+                    requested_model,
+                    request_id.clone(),
+                );
                 response_with_route_and_request(
                     StatusCode::OK,
                     "text/event-stream",
@@ -399,7 +500,7 @@ pub async fn anthropic_messages(
                             .reconcile_usage(reservation.as_ref(), &openai)
                             .await
                         {
-                            return client_policy_error(error);
+                            return anthropic_client_policy_error(error, &request_id);
                         }
                         let anthropic = anthropic::from_openai_response(&openai, &requested_model);
                         json_response_with_request(
@@ -409,16 +510,17 @@ pub async fn anthropic_messages(
                             &request_id,
                         )
                     }
-                    Err(error) => gateway_error(GatewayError::Execution {
+                    Err(error) => anthropic_gateway_error(GatewayError::Execution {
                         request_id,
                         source: Box::new(GatewayError::Transport(error.to_string())),
                     }),
                 }
             }
         }
-        Err(error) => gateway_error(error),
+        Err(error) => anthropic_gateway_error(error),
     }
 }
+
 
 pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response<Body> {
     let access = match authorize_client(&headers, &state) {
@@ -673,6 +775,272 @@ fn normalize_json_rejection_message(raw: &str) -> String {
     }
     format!("Invalid request JSON: {raw}")
 }
+
+fn trimmed_header(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn fresh_request_id() -> String {
+    format!("req_{}", Uuid::new_v4().simple())
+}
+
+fn authorize_anthropic_client(
+    headers: &HeaderMap,
+    state: &AppState,
+    request_id: &str,
+) -> Result<ClientAccess, Response<Body>> {
+    let Some(presented) = presented_api_key(headers) else {
+        return Err(anthropic_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "missing llmgateway API key",
+            request_id,
+        ));
+    };
+    state
+        .client_policies
+        .authenticate(presented)
+        .map_err(|error| anthropic_client_policy_error(error, request_id))
+}
+
+fn anthropic_json_rejection(rejection: JsonRejection, request_id: &str) -> Response<Body> {
+    let status = rejection.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return anthropic_error(
+            status,
+            "request_too_large",
+            "request body exceeds the 32 MB Anthropic Messages limit",
+            request_id,
+        );
+    }
+    let message = normalize_json_rejection_message(&rejection.body_text());
+    anthropic_error(
+        status,
+        "invalid_request_error",
+        &message,
+        request_id,
+    )
+}
+
+fn anthropic_client_policy_error(
+    error: ClientPolicyError,
+    request_id: &str,
+) -> Response<Body> {
+    match error {
+        ClientPolicyError::Unauthorized => anthropic_error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "invalid llmgateway API key",
+            request_id,
+        ),
+        ClientPolicyError::Forbidden(message) => anthropic_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            &message,
+            request_id,
+        ),
+        ClientPolicyError::BudgetExceeded(message) => anthropic_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_error",
+            &message,
+            request_id,
+        ),
+        ClientPolicyError::MissingEnv(message) => anthropic_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            &format!(
+                "configured client credential environment variable '{message}' is unavailable"
+            ),
+            request_id,
+        ),
+        ClientPolicyError::Database(error) => anthropic_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            &error.to_string(),
+            request_id,
+        ),
+        ClientPolicyError::Io(error) => anthropic_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            &error.to_string(),
+            request_id,
+        ),
+    }
+}
+
+fn anthropic_gateway_error(error: GatewayError) -> Response<Body> {
+    let mut request_id = None;
+    let mut current = error;
+    loop {
+        current = match current {
+            GatewayError::Execution {
+                request_id: id,
+                source,
+            } => {
+                request_id = Some(id);
+                *source
+            }
+            GatewayError::Classified { source, .. } => *source,
+            GatewayError::NoRoute(message) => {
+                return anthropic_error_with_optional_request(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    &message,
+                    request_id,
+                )
+            }
+            GatewayError::MissingCredential(message) => {
+                return anthropic_error_with_optional_request(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "api_error",
+                    &message,
+                    request_id,
+                )
+            }
+            GatewayError::InvalidConfig(message) => {
+                return anthropic_error_with_optional_request(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "api_error",
+                    &message,
+                    request_id,
+                )
+            }
+            GatewayError::ClientPolicyDenied(message) => {
+                return anthropic_error_with_optional_request(
+                    StatusCode::FORBIDDEN,
+                    "permission_error",
+                    &message,
+                    request_id,
+                )
+            }
+            GatewayError::Transport(message) => {
+                return anthropic_error_with_optional_request(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    &message,
+                    request_id,
+                )
+            }
+            GatewayError::BrowserSessionUnavailable(message) => {
+                return anthropic_error_with_optional_request(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "api_error",
+                    &message,
+                    request_id,
+                )
+            }
+            GatewayError::BrowserTransport(message) => {
+                return anthropic_error_with_optional_request(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    &message,
+                    request_id,
+                )
+            }
+            GatewayError::BrowserAdapterIncompatible(message) => {
+                let message = capability_rejected_message(&message);
+                return anthropic_error_with_optional_request(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    &message,
+                    request_id,
+                );
+            }
+            GatewayError::ModelBindingConflict(message) => {
+                return anthropic_error_with_optional_request(
+                    StatusCode::CONFLICT,
+                    "invalid_request_error",
+                    &message,
+                    request_id,
+                )
+            }
+            GatewayError::BrowserModelUnavailable(message) => {
+                let message = capability_rejected_message(&message);
+                return anthropic_error_with_optional_request(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    &message,
+                    request_id,
+                );
+            }
+            GatewayError::BrowserModelRecipeStale(message) => {
+                return anthropic_error_with_optional_request(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    &message,
+                    request_id,
+                )
+            }
+            GatewayError::Upstream { status, body } => {
+                return anthropic_error_with_optional_request(
+                    status,
+                    anthropic_error_type_for_status(status),
+                    &body,
+                    request_id,
+                )
+            }
+        };
+    }
+}
+
+fn anthropic_error_type_for_status(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        529 => "overloaded_error",
+        _ => "api_error",
+    }
+}
+
+fn capability_rejected_message(message: &str) -> String {
+    if message.contains("capability_rejected:") {
+        message.to_string()
+    } else {
+        format!("capability_rejected: {message}")
+    }
+}
+
+fn anthropic_error_with_optional_request(
+    status: StatusCode,
+    kind: &str,
+    message: &str,
+    request_id: Option<String>,
+) -> Response<Body> {
+    let request_id = request_id.unwrap_or_else(fresh_request_id);
+    anthropic_error(status, kind, message, &request_id)
+}
+
+fn anthropic_error(
+    status: StatusCode,
+    kind: &str,
+    message: &str,
+    request_id: &str,
+) -> Response<Body> {
+    response_with_route_and_request(
+        status,
+        "application/json",
+        Body::from(
+            json!({
+                "type":"error",
+                "error":{"type":kind,"message":message},
+                "request_id":request_id
+            })
+            .to_string(),
+        ),
+        "",
+        request_id,
+    )
+}
+
 
 pub(crate) fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), Response<Body>> {
     if presented_api_key(headers) == Some(expected) {
@@ -938,7 +1306,8 @@ fn insert_request_id(response: &mut Response<Body>, request_id: &str) {
         if let Ok(value) = HeaderValue::from_str(request_id) {
             response
                 .headers_mut()
-                .insert("x-llmgateway-request-id", value);
+                .insert("x-llmgateway-request-id", value.clone());
+            response.headers_mut().insert("request-id", value);
         }
     }
 }
@@ -1209,4 +1578,103 @@ models = ["p1/model-disabled"]
         pool.close().await;
         let _ = fs::remove_file(&temp_db);
     }
+
+    #[test]
+    fn claude_code_headers_define_session_affinity_without_body_parsing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-claude-code-session-id",
+            HeaderValue::from_static("session-a"),
+        );
+        headers.insert(
+            "x-claude-code-agent-id",
+            HeaderValue::from_static("agent-b"),
+        );
+        headers.insert(
+            "x-claude-code-parent-agent-id",
+            HeaderValue::from_static("agent-parent"),
+        );
+        let context = ClaudeCodeRequestContext::from_headers(&headers);
+        assert_eq!(context.thread_id().as_deref(), Some("claude-code:session-a"));
+        assert_eq!(context.agent_id.as_deref(), Some("agent-b"));
+        assert_eq!(context.parent_agent_id.as_deref(), Some("agent-parent"));
+
+        let mut other = headers.clone();
+        other.insert(
+            "x-claude-code-session-id",
+            HeaderValue::from_static("session-b"),
+        );
+        assert_ne!(
+            context.thread_id(),
+            ClaudeCodeRequestContext::from_headers(&other).thread_id()
+        );
+    }
+
+    #[tokio::test]
+    async fn compatibility_threads_keep_sessions_isolated_and_sticky() {
+        let temp_db = format!("/tmp/llmgateway-claude-affinity-{}.db", Uuid::new_v4());
+        let config = Arc::new(
+            AppConfig::parse(&format!(
+                r#"
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+key_env = "LLMGATEWAY_API_KEY"
+default_model = "model-a"
+
+[storage]
+database_url = "sqlite://{temp_db}"
+"#
+            ))
+            .unwrap(),
+        );
+        let store = ConversationStore::connect(config).await.unwrap();
+        let a = store
+            .ensure_compatibility_thread("claude-code:a", "Claude Code session", "model-a")
+            .await
+            .unwrap();
+        let b = store
+            .ensure_compatibility_thread("claude-code:b", "Claude Code session", "model-a")
+            .await
+            .unwrap();
+        assert_eq!(a.sticky_route, None);
+        assert_eq!(b.sticky_route, None);
+
+        store
+            .update_thread_route_and_model("claude-code:a", "route-a", "model-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.context("claude-code:a").await.unwrap().sticky_route.as_deref(),
+            Some("route-a")
+        );
+        assert_eq!(
+            store.context("claude-code:b").await.unwrap().sticky_route,
+            None
+        );
+        let _ = fs::remove_file(&temp_db);
+    }
+
+    #[test]
+    fn anthropic_errors_preserve_status_and_recovery_wording() {
+        let response = anthropic_gateway_error(GatewayError::Execution {
+            request_id: "req_529".into(),
+            source: Box::new(GatewayError::Upstream {
+                status: StatusCode::from_u16(529).unwrap(),
+                body: "overloaded: retry this request".into(),
+            }),
+        });
+        assert_eq!(response.status().as_u16(), 529);
+        assert_eq!(
+            response.headers().get("request-id").unwrap(),
+            "req_529"
+        );
+
+        let capability =
+            anthropic_gateway_error(GatewayError::BrowserAdapterIncompatible("tools unsupported".into()));
+        assert_eq!(capability.status(), StatusCode::BAD_GATEWAY);
+    }
+
 }
