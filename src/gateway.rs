@@ -42,6 +42,7 @@ pub struct Gateway {
     pub execution_traces: Arc<ExecutionTraceStore>,
     account_runtimes: Arc<AccountRuntimeRegistry>,
     client: Client,
+    streaming_client: Client,
 }
 
 pub struct RoutedResponse {
@@ -330,6 +331,10 @@ impl Gateway {
             .timeout(Duration::from_secs(600))
             .build()
             .map_err(|error| GatewayError::Transport(error.to_string()))?;
+        let streaming_client = Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|error| GatewayError::Transport(error.to_string()))?;
         let router = Router::with_runtime_health(
             config.clone(),
             live_config.clone(),
@@ -343,6 +348,7 @@ impl Gateway {
             execution_traces,
             account_runtimes,
             client,
+            streaming_client,
         })
     }
 
@@ -539,12 +545,30 @@ impl Gateway {
         preferred_route: Option<&str>,
         thread_id: &str,
     ) -> Result<RoutedResponse, GatewayError> {
+        self.execute_openai_chat_with_thread_affinity_for_client(
+            requested_model,
+            body,
+            preferred_route,
+            thread_id,
+            None,
+        )
+        .await
+    }
+
+    pub async fn execute_openai_chat_with_thread_affinity_for_client(
+        &self,
+        requested_model: &str,
+        body: &Value,
+        preferred_route: Option<&str>,
+        thread_id: &str,
+        client_policy: Option<&ClientPolicyConfig>,
+    ) -> Result<RoutedResponse, GatewayError> {
         self.execute_openai_chat_with_context(
             requested_model,
             body,
             preferred_route,
             Some(thread_id),
-            None,
+            client_policy,
         )
         .await
     }
@@ -1209,7 +1233,12 @@ impl Gateway {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         apply_auth(&mut headers, account, &key)?;
 
-        self.client
+        let client = if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
+            &self.streaming_client
+        } else {
+            &self.client
+        };
+        client
             .post(url)
             .headers(headers)
             .json(&upstream_body)
