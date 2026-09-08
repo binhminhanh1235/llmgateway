@@ -873,15 +873,16 @@ mod tests {
         let ping = stream.next().await.expect("ping").unwrap();
         let ping = String::from_utf8_lossy(&ping);
         assert!(ping.contains("event: ping"));
-        assert!(ping.contains("\\"type\\":\\"ping\\""));
+        assert!(ping.contains(r#"\"type\":\"ping\""#));
     }
 
     #[tokio::test]
     async fn terminal_finish_reason_does_not_require_done_frame() {
         let upstream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
-            Bytes::from(
-                "data: {\\"choices\\":[{\\"delta\\":{\\"content\\":\\"done\\"},\\"finish_reason\\":\\"stop\\"}]}\\n\\n",
-            ),
+            Bytes::from(concat!(
+                r#"data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}"#,
+                "\n\n",
+            )),
         )]);
         let events = openai_stream_to_anthropic_inner(
             upstream,
@@ -902,7 +903,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_or_truncated_stream_errors_without_message_stop() {
         let upstream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
-            Bytes::from("data: {\\"choices\\":["),
+            Bytes::from(r#"data: {"choices":["#),
         )]);
         let events = openai_stream_to_anthropic_inner(
             upstream,
@@ -917,7 +918,7 @@ mod tests {
             .map(|event| String::from_utf8_lossy(&event.unwrap()).into_owned())
             .collect::<String>();
         assert!(rendered.contains("event: error"));
-        assert!(rendered.contains("\\"request_id\\":\\"req_truncated\\""));
+        assert!(rendered.contains(r#"\"request_id\":\"req_truncated\""#));
         assert!(!rendered.contains("event: message_stop"));
     }
 
