@@ -64,6 +64,18 @@ pub async fn openai_chat(
             .to_string()
     };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let claude = ClaudeCodeRequestContext::from_headers(&headers);
+    let claude_agentic_tool_loop = claude.session_id.is_some()
+        && openai_body
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| !tools.is_empty())
+        && openai_body.get("tool_choice").and_then(Value::as_str) == Some("auto");
+    if claude_agentic_tool_loop {
+        if let Some(object) = openai_body.as_object_mut() {
+            object.insert("llmgateway_agentic_tool_loop".into(), Value::Bool(true));
+        }
+    }
     if let Err(error) = state
         .client_policies
         .enforce_model(&access, &requested_model)
@@ -402,7 +414,6 @@ pub async fn anthropic_messages(
         Err(error) => return anthropic_client_policy_error(error, &boundary_request_id),
     };
 
-    let claude = ClaudeCodeRequestContext::from_headers(&headers);
     if claude.session_id.is_some() || claude.agent_id.is_some() || claude.parent_agent_id.is_some() {
         tracing::debug!(
             request_id = %boundary_request_id,
