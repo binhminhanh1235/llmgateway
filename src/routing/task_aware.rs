@@ -23,6 +23,7 @@ pub struct TaskProfile {
     pub reasoning: bool,
     pub long_context: bool,
     pub simple_chat: bool,
+    pub agentic_tools: bool,
     pub explicit: bool,
     pub signals: Vec<String>,
 }
@@ -57,6 +58,11 @@ pub fn classify(body: Option<&Value>, config: &RoutingConfig) -> TaskProfile {
         .get("tools")
         .and_then(Value::as_array)
         .is_some_and(|tools| !tools.is_empty());
+    let agentic_tools = has_tools
+        && body
+            .get("llmgateway_agentic_tool_loop")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
     let mut signals = Vec::new();
     let explicit_kind = body
@@ -90,6 +96,9 @@ pub fn classify(body: Option<&Value>, config: &RoutingConfig) -> TaskProfile {
     if simple_chat {
         signals.push("small_simple_request".to_string());
     }
+    if agentic_tools {
+        signals.push("agentic_tool_loop".to_string());
+    }
 
     let explicit = explicit_kind.is_some();
     let (kind, coding, reasoning, long_context, simple_chat) = match explicit_kind {
@@ -118,6 +127,7 @@ pub fn classify(body: Option<&Value>, config: &RoutingConfig) -> TaskProfile {
         reasoning,
         long_context,
         simple_chat,
+        agentic_tools,
         explicit,
         signals,
     }
@@ -157,12 +167,31 @@ pub fn route_fit(
     let mut raw_adjustment = 0i32;
     let max_bonus = config.task_fit_max_bonus.max(0);
     let mismatch_penalty = config.task_mismatch_penalty.max(0);
+    let general_capability_bonus = if profile.agentic_tools {
+        (max_bonus / 2).max(1)
+    } else {
+        max_bonus
+    };
+
+    if profile.agentic_tools {
+        if let Some(capability) = first_matching_capability(
+            &capabilities,
+            &[
+                "claude-code-tool-loop-verified",
+                "agentic-tool-loop-verified",
+                "autonomous-tools",
+            ],
+        ) {
+            raw_adjustment = raw_adjustment.saturating_sub(max_bonus);
+            push_unique(&mut snapshot.matched_capabilities, capability);
+        }
+    }
 
     if profile.coding {
         if let Some(capability) =
             first_matching_capability(&capabilities, &["coding", "code", "developer"])
         {
-            raw_adjustment = raw_adjustment.saturating_sub(max_bonus);
+            raw_adjustment = raw_adjustment.saturating_sub(general_capability_bonus);
             push_unique(&mut snapshot.matched_capabilities, capability);
         }
     }
@@ -171,7 +200,7 @@ pub fn route_fit(
         if let Some(capability) =
             first_matching_capability(&capabilities, &["reasoning", "deep-reasoning"])
         {
-            raw_adjustment = raw_adjustment.saturating_sub(max_bonus);
+            raw_adjustment = raw_adjustment.saturating_sub(general_capability_bonus);
             push_unique(&mut snapshot.matched_capabilities, capability);
         }
     }
@@ -180,7 +209,7 @@ pub fn route_fit(
         if let Some(capability) =
             first_matching_capability(&capabilities, &["long-context", "large-context"])
         {
-            raw_adjustment = raw_adjustment.saturating_sub(max_bonus);
+            raw_adjustment = raw_adjustment.saturating_sub(general_capability_bonus);
             push_unique(&mut snapshot.matched_capabilities, capability);
         } else if snapshot.context_sufficient == Some(true) {
             raw_adjustment = raw_adjustment.saturating_sub((max_bonus / 2).max(1));
@@ -191,7 +220,7 @@ pub fn route_fit(
         if let Some(capability) =
             first_matching_capability(&capabilities, &["cheap", "low-cost", "fast", "simple-chat"])
         {
-            raw_adjustment = raw_adjustment.saturating_sub(max_bonus);
+            raw_adjustment = raw_adjustment.saturating_sub(general_capability_bonus);
             push_unique(&mut snapshot.matched_capabilities, capability);
         }
         if first_matching_capability(&capabilities, &["premium", "expensive"]).is_some() {
@@ -360,6 +389,7 @@ fn general_profile() -> TaskProfile {
         reasoning: false,
         long_context: false,
         simple_chat: false,
+        agentic_tools: false,
         explicit: false,
         signals: Vec::new(),
     }
@@ -471,4 +501,35 @@ mod tests {
         assert_eq!(fit.snapshot.adjustment, 0);
         assert!(fit.exclusion_reason.is_none());
     }
+
+    #[test]
+    fn claude_code_agentic_signal_prefers_verified_tool_loop_routes() {
+        let body = json!({
+            "llmgateway_task":"coding",
+            "llmgateway_agentic_tool_loop":true,
+            "tools":[{"type":"function","function":{"name":"read_file"}}],
+            "tool_choice":"auto",
+            "messages":[{"role":"user","content":"inspect and fix this repository"}]
+        });
+        let profile = classify(Some(&body), &config());
+        assert!(profile.agentic_tools);
+        assert!(profile.signals.iter().any(|signal| signal == "agentic_tool_loop"));
+
+        let verified = route_fit(
+            &profile,
+            &route(&["coding", "claude-code-tool-loop-verified"], None),
+            &config(),
+        );
+        let merely_coding = route_fit(&profile, &route(&["coding"], None), &config());
+        assert!(
+            verified.snapshot.adjustment < merely_coding.snapshot.adjustment,
+            "verified autonomous tool-loop capability must outrank generic coding capability"
+        );
+        assert!(verified
+            .snapshot
+            .matched_capabilities
+            .iter()
+            .any(|capability| capability == "claude-code-tool-loop-verified"));
+    }
+
 }
