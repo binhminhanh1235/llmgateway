@@ -513,7 +513,10 @@ mod tests {
         });
         let profile = classify(Some(&body), &config());
         assert!(profile.agentic_tools);
-        assert!(profile.signals.iter().any(|signal| signal == "agentic_tool_loop"));
+        assert!(profile
+            .signals
+            .iter()
+            .any(|signal| signal == "agentic_tool_loop"));
 
         let verified = route_fit(
             &profile,
@@ -531,5 +534,4 @@ mod tests {
             .iter()
             .any(|capability| capability == "claude-code-tool-loop-verified"));
     }
-
 }
