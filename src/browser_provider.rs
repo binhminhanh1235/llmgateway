@@ -2539,6 +2539,7 @@ fn wrap_response_with_browser_guard(
 #[derive(Clone)]
 struct HttpBrowserAdapter {
     client: Client,
+    streaming_client: Client,
 }
 
 impl HttpBrowserAdapter {
@@ -2548,7 +2549,14 @@ impl HttpBrowserAdapter {
             .timeout(Duration::from_secs(600))
             .build()
             .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
-        Ok(Self { client })
+        let streaming_client = Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|error| BrowserProviderError::Transport(error.to_string()))?;
+        Ok(Self {
+            client,
+            streaming_client,
+        })
     }
 }
 
@@ -2597,8 +2605,16 @@ impl BrowserProviderAdapter for HttpBrowserAdapter {
             "{}/chat/completions",
             request.provider.base_url.trim_end_matches('/')
         );
-        let mut upstream = self
-            .client
+        let client = if upstream_body
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            &self.streaming_client
+        } else {
+            &self.client
+        };
+        let mut upstream = client
             .post(url)
             .header(CONTENT_TYPE, "application/json")
             .header("x-llmgateway-browser-session", &request.session_id)
@@ -4161,7 +4177,13 @@ fn incremental_browser_body(body: &Value, unsynced_messages: &[Value]) -> Value 
     }
     let start = messages
         .iter()
-        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        .and_then(|index| (index + 1 < messages.len()).then_some(index + 1))
+        .or_else(|| {
+            messages
+                .iter()
+                .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        })
         .unwrap_or(messages.len() - 1);
     let mut delta = unsynced_messages.to_vec();
     delta.extend_from_slice(&messages[start..]);
@@ -5388,6 +5410,35 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn incremental_browser_body_sends_only_tool_result_after_native_assistant() {
+        let body = json!({
+            "model": "deepseek-web-default",
+            "messages": [
+                {"role":"user","content":"inspect the repository"},
+                {
+                    "role":"assistant",
+                    "content":null,
+                    "tool_calls":[{
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"read_file","arguments":"{\"path\":\"Cargo.toml\"}"}
+                    }]
+                },
+                {"role":"tool","tool_call_id":"call_1","content":"[package]\nname=\"llmgateway\""}
+            ],
+            "stream": true
+        });
+        let delta = incremental_browser_body(&body, &[]);
+        assert_eq!(
+            delta["messages"],
+            json!([
+                {"role":"tool","tool_call_id":"call_1","content":"[package]\nname=\"llmgateway\""}
+            ])
+        );
+    }
+
 
     #[test]
     fn browser_stream_progress_heartbeat_advances_without_output_events() {
