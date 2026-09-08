@@ -1001,7 +1001,7 @@ fn anthropic_gateway_error(error: GatewayError) -> Response<Body> {
 
 fn anthropic_error_type_for_status(status: StatusCode) -> &'static str {
     match status.as_u16() {
-        400 => "invalid_request_error",
+        400 | 409 => "invalid_request_error",
         401 => "authentication_error",
         403 => "permission_error",
         404 => "not_found_error",
@@ -1851,6 +1851,49 @@ enabled = true
         assert_eq!(body["error"]["type"], "request_too_large");
         assert_eq!(body["request_id"], header_request_id);
         let _ = fs::remove_file(&temp_db);
+    }
+
+
+    #[tokio::test]
+    async fn anthropic_upstream_error_matrix_preserves_http_and_wording() {
+        let cases = [
+            (400u16, "invalid_request_error"),
+            (401u16, "authentication_error"),
+            (403u16, "permission_error"),
+            (409u16, "invalid_request_error"),
+            (413u16, "request_too_large"),
+            (429u16, "rate_limit_error"),
+            (500u16, "api_error"),
+            (504u16, "api_error"),
+            (529u16, "overloaded_error"),
+        ];
+
+        for (status, expected_type) in cases {
+            let message = format!("upstream-{status}: preserve capability_rejected: detail");
+            let request_id = format!("req_{status}");
+            let response = anthropic_gateway_error(GatewayError::Execution {
+                request_id: request_id.clone(),
+                source: Box::new(GatewayError::Upstream {
+                    status: StatusCode::from_u16(status).unwrap(),
+                    body: message.clone(),
+                }),
+            });
+            assert_eq!(response.status().as_u16(), status);
+            assert_eq!(
+                response.headers().get("request-id").unwrap(),
+                request_id.as_str()
+            );
+            assert_eq!(
+                response.headers().get("x-llmgateway-request-id").unwrap(),
+                request_id.as_str()
+            );
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["type"], "error");
+            assert_eq!(body["error"]["type"], expected_type);
+            assert_eq!(body["error"]["message"], message);
+            assert_eq!(body["request_id"], request_id);
+        }
     }
 
 }
