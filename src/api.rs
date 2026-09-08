@@ -1633,6 +1633,30 @@ default_model = "model-a"
 
 [storage]
 database_url = "sqlite://{temp_db}"
+
+[[providers]]
+id = "p1"
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:9"
+
+[[accounts]]
+id = "a1"
+provider = "p1"
+api_key_env = "UPSTREAM_KEY"
+enabled = true
+
+[[routes]]
+id = "route-a"
+account = "a1"
+model = "model-a"
+enabled = true
+
+[virtual_models.model-a]
+enabled = true
+
+[[virtual_models.model-a.tiers]]
+priority = 1
+models = ["p1/model-a"]
 "#
             ))
             .unwrap(),
@@ -1697,7 +1721,7 @@ port = 7331
 
 [api]
 key_env = "LLMGATEWAY_API_KEY"
-default_model = "p1/model-a"
+default_model = "test-default"
 
 [storage]
 database_url = "sqlite://{temp_db}"
@@ -1718,6 +1742,13 @@ id = "route-a"
 account = "a1"
 model = "model-a"
 enabled = true
+
+[virtual_models.test-default]
+enabled = true
+
+[[virtual_models.test-default.tiers]]
+priority = 1
+models = ["p1/model-a"]
 "#
             ))
             .unwrap(),
