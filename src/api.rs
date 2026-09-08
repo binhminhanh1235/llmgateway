@@ -414,7 +414,8 @@ pub async fn anthropic_messages(
         Err(error) => return anthropic_client_policy_error(error, &boundary_request_id),
     };
 
-    if claude.session_id.is_some() || claude.agent_id.is_some() || claude.parent_agent_id.is_some() {
+    if claude.session_id.is_some() || claude.agent_id.is_some() || claude.parent_agent_id.is_some()
+    {
         tracing::debug!(
             request_id = %boundary_request_id,
             claude_code_session_id = claude.session_id.as_deref().unwrap_or(""),
@@ -531,7 +532,6 @@ pub async fn anthropic_messages(
         Err(error) => anthropic_gateway_error(error),
     }
 }
-
 
 pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response<Body> {
     let access = match authorize_client(&headers, &state) {
@@ -830,18 +830,10 @@ fn anthropic_json_rejection(rejection: JsonRejection, request_id: &str) -> Respo
         );
     }
     let message = normalize_json_rejection_message(&rejection.body_text());
-    anthropic_error(
-        status,
-        "invalid_request_error",
-        &message,
-        request_id,
-    )
+    anthropic_error(status, "invalid_request_error", &message, request_id)
 }
 
-fn anthropic_client_policy_error(
-    error: ClientPolicyError,
-    request_id: &str,
-) -> Response<Body> {
+fn anthropic_client_policy_error(error: ClientPolicyError, request_id: &str) -> Response<Body> {
     match error {
         ClientPolicyError::Unauthorized => anthropic_error(
             StatusCode::UNAUTHORIZED,
@@ -1051,7 +1043,6 @@ fn anthropic_error(
         request_id,
     )
 }
-
 
 pub(crate) fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), Response<Body>> {
     if presented_api_key(headers) == Some(expected) {
@@ -1357,8 +1348,8 @@ mod tests {
     use axum::body::to_bytes;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::{collections::HashSet, fs};
-    use uuid::Uuid;
     use tower::ServiceExt;
+    use uuid::Uuid;
 
     #[test]
     fn classified_model_binding_conflict_preserves_http_409() {
@@ -1607,7 +1598,10 @@ models = ["p1/model-disabled"]
             HeaderValue::from_static("agent-parent"),
         );
         let context = ClaudeCodeRequestContext::from_headers(&headers);
-        assert_eq!(context.thread_id().as_deref(), Some("claude-code:session-a"));
+        assert_eq!(
+            context.thread_id().as_deref(),
+            Some("claude-code:session-a")
+        );
         assert_eq!(context.agent_id.as_deref(), Some("agent-b"));
         assert_eq!(context.parent_agent_id.as_deref(), Some("agent-parent"));
 
@@ -1659,7 +1653,12 @@ database_url = "sqlite://{temp_db}"
             .await
             .unwrap();
         assert_eq!(
-            store.context("claude-code:a").await.unwrap().sticky_route.as_deref(),
+            store
+                .context("claude-code:a")
+                .await
+                .unwrap()
+                .sticky_route
+                .as_deref(),
             Some("route-a")
         );
         assert_eq!(
@@ -1679,16 +1678,13 @@ database_url = "sqlite://{temp_db}"
             }),
         });
         assert_eq!(response.status().as_u16(), 529);
-        assert_eq!(
-            response.headers().get("request-id").unwrap(),
-            "req_529"
-        );
+        assert_eq!(response.headers().get("request-id").unwrap(), "req_529");
 
-        let capability =
-            anthropic_gateway_error(GatewayError::BrowserAdapterIncompatible("tools unsupported".into()));
+        let capability = anthropic_gateway_error(GatewayError::BrowserAdapterIncompatible(
+            "tools unsupported".into(),
+        ));
         assert_eq!(capability.status(), StatusCode::BAD_GATEWAY);
     }
-
 
     async fn anthropic_protocol_test_state(temp_db: &str) -> AppState {
         let config = Arc::new(
@@ -1740,15 +1736,8 @@ enabled = true
             .await
             .unwrap(),
         );
-        let gateway = Arc::new(
-            Gateway::new(
-                config,
-                live_config,
-                catalog.clone(),
-                execution_traces,
-            )
-            .unwrap(),
-        );
+        let gateway =
+            Arc::new(Gateway::new(config, live_config, catalog.clone(), execution_traces).unwrap());
         AppState {
             gateway,
             catalog,
@@ -1765,10 +1754,9 @@ enabled = true
         let app = axum::Router::new()
             .route(
                 "/v1/messages",
-                axum::routing::post(anthropic_messages)
-                    .layer(axum::extract::DefaultBodyLimit::max(
-                        ANTHROPIC_MAX_REQUEST_BODY_BYTES,
-                    )),
+                axum::routing::post(anthropic_messages).layer(
+                    axum::extract::DefaultBodyLimit::max(ANTHROPIC_MAX_REQUEST_BODY_BYTES),
+                ),
             )
             .with_state(state);
 
@@ -1853,7 +1841,6 @@ enabled = true
         let _ = fs::remove_file(&temp_db);
     }
 
-
     #[tokio::test]
     async fn anthropic_upstream_error_matrix_preserves_http_and_wording() {
         let cases = [
@@ -1895,5 +1882,4 @@ enabled = true
             assert_eq!(body["request_id"], request_id);
         }
     }
-
 }
