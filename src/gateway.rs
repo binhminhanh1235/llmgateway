@@ -1481,7 +1481,7 @@ fn normalized_status_failure(
             FailureScope::Account,
             "provider rate limit reached",
         ),
-        503 => ExecutionFailure::new(
+        503 | 529 => ExecutionFailure::new(
             FailureClass::UpstreamOverloaded,
             true,
             ReplaySafety::ProbablySafe,
@@ -1805,6 +1805,36 @@ mod stream_trace_tests {
         assert_eq!(overloaded.class, FailureClass::UpstreamOverloaded);
         assert_eq!(overloaded.replay_safety, ReplaySafety::ProbablySafe);
         assert!(overloaded.retryable);
+
+        let anthropic_overloaded = normalized_status_failure(
+            StatusCode::from_u16(529).unwrap(),
+            "overloaded",
+            "gemini-web",
+            "account-a",
+            "gemini-pro",
+            "direct-http",
+            false,
+        );
+        assert_eq!(anthropic_overloaded.class, FailureClass::UpstreamOverloaded);
+        assert!(anthropic_overloaded.retryable);
+
+        for status in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            let transient = normalized_status_failure(
+                status,
+                "transient upstream failure",
+                "api-provider",
+                "account-a",
+                "model-a",
+                "direct-http",
+                false,
+            );
+            assert!(transient.retryable, "{status} should remain failover-retryable");
+            assert_eq!(transient.replay_safety, ReplaySafety::ProbablySafe);
+        }
 
         let not_implemented = normalized_status_failure(
             StatusCode::NOT_IMPLEMENTED,
