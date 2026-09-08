@@ -1832,7 +1832,10 @@ mod stream_trace_tests {
                 "direct-http",
                 false,
             );
-            assert!(transient.retryable, "{status} should remain failover-retryable");
+            assert!(
+                transient.retryable,
+                "{status} should remain failover-retryable"
+            );
             assert_eq!(transient.replay_safety, ReplaySafety::ProbablySafe);
         }
 
