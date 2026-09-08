@@ -5439,7 +5439,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn browser_stream_progress_heartbeat_advances_without_output_events() {
         let mut last = None;
