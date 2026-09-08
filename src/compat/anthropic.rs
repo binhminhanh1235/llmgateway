@@ -873,7 +873,7 @@ mod tests {
         let ping = stream.next().await.expect("ping").unwrap();
         let ping = String::from_utf8_lossy(&ping);
         assert!(ping.contains("event: ping"));
-        assert!(ping.contains(r#"\"type\":\"ping\""#));
+        assert!(ping.contains(r#""type":"ping""#));
     }
 
     #[tokio::test]
@@ -918,7 +918,7 @@ mod tests {
             .map(|event| String::from_utf8_lossy(&event.unwrap()).into_owned())
             .collect::<String>();
         assert!(rendered.contains("event: error"));
-        assert!(rendered.contains(r#"\"request_id\":\"req_truncated\""#));
+        assert!(rendered.contains(r#""request_id":"req_truncated""#));
         assert!(!rendered.contains("event: message_stop"));
     }
 
