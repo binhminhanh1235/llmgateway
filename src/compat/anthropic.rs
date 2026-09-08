@@ -1,7 +1,13 @@
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use serde_json::{json, Map, Value};
-use std::{collections::BTreeMap, convert::Infallible};
+use std::{
+    collections::BTreeMap,
+    convert::Infallible,
+    fmt::Display,
+    time::Duration,
+};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -188,12 +194,37 @@ pub fn from_openai_response(openai: &Value, requested_model: &str) -> Value {
     })
 }
 
+pub const ANTHROPIC_STREAM_PING_INTERVAL: Duration = Duration::from_secs(20);
+
 pub fn openai_stream_to_anthropic(
     response: reqwest::Response,
     requested_model: String,
-) -> impl futures_util::Stream<Item = Result<Bytes, Infallible>> {
+    request_id: String,
+) -> impl Stream<Item = Result<Bytes, Infallible>> {
+    openai_stream_to_anthropic_inner(
+        response.bytes_stream(),
+        requested_model,
+        request_id,
+        ANTHROPIC_STREAM_PING_INTERVAL,
+    )
+}
+
+fn openai_stream_to_anthropic_inner<S, E>(
+    upstream: S,
+    requested_model: String,
+    request_id: String,
+    ping_interval: Duration,
+) -> impl Stream<Item = Result<Bytes, Infallible>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Display + Send + 'static,
+{
     async_stream::stream! {
         let message_id = format!("msg_{}", Uuid::new_v4());
+        let mut upstream = Box::pin(upstream);
+        let ping_timer = tokio::time::sleep(ping_interval);
+        tokio::pin!(ping_timer);
+
         yield Ok(event("message_start", json!({
             "type": "message_start",
             "message": {
@@ -208,16 +239,29 @@ pub fn openai_stream_to_anthropic(
             }
         })));
 
-        let mut upstream = response.bytes_stream();
         let mut buffer = String::new();
         let mut next_block_index = 0usize;
         let mut text_block: Option<usize> = None;
         let mut tools: BTreeMap<usize, ToolStreamState> = BTreeMap::new();
         let mut stop_reason = "end_turn".to_string();
         let mut output_tokens = 0u64;
-        let mut saw_done = false;
+        let mut saw_terminal = false;
 
-        while let Some(item) = upstream.next().await {
+        'upstream: loop {
+            let item = tokio::select! {
+                _ = &mut ping_timer => {
+                    yield Ok(event("ping", json!({"type":"ping"})));
+                    ping_timer.as_mut().reset(Instant::now() + ping_interval);
+                    continue;
+                }
+                item = upstream.next() => item,
+            };
+
+            let Some(item) = item else {
+                break;
+            };
+            ping_timer.as_mut().reset(Instant::now() + ping_interval);
+
             match item {
                 Ok(bytes) => {
                     buffer.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
@@ -226,16 +270,13 @@ pub fn openai_stream_to_anthropic(
                         buffer.drain(..pos + 2);
                         let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) else { continue; };
                         if data == "[DONE]" {
-                            saw_done = true;
-                            continue;
+                            saw_terminal = true;
+                            break 'upstream;
                         }
                         let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue; };
 
                         if let Some(message) = openai_stream_error_message(&chunk) {
-                            yield Ok(event("error", json!({
-                                "type":"error",
-                                "error":{"type":"api_error","message":message}
-                            })));
+                            yield Ok(anthropic_stream_error(&request_id, &message));
                             return;
                         }
 
@@ -244,12 +285,14 @@ pub fn openai_stream_to_anthropic(
                         }
 
                         let Some(choice) = chunk.get("choices").and_then(Value::as_array).and_then(|items| items.first()) else { continue; };
+                        let mut terminal_in_frame = false;
                         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
                             stop_reason = match reason {
                                 "tool_calls" => "tool_use".into(),
                                 "length" => "max_tokens".into(),
                                 _ => "end_turn".into(),
                             };
+                            terminal_in_frame = true;
                         }
 
                         let delta = choice.get("delta").unwrap_or(&Value::Null);
@@ -318,26 +361,27 @@ pub fn openai_stream_to_anthropic(
                                 }
                             }
                         }
+
+                        if terminal_in_frame {
+                            saw_terminal = true;
+                            break 'upstream;
+                        }
                     }
                 }
                 Err(error) => {
-                    yield Ok(event("error", json!({
-                        "type":"error",
-                        "error":{"type":"api_error","message":error.to_string()}
-                    })));
+                    yield Ok(anthropic_stream_error(&request_id, &error.to_string()));
                     return;
                 }
             }
         }
 
-        if !saw_done {
-            yield Ok(event("error", json!({
-                "type":"error",
-                "error":{
-                    "type":"api_error",
-                    "message":"upstream stream ended before terminal [DONE] frame"
-                }
-            })));
+        if !saw_terminal {
+            let message = if buffer.trim().is_empty() {
+                "upstream stream ended before a terminal finish_reason or [DONE] frame"
+            } else {
+                "upstream stream ended with a malformed or truncated terminal frame"
+            };
+            yield Ok(anthropic_stream_error(&request_id, message));
             return;
         }
 
@@ -359,6 +403,17 @@ pub fn openai_stream_to_anthropic(
         })));
         yield Ok(event("message_stop", json!({"type":"message_stop"})));
     }
+}
+
+fn anthropic_stream_error(request_id: &str, message: &str) -> Bytes {
+    event(
+        "error",
+        json!({
+            "type":"error",
+            "error":{"type":"api_error","message":message},
+            "request_id":request_id
+        }),
+    )
 }
 
 fn openai_stream_error_message(chunk: &Value) -> Option<String> {
@@ -798,4 +853,72 @@ mod tests {
         assert_eq!(openai["messages"][4]["content"], "");
         assert_eq!(openai["messages"][5]["content"], "");
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn emits_anthropic_ping_during_silent_gap() {
+        let upstream =
+            futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        let stream = openai_stream_to_anthropic_inner(
+            upstream,
+            "model".into(),
+            "req_ping".into(),
+            Duration::from_secs(20),
+        );
+        tokio::pin!(stream);
+
+        let start = stream.next().await.expect("message_start").unwrap();
+        assert!(String::from_utf8_lossy(&start).contains("event: message_start"));
+
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let ping = stream.next().await.expect("ping").unwrap();
+        let ping = String::from_utf8_lossy(&ping);
+        assert!(ping.contains("event: ping"));
+        assert!(ping.contains("\\"type\\":\\"ping\\""));
+    }
+
+    #[tokio::test]
+    async fn terminal_finish_reason_does_not_require_done_frame() {
+        let upstream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            Bytes::from(
+                "data: {\\"choices\\":[{\\"delta\\":{\\"content\\":\\"done\\"},\\"finish_reason\\":\\"stop\\"}]}\\n\\n",
+            ),
+        )]);
+        let events = openai_stream_to_anthropic_inner(
+            upstream,
+            "model".into(),
+            "req_terminal".into(),
+            Duration::from_secs(20),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let rendered = events
+            .into_iter()
+            .map(|event| String::from_utf8_lossy(&event.unwrap()).into_owned())
+            .collect::<String>();
+        assert!(rendered.contains("event: message_stop"));
+        assert!(!rendered.contains("event: error"));
+    }
+
+    #[tokio::test]
+    async fn malformed_or_truncated_stream_errors_without_message_stop() {
+        let upstream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            Bytes::from("data: {\\"choices\\":["),
+        )]);
+        let events = openai_stream_to_anthropic_inner(
+            upstream,
+            "model".into(),
+            "req_truncated".into(),
+            Duration::from_secs(20),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let rendered = events
+            .into_iter()
+            .map(|event| String::from_utf8_lossy(&event.unwrap()).into_owned())
+            .collect::<String>();
+        assert!(rendered.contains("event: error"));
+        assert!(rendered.contains("\\"request_id\\":\\"req_truncated\\""));
+        assert!(!rendered.contains("event: message_stop"));
+    }
+
 }
