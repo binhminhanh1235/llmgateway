@@ -22,6 +22,7 @@ use futures_util::TryStreamExt;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
