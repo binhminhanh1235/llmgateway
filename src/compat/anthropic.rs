@@ -1,12 +1,7 @@
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use serde_json::{json, Map, Value};
-use std::{
-    collections::BTreeMap,
-    convert::Infallible,
-    fmt::Display,
-    time::Duration,
-};
+use std::{collections::BTreeMap, convert::Infallible, fmt::Display, time::Duration};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -856,8 +851,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn emits_anthropic_ping_during_silent_gap() {
-        let upstream =
-            futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        let upstream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
         let stream = openai_stream_to_anthropic_inner(
             upstream,
             "model".into(),
@@ -878,12 +872,11 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_finish_reason_does_not_require_done_frame() {
-        let upstream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
-            Bytes::from(concat!(
+        let upstream =
+            futures_util::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(concat!(
                 r#"data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}"#,
                 "\n\n",
-            )),
-        )]);
+            )))]);
         let events = openai_stream_to_anthropic_inner(
             upstream,
             "model".into(),
@@ -902,9 +895,9 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_or_truncated_stream_errors_without_message_stop() {
-        let upstream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
-            Bytes::from(r#"data: {"choices":["#),
-        )]);
+        let upstream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
+            r#"data: {"choices":["#,
+        ))]);
         let events = openai_stream_to_anthropic_inner(
             upstream,
             "model".into(),
@@ -921,7 +914,6 @@ mod tests {
         assert!(rendered.contains(r#""request_id":"req_truncated""#));
         assert!(!rendered.contains("event: message_stop"));
     }
-
 
     #[test]
     fn preserves_max_tokens_and_long_tool_history_over_twenty_turns() {
@@ -993,5 +985,4 @@ mod tests {
         assert!(rendered.contains("forced transient failure"));
         assert!(!rendered.contains("event: message_stop"));
     }
-
 }
