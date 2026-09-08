@@ -101,6 +101,11 @@ jobs:
             [ref]$tokens,
             [ref]$errors
           )
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/live-claude-code-compat.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
           if ($errors.Count -gt 0) {
             $errors | ForEach-Object { Write-Error $_ }
             exit 1
