@@ -62,8 +62,10 @@ use admin_api::{set_account, set_account_model, set_model};
 use api::{
     admin_account_models, admin_accounts, admin_models, admin_refresh_account_models,
     anthropic_messages, health, models, openai_chat, openai_responses, AppState,
+    ANTHROPIC_MAX_REQUEST_BODY_BYTES,
 };
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{get, post},
     Router,
 };
@@ -393,7 +395,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ui/trace-console.js", get(trace_console_js))
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/responses", post(openai_responses))
-        .route("/v1/messages", post(anthropic_messages))
+        .route(
+            "/v1/messages",
+            post(anthropic_messages)
+                .layer(DefaultBodyLimit::max(ANTHROPIC_MAX_REQUEST_BODY_BYTES)),
+        )
         .route("/v1/models", get(models))
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route(
