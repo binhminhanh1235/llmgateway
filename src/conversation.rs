@@ -219,6 +219,27 @@ impl ConversationStore {
         self.thread(&id).await
     }
 
+    pub async fn ensure_compatibility_thread(
+        &self,
+        id: &str,
+        title: &str,
+        model: &str,
+    ) -> Result<ThreadContext, ConversationError> {
+        sqlx::query(
+            "INSERT INTO threads (id, title, model)
+             VALUES (?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               model = excluded.model,
+               updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(model)
+        .execute(&self.pool)
+        .await?;
+        self.context(id).await
+    }
+
     pub async fn list_threads(&self) -> Result<Vec<ThreadSummary>, ConversationError> {
         let rows = sqlx::query(
             "SELECT t.id, t.title, t.model, t.sticky_route, t.created_at, t.updated_at,
