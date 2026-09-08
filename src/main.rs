@@ -397,8 +397,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/responses", post(openai_responses))
         .route(
             "/v1/messages",
-            post(anthropic_messages)
-                .layer(DefaultBodyLimit::max(ANTHROPIC_MAX_REQUEST_BODY_BYTES)),
+            post(anthropic_messages).layer(DefaultBodyLimit::max(ANTHROPIC_MAX_REQUEST_BODY_BYTES)),
         )
         .route("/v1/models", get(models))
         .route("/v1/threads", get(list_threads).post(create_thread))
