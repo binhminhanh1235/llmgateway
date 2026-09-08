@@ -921,4 +921,76 @@ mod tests {
         assert!(!rendered.contains("event: message_stop"));
     }
 
+
+    #[test]
+    fn preserves_max_tokens_and_long_tool_history_over_twenty_turns() {
+        let mut messages = Vec::new();
+        messages.push(json!({"role":"user","content":"inspect the repository"}));
+        for turn in 0..24 {
+            let tool_id = format!("toolu_{turn}");
+            messages.push(json!({
+                "role":"assistant",
+                "content":[{
+                    "type":"tool_use",
+                    "id":tool_id,
+                    "name":"read_file",
+                    "input":{"path":format!("src/file_{turn}.rs")}
+                }]
+            }));
+            messages.push(json!({
+                "role":"user",
+                "content":[{
+                    "type":"tool_result",
+                    "tool_use_id":format!("toolu_{turn}"),
+                    "content":format!("fixture result {turn}")
+                }]
+            }));
+        }
+        let request = json!({
+            "model":"llmgateway-coding",
+            "max_tokens":4096,
+            "stream":true,
+            "messages":messages,
+            "tools":[{
+                "name":"read_file",
+                "description":"Read",
+                "input_schema":{"type":"object","properties":{"path":{"type":"string"}}}
+            }],
+            "tool_choice":{"type":"auto","disable_parallel_tool_use":true}
+        });
+        let (_, openai) = to_openai_request(&request).unwrap();
+        assert_eq!(openai["max_tokens"], 4096);
+        assert_eq!(openai["stream"], true);
+        assert_eq!(openai["tool_choice"], "auto");
+        assert_eq!(openai["parallel_tool_calls"], false);
+        assert!(
+            openai["messages"].as_array().unwrap().len() >= 49,
+            "20+ sequential Anthropic tool/model turns must remain representable"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_error_frame_never_becomes_message_stop_success() {
+        let upstream = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            Bytes::from(
+                "data: {\"error\":{\"type\":\"upstream_stream_error\",\"message\":\"forced transient failure\"}}\n\n",
+            ),
+        )]);
+        let events = openai_stream_to_anthropic_inner(
+            upstream,
+            "model".into(),
+            "req_stream_error".into(),
+            Duration::from_secs(20),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let rendered = events
+            .into_iter()
+            .map(|event| String::from_utf8_lossy(&event.unwrap()).into_owned())
+            .collect::<String>();
+        assert!(rendered.contains("event: error"));
+        assert!(rendered.contains("forced transient failure"));
+        assert!(!rendered.contains("event: message_stop"));
+    }
+
 }
