@@ -1347,6 +1347,7 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use std::{collections::HashSet, fs};
     use uuid::Uuid;
+    use tower::ServiceExt;
 
     #[test]
     fn classified_model_binding_conflict_preserves_http_409() {
@@ -1675,6 +1676,170 @@ database_url = "sqlite://{temp_db}"
         let capability =
             anthropic_gateway_error(GatewayError::BrowserAdapterIncompatible("tools unsupported".into()));
         assert_eq!(capability.status(), StatusCode::BAD_GATEWAY);
+    }
+
+
+    async fn anthropic_protocol_test_state(temp_db: &str) -> AppState {
+        let config = Arc::new(
+            AppConfig::parse(&format!(
+                r#"
+[server]
+host = "127.0.0.1"
+port = 7331
+
+[api]
+key_env = "LLMGATEWAY_API_KEY"
+default_model = "p1/model-a"
+
+[storage]
+database_url = "sqlite://{temp_db}"
+
+[[providers]]
+id = "p1"
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:9"
+
+[[accounts]]
+id = "a1"
+provider = "p1"
+api_key_env = "UPSTREAM_KEY"
+enabled = true
+
+[[routes]]
+id = "route-a"
+account = "a1"
+model = "model-a"
+enabled = true
+"#
+            ))
+            .unwrap(),
+        );
+        let live_config = LiveConfig::new(config.clone());
+        let catalog = Arc::new(ModelCatalog::connect(live_config.clone()).await.unwrap());
+        let conversations = Arc::new(ConversationStore::connect(config.clone()).await.unwrap());
+        let execution_traces =
+            Arc::new(ExecutionTraceStore::connect(config.clone()).await.unwrap());
+        let gateway_api_key = Arc::new("test-key".to_string());
+        let client_policies = Arc::new(
+            ClientPolicyStore::connect(
+                config.clone(),
+                live_config.clone(),
+                gateway_api_key.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+        let gateway = Arc::new(
+            Gateway::new(
+                config,
+                live_config,
+                catalog.clone(),
+                execution_traces,
+            )
+            .unwrap(),
+        );
+        AppState {
+            gateway,
+            catalog,
+            conversations,
+            gateway_api_key,
+            client_policies,
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_accepts_body_larger_than_axum_default_limit() {
+        let temp_db = format!("/tmp/llmgateway-anthropic-large-{}.db", Uuid::new_v4());
+        let state = anthropic_protocol_test_state(&temp_db).await;
+        let app = axum::Router::new()
+            .route(
+                "/v1/messages",
+                axum::routing::post(anthropic_messages)
+                    .layer(axum::extract::DefaultBodyLimit::max(
+                        ANTHROPIC_MAX_REQUEST_BODY_BYTES,
+                    )),
+            )
+            .with_state(state);
+
+        let padding = "x".repeat(2 * 1024 * 1024 + 64 * 1024);
+        let payload = json!({
+            "model":"p1/model-a",
+            "max_tokens":16,
+            "messages":[{"role":"user","content":"hello"}],
+            "future_optional_field":padding
+        })
+        .to_string();
+        assert!(payload.len() > 2 * 1024 * 1024);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a >2 MB body must reach the Anthropic handler instead of Axum's default 2 MB rejection"
+        );
+        assert!(response.headers().get("request-id").is_some());
+        let _ = fs::remove_file(&temp_db);
+    }
+
+    #[tokio::test]
+    async fn anthropic_payload_too_large_uses_error_envelope_and_request_id() {
+        let temp_db = format!("/tmp/llmgateway-anthropic-413-{}.db", Uuid::new_v4());
+        let state = anthropic_protocol_test_state(&temp_db).await;
+        let app = axum::Router::new()
+            .route(
+                "/v1/messages",
+                axum::routing::post(anthropic_messages)
+                    .layer(axum::extract::DefaultBodyLimit::max(128)),
+            )
+            .with_state(state);
+
+        let payload = json!({
+            "model":"p1/model-a",
+            "max_tokens":16,
+            "messages":[{"role":"user","content":"x".repeat(512)}]
+        })
+        .to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let header_request_id = response
+            .headers()
+            .get("request-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            response.headers().get("x-llmgateway-request-id").unwrap(),
+            header_request_id.as_str()
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "request_too_large");
+        assert_eq!(body["request_id"], header_request_id);
+        let _ = fs::remove_file(&temp_db);
     }
 
 }
